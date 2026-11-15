@@ -242,6 +242,10 @@ jobs:
           node js/golden/diff.mjs js/golden/world-objects-ref.png golden-native-world-objects.png golden-diff-world-objects.png | tee world-objects-golden.json
           echo "::notice title=world-objects golden (MAE vs browser r170)::$(cat world-objects-golden.json)"
           { echo "world-objects golden: $(cat world-objects-golden.json)"; cat world-objects-summary.txt; } >> "$GITHUB_STEP_SUMMARY"
+          # per-frame costs once the level has streamed in (no API validation; the paravirtual GPU's ms are not an Air's)
+          rc4=0; env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 60 > world-objects-cost.txt 2>&1 || rc4=$?
+          grep -E "world-objects:|three frame cost|three programs:|fps" world-objects-cost.txt | cut -c1-1500 > world-objects-cost-summary.txt
+          bash .github/annotate.sh notice "world-objects per-frame cost, frames 61-90 (exit $rc4)" world-objects-cost-summary.txt 20
       - name: real game 3d-world-objects - every program translates (src/xlat.rs) and compiles (Apple metal)
         if: ${{ !cancelled() }}
         continue-on-error: true
