@@ -879,7 +879,10 @@ impl PipelineBackend for Metal3 {
         autoreleasepool(|_| {
             let dev = &self.dev.0;
             let d = descriptor(job)?;
-            if let Some(a) = &self.archive {
+            // depth-only pipelines (shadow maps) stay out of the archive: Metal drops their fragment stage and then
+            // refuses to serialise the archive ("expecting 'fragment' stage in pipeline no. N", M2 Air, 2026-11-15)
+            let archive = self.archive.as_ref().filter(|_| job.key.target != Target::Depth);
+            if let Some(a) = archive {
                 let loaded = a.loaded.get_or_init(|| {
                     if !a.path.exists() {
                         return None;
@@ -902,7 +905,7 @@ impl PipelineBackend for Metal3 {
                 }
             }
             let p = dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string())?;
-            if let Some(a) = &self.archive {
+            if let Some(a) = archive {
                 a.missed.lock().unwrap_or_else(|e| e.into_inner()).push(Mt(d));
                 a.unsaved.fetch_add(1, Ordering::Relaxed);
             }
@@ -946,12 +949,41 @@ impl PipelineBackend for Metal3 {
             let tmp = a.path.with_extension(format!("{}.tmp", std::process::id()));
             let _ = std::fs::remove_file(&tmp);
             let url = NSURL::from_file_path(&tmp).ok_or("archive path is not a file URL")?;
-            ar.serializeToURL_error(&url).map_err(|e| format!("binary archive not serialised: {}", e.localizedDescription()))?;
-            std::fs::rename(&tmp, &a.path).map_err(|e| format!("binary archive not moved into place: {e}"))?;
+            if let Err(e) = ar.serializeToURL_error(&url) {
+                // one pipeline Metal cannot serialise must not cost the whole archive: rebuild it one descriptor
+                // at a time on top of the last file that serialised, leaving out each one that breaks it
+                let why = e.localizedDescription().to_string();
+                let _ = std::fs::remove_file(&tmp);
+                let good = a.path.with_extension(format!("{}.good.tmp", std::process::id()));
+                let _ = std::fs::remove_file(&good);
+                let reopen = |good: &std::path::Path| {
+                    let base = [good, a.path.as_path()].into_iter().find(|p| p.exists());
+                    base.and_then(|p| open_archive(dev, Some(p)).ok()).map_or_else(|| open_archive(dev, None), Ok)
+                };
+                let mut cand = reopen(&good).map_err(|e| format!("binary archive not created: {e}"))?;
+                added = 0;
+                for d in &missed {
+                    let ok = cand.addRenderPipelineFunctionsWithDescriptor_error(&d.0).is_ok() && cand.serializeToURL_error(&url).is_ok();
+                    if ok && std::fs::rename(&tmp, &good).is_ok() {
+                        added += 1;
+                    } else {
+                        let _ = std::fs::remove_file(&tmp);
+                        cand = reopen(&good).map_err(|e| format!("binary archive not created: {e}"))?;
+                    }
+                }
+                *w = Some(Mt(cand));
+                if added == 0 {
+                    return Err(format!("binary archive not serialised: {why} (none of {} pipelines could be kept)", missed.len()));
+                }
+                std::fs::rename(&good, &a.path).map_err(|e| format!("binary archive not moved into place: {e}"))?;
+                failed = Some(why);
+            } else {
+                std::fs::rename(&tmp, &a.path).map_err(|e| format!("binary archive not moved into place: {e}"))?;
+            }
             let bytes = std::fs::metadata(&a.path).map_or(0, |m| m.len());
             Ok(Some(format!(
                 "{added} pipelines added{} in {:.0} ms, {} KB at {}",
-                failed.map_or(String::new(), |e| format!(" ({} refused: {e})", missed.len() - added)),
+                failed.map_or(String::new(), |e| format!(" ({} left out: {e})", missed.len() - added)),
                 t.elapsed().as_secs_f64() * 1000.0,
                 bytes >> 10,
                 a.path.display()
