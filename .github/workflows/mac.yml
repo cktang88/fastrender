@@ -450,6 +450,8 @@ jobs:
             electron-*-spike.json
             electron-*.json
             electron-*.log
+            frame-loop*.txt
+            frame-loop.log
 
   # Why is the real game's JS 3-4x slower in the JavaScriptCore host than in Electron / node on this runner? The JS
   # alone (`fastrender jsbench`, no Metal) under JSC_* options and code-signing variants, vs node (V8) and bun (its own
