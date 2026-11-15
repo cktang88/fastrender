@@ -333,7 +333,7 @@ function decode(buf) {
     scene.remove(windows);
   }
 
-  // BatchedMesh: one draw per visible instance over its geometry range, plain program, the instance's world matrix
+  // BatchedMesh: three's batching program, one draw per multi-draw entry (gl_DrawID = base instance natively); more in 9.
   {
     const bm = new THREE.BatchedMesh(4, 200, 400, new THREE.MeshLambertMaterial());
     const box = bm.addGeometry(new THREE.BoxGeometry()), ball = bm.addGeometry(new THREE.SphereGeometry(0.5, 6, 4));
@@ -343,12 +343,12 @@ function decode(buf) {
     bm.position.y = 1; bm.updateMatrixWorld();
     scene.add(bm);
     r.render(scene, camera);
-    const objs = r._drawObjects.slice(0, r._nDraws).filter((o) => Object.getPrototypeOf(o) === bm);
-    assert.equal(objs.length, 2, 'two visible instances -> two draws');
-    assert.ok(near([...objs[1].matrixWorld.elements.slice(12, 15)], [3, 1, 0]), 'instance matrix x batch matrix');
+    const at = [];
+    r._drawObjects.slice(0, r._nDraws).forEach((o, i) => { if (o === bm) at.push(i); });
+    assert.equal(at.length, 2, 'two visible instances -> two draws');
     const fr2 = decode(h.cmd);
-    const key = h.programIds.get(h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.id === fr2.draws[r._drawObjects.indexOf(objs[0])].material).at(-1).meta.program);
-    assert.ok(!h.programs.get(key).vertex.includes('#define USE_BATCHING'), 'drawn with the plain program');
+    const key = h.programIds.get(h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.id === fr2.draws[at[0]].material).at(-1).meta.program);
+    assert.ok(h.programs.get(key).vertex.includes('#define USE_BATCHING'), "drawn with three's batching program");
     assert.ok(!r.info.unsupported.BatchedMesh, 'not skipped');
     scene.remove(bm);
   }
@@ -519,4 +519,31 @@ function decode(buf) {
   assert.notEqual(fr.draws[0].material, fr.draws[1].material, 'a uniform block per sprite (center is per object)');
   assert.equal(pts.geometry.attributes.normal, undefined, 'geometry not mutated (no computed normals)');
   console.log(`[three r${REV}] Sprite (per-object center), Points, LineSegments, Line (+ lineDistance) drawn with three's programs`);
+}
+
+// ------------------------------------------------------------------ 9. BatchedMesh: three's batching program, one draw per multi-draw entry
+{
+  const h = makeHost();
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20 });
+  const scene = new THREE.Scene();
+  const bm = new THREE.BatchedMesh(4, 200, 600, new THREE.MeshBasicMaterial());
+  const box = bm.addGeometry(new THREE.BoxGeometry()), ball = bm.addGeometry(new THREE.SphereGeometry(0.5, 6, 4));
+  const ids = [box, ball, box].map((gi, k) => { const id = bm.addInstance(gi); bm.setMatrixAt(id, new THREE.Matrix4().makeTranslation(k * 2 - 2, 0, 0)); bm.setColorAt(id, new THREE.Color(k === 1 ? 0xff0000 : 0x00ff00)); return id; });
+  bm.setVisibleAt(ids[2], false);
+  scene.add(bm);
+  const cam = new THREE.PerspectiveCamera(50, 1.6, 0.1, 50); cam.position.z = 6;
+  r.render(scene, cam);
+  const fr = decode(r.cmd);
+  assert.equal(fr.draws.length, 2, "one draw per visible entry");
+  assert.equal(fr.draws[0].material, fr.draws[1].material, 'one uniform block for the whole batch');
+  const prog = [...r._tp.programs.values()].find((p) => /#define USE_BATCHING\b/.test(p.vertex));
+  assert.ok(prog && /#define USE_BATCHING_COLOR\b/.test(prog.vertex), "three's batching program, with batch colours");
+  const names = prog.packer.textures.map((t) => t.name);
+  for (const n of ['batchingTexture', 'batchingIdTexture', 'batchingColorTexture']) assert.ok(names.includes(n), n);
+  const block = fr.blocks.get(fr.draws[0].material);
+  assert.ok(block.textures.every((t) => t !== 0), 'every batching texture bound');
+  const tex = h.uploads.filter((x) => x.kind === KIND.TEXTURE).map((x) => x.meta);
+  assert.ok(tex.some((m) => m.format === THREE.RedIntegerFormat && m.type === THREE.UnsignedIntType), 'the multi-draw indirection as an integer texture');
+  assert.deepEqual(Object.keys(r.info.unsupported), [], 'nothing counted');
+  console.log(`[three r${REV}] BatchedMesh: three's batching program (colours), one draw per multi-draw entry, one uniform block`);
 }

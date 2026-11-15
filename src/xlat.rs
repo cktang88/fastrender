@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 /// Bumped whenever the translation output (MSL or layout) can change, so stale cache entries are never used.
 /// The `xlat-N` part is bumped by hand when this module's output changes; the crate versions are checked against
 /// Cargo.lock by the `translator_version_matches_lockfile` test.
-pub const TRANSLATOR_VERSION: &str = "xlat-7 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
+pub const TRANSLATOR_VERSION: &str = "xlat-8 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
 
 pub const DEFAULT_BLOCK_BUFFER: u32 = 1;
 pub const OBJECT_BLOCK_BUFFER: u32 = 2;
@@ -80,6 +80,12 @@ pub const FRAME_BLOCK_SIZE: u32 = 144;
 ///    (three's `#define texture2D texture`: never seen by the parser) becomes [`RESERVED_PREFIX`]`<word>`, outside
 ///    `//` and `/* */` comments (tracked across lines), on every line rules 1-2 do not replace. Reflected names are
 ///    mapped back ([`demangle`]), so the layout keeps the game's names.
+/// 8. three's multi-draw fallback for BatchedMesh, the declaration `uniform int _gl_DrawID;` alone on its line, becomes
+///    `#define _gl_DrawID gl_BaseInstance`, and when the source `#define`s `USE_BATCHING` (three's batching programs:
+///    the declaration is in every vertex shader, inside `#ifdef USE_BATCHING`) the `#version` line becomes
+///    `#version 460` (gl_BaseInstance is core there):
+///    the draw index is the base instance of the draw (Metal `[[base_instance]]`; the native side draws each batch
+///    entry with base instance = its multi-draw index), so the uniform block stays shared by every entry.
 /// "Alone on its line": a trailing `// comment` is ignored (and dropped from a line rule 3 or 4 changes); after
 /// trimming whitespace the statement ends in `;`; the part before it is split on whitespace (names also on `,`).
 /// Line endings are normalised to `\n`.
@@ -88,14 +94,19 @@ pub fn normalize_glsl(src: &str) -> String {
     let (mut found_object, mut found_frame) = (false, false);
     let macros = defined_macros(src);
     let mut in_comment = false;
+    let (mut version_at, mut draw_id) = (None, false);
     for line in src.lines() {
         let t = line.trim();
         if t.starts_with("#version") {
+            version_at = Some(out.len());
             out.push("#version 450".into());
             continue;
         } else if t.starts_with("#extension") {
             out.push(String::new());
             continue;
+        }
+        if t == "#define _gl_DrawID gl_BaseInstance" {
+            draw_id = true; // (rule 8 already applied: idempotent)
         }
         let named = shader_name(line);
         let renamed = rename_reserved(named.as_deref().unwrap_or(line), &mut in_comment, &macros);
@@ -115,6 +126,10 @@ pub fn normalize_glsl(src: &str) -> String {
             continue;
         }
         match split_uniform(body) {
+            Some((None, "int", names)) if names == ["_gl_DrawID"] => {
+                draw_id = true;
+                out.push("#define _gl_DrawID gl_BaseInstance".into());
+            }
             Some((prec, ty, names)) => {
                 let mut keep = Vec::new();
                 let mut removed = false;
@@ -137,6 +152,9 @@ pub fn normalize_glsl(src: &str) -> String {
             }
             None => out.push(line.to_string()),
         }
+    }
+    if let (true, Some(v)) = (draw_id && macros.contains(&"USE_BATCHING"), version_at) {
+        out[v] = "#version 460".into();
     }
     if found_object || found_frame {
         let mut depth = 0i32;

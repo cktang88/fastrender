@@ -89,6 +89,9 @@ pub mod flag {
     pub const LINE_STRIP: u32 = 4096;
     /// drawn as a strip (Metal has no line loop; the closing segment is missing)
     pub const LINE_LOOP: u32 = 8192;
+    /// one entry of a BatchedMesh multi-draw: `instances` is the multi-draw index (three's gl_DrawID), drawn as the
+    /// base instance (xlat rule 8: `_gl_DrawID` -> gl_BaseInstance)
+    pub const BATCH: u32 = 16384;
 }
 
 pub mod light {
@@ -594,17 +597,28 @@ impl TextureMeta {
     pub fn min_filter_mips(&self) -> bool { matches!(self.min_filter, 1004 | 1005 | 1007 | 1008) }
 
     /// (channels, bytes per channel) of the pixel data, or None for formats the native side cannot take
+    /// An integer texture (`usampler2D` / `isampler2D` in the program): Some(true) unsigned, Some(false) signed.
+    pub fn integer(&self) -> Option<bool> {
+        match (self.format, self.ty) {
+            (1029 | 1031 | 1033, 1014) => Some(true),
+            (1029 | 1031 | 1033, 1013) => Some(false),
+            _ => None,
+        }
+    }
+
     pub fn texel(&self) -> Option<(usize, usize)> {
         let channels = match self.format {
-            1023 => 4,
-            1030 => 2,
-            1028 => 1,
+            1023 | 1033 => 4,
+            1030 | 1031 => 2,
+            1028 | 1029 => 1,
             _ => return None,
         };
         let bytes = match self.ty {
             1009 => 1,
             1016 => 2,
             1015 => 4,
+            // 32-bit integers: RedInteger / RGInteger / RGBAInteger (three's BatchedMesh batchingIdTexture)
+            1013 | 1014 if self.integer().is_some() => 4,
             _ => return None,
         };
         Some((channels, bytes))

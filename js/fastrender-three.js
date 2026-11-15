@@ -34,7 +34,7 @@ export const PASS_WORDS = 24;
 export const COPY_WORDS = 12;
 export { TEX };
 // draw flags
-export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256, UNSORTED: 512, POINTS: 1024, LINES: 2048, LINE_STRIP: 4096, LINE_LOOP: 8192 };
+export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256, UNSORTED: 512, POINTS: 1024, LINES: 2048, LINE_STRIP: 4096, LINE_LOOP: 8192, BATCH: 16384 };
 // light kinds
 export const L = { AMBIENT: 1, HEMI: 2, DIRECTIONAL: 3, POINT: 4, SPOT: 5 };
 // material models
@@ -393,6 +393,7 @@ export class FastRenderer {
     // a render() / clear() from an onBeforeRender hook (Reflector, Water, Refractor) while a pass is being written: the
     // pass is suspended (its words and per-pass state set aside), the hook's passes go first, the pass resumes after
     this._inHook = 0; this._hookSusp = null; this._passStart = 2; this._drawsAt = 0; this._inProgram = 0;
+    this._drawId = -1; this._skipHooks = false; // a BatchedMesh entry being drawn (_batched)
     // WebGLRenderer.state: what hooks touch (Reflector: state.buffers.depth.setMask); GL state is per pass natively
     const nop = () => {};
     this.state = {
@@ -759,33 +760,29 @@ export class FastRenderer {
   }
 
   /**
-   * BatchedMesh (v3): one draw per visible, active instance: a proxy object (prototype: the batch, so layers / shadow
-   * flags / material / geometry are the batch's) that is not a BatchedMesh, with the instance's world matrix, drawn
-   * over that instance's geometry range. One geometry upload for the whole batch.
+   * BatchedMesh (v3), as WebGLRenderer draws it without WEBGL_multi_draw: three's batching program (batchingTexture
+   * matrices, batchingIdTexture indirection, batchingColorTexture colours) over the batch's one geometry, one draw per
+   * multi-draw entry that BatchedMesh.onBeforeRender computed (its per-object culling and sorting), each with its
+   * index as gl_DrawID. Natively that index is the draw's base instance (xlat rule 8), so the whole batch shares one
+   * uniform block: n small draws of one pipeline (Metal has no multi-draw; an indirect command buffer would be the
+   * next step if a batch's draw count ever matters).
    */
   _batched(o) {
-    const info = o._instanceInfo || o._drawInfo, ranges = o._geometryInfo || o._drawRanges;
-    if (!info || !ranges || Array.isArray(o.material)) { this._unsupported('BatchedMesh'); return; }
-    if (o._colorsTexture || o.colorTexture) this._unsupported('BatchedMesh instance colours');
     const g = o.geometry, geometry = this._geometry(g);
-    const indexCount = g.index ? g.index.count : g.attributes.position.count;
-    const proxies = this._batchProxies || (this._batchProxies = new WeakMap());
-    let list = proxies.get(o);
-    if (!list) proxies.set(o, (list = []));
-    for (let i = 0; i < info.length; i++) {
-      const it = info[i];
-      if (!it || !it.visible || it.active === false) continue;
-      const r = ranges[it.geometryIndex ?? i];
-      if (!r || r.active === false || !(r.count > 0)) continue;
-      let p = list[i];
-      if (!p) {
-        p = list[i] = Object.create(o);
-        p.isBatchedMesh = false; p.matrixWorld = o.matrixWorld.clone();
-        p.onBeforeRender = noop; p.onBeforeShadow = noop;
-      }
-      o.getMatrixAt(i, p.matrixWorld).premultiply(o.matrixWorld);
-      this._draw(p, g, o.material, null, geometry, 0, r.start, r.count, indexCount);
+    const mat = o.material;
+    if (Array.isArray(mat) || !o._multiDrawStarts) { this._unsupported('BatchedMesh'); return; }
+    // the hooks run once for the batch (they fill the multi-draw lists); _draw must not call them per entry
+    o.onBeforeRender(this, this._scene, this._camera, g, mat, null);
+    if (mat.onBeforeRender) mat.onBeforeRender(this, this._scene, this._camera, g, o, null);
+    const index = g.index, bpe = index ? index.array.BYTES_PER_ELEMENT : 1;
+    const indexCount = index ? index.count : g.attributes.position.count;
+    const starts = o._multiDrawStarts, counts = o._multiDrawCounts, n = o._multiDrawCount;
+    this._skipHooks = true;
+    for (let i = 0; i < n && !this._aborted; i++) {
+      this._drawId = i;
+      this._draw(o, g, mat, null, geometry, 0, starts[i] / bpe, counts[i], indexCount);
     }
+    this._drawId = -1; this._skipHooks = false;
   }
 
   /**
@@ -829,12 +826,14 @@ export class FastRenderer {
     if (!m || !m.visible || this._aborted) return;
     // WebGLRenderer.renderObject calls these right before the draw (games use them to set per-draw uniforms)
     // (a hook may render: _streamStart / render() suspend this pass; it resumes here, after the hook's passes)
-    const h0 = this._inHook, susp0 = this._hookSusp;
-    this._inHook = h0 + 1; this._hookSusp = null;
-    o.onBeforeRender(this, this._scene, this._camera, g, m, grp);
-    if (m.onBeforeRender) m.onBeforeRender(this, this._scene, this._camera, g, o, grp);
-    if (this._hookSusp !== null) this._resumePass(this._hookSusp);
-    this._inHook = h0; this._hookSusp = susp0;
+    if (!this._skipHooks) {
+      const h0 = this._inHook, susp0 = this._hookSusp;
+      this._inHook = h0 + 1; this._hookSusp = null;
+      o.onBeforeRender(this, this._scene, this._camera, g, m, grp);
+      if (m.onBeforeRender) m.onBeforeRender(this, this._scene, this._camera, g, o, grp);
+      if (this._hookSusp !== null) this._resumePass(this._hookSusp);
+      this._inHook = h0; this._hookSusp = susp0;
+    }
     let flags = 0;
     // WebGLShadowMap draws meshes, lines and points; lines / points casting shadows are not drawn natively (rare)
     if (o.castShadow && o.isMesh) flags |= F.CAST;
@@ -849,6 +848,7 @@ export class FastRenderer {
     if (m.flatShading) flags |= F.FLAT;
     if (o.frustumCulled === false) flags |= F.NO_CULL;
     if (inst) flags |= F.INSTANCED;
+    if (this._drawId >= 0) flags |= F.BATCH | F.NO_CULL; // (three culls batch entries itself, in onBeforeRender)
     if (this.sortObjects === false) flags |= F.UNSORTED; // (native: renderOrder, then state / depth, unless unsorted)
     const material = this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT));
     if (this._tp && this._nestedRenders !== this._passNested) { this._aborted = true; return; } // see render()
@@ -861,7 +861,7 @@ export class FastRenderer {
     const u = this.u32, w = this._w;
     if (w + DRAW_WORDS + 8 > u.length) throw new Error(`fastrender-three: command buffer too small for ${this._drawObjects.length + 1} draws`);
     const n = Math.min(count, indexCount - start), instanceCount = inst ? o.count : 1;
-    u[w] = geometry; u[w + 1] = material; u[w + 2] = flags; u[w + 3] = inst;
+    u[w] = geometry; u[w + 1] = material; u[w + 2] = flags; u[w + 3] = this._drawId >= 0 ? this._drawId : inst;
     u[w + 4] = start; u[w + 5] = n; u[w + 6] = instanceCount; u[w + 7] = o.renderOrder | 0;
     to3x4(o.matrixWorld.elements, 0, this.f32, w + 8);
     this._w = w + DRAW_WORDS;

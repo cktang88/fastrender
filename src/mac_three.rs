@@ -775,16 +775,22 @@ impl ThreeScene {
         if px.len() < image * layers {
             return Err(format!("texture {}x{}x{layers} needs {} bytes, got {}", m.width, m.height, image * layers, px.len()));
         }
-        let fmt = match (channels, bytes) {
-            (4, 1) if m.srgb => MTLPixelFormat::RGBA8Unorm_sRGB,
-            (4, 1) => MTLPixelFormat::RGBA8Unorm,
-            (2, 1) => MTLPixelFormat::RG8Unorm,
-            (1, 1) => MTLPixelFormat::R8Unorm,
-            (4, 2) => MTLPixelFormat::RGBA16Float,
-            (2, 2) => MTLPixelFormat::RG16Float,
-            (1, 2) => MTLPixelFormat::R16Float,
-            (4, 4) => MTLPixelFormat::RGBA32Float,
-            (2, 4) => MTLPixelFormat::RG32Float,
+        let fmt = match (channels, bytes, m.integer()) {
+            (4, 4, Some(true)) => MTLPixelFormat::RGBA32Uint,
+            (2, 4, Some(true)) => MTLPixelFormat::RG32Uint,
+            (_, 4, Some(true)) => MTLPixelFormat::R32Uint,
+            (4, 4, Some(false)) => MTLPixelFormat::RGBA32Sint,
+            (2, 4, Some(false)) => MTLPixelFormat::RG32Sint,
+            (_, 4, Some(false)) => MTLPixelFormat::R32Sint,
+            (4, 1, _) if m.srgb => MTLPixelFormat::RGBA8Unorm_sRGB,
+            (4, 1, _) => MTLPixelFormat::RGBA8Unorm,
+            (2, 1, _) => MTLPixelFormat::RG8Unorm,
+            (1, 1, _) => MTLPixelFormat::R8Unorm,
+            (4, 2, _) => MTLPixelFormat::RGBA16Float,
+            (2, 2, _) => MTLPixelFormat::RG16Float,
+            (1, 2, _) => MTLPixelFormat::R16Float,
+            (4, 4, _) => MTLPixelFormat::RGBA32Float,
+            (2, 4, _) => MTLPixelFormat::RG32Float,
             _ => MTLPixelFormat::R32Float,
         };
         // WebGL's UNPACK_FLIP_Y (v3 asks for it: three's shaders sample the texture as stored), per layer
@@ -1497,6 +1503,18 @@ impl ThreeScene {
         }
         let prim = Self::primitive(d.flags);
         unsafe {
+            if d.flags & flag::BATCH != 0 {
+                // a BatchedMesh entry: three's gl_DrawID is the base instance (no per-instance streams are bound)
+                let b = d.instances as usize;
+                match &g.index {
+                    Some((ib, ty)) => {
+                        let stride = if *ty == MTLIndexType::UInt16 { 2 } else { 4 };
+                        enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(prim, d.count as usize, *ty, ib, d.start as usize * stride, 1, 0, b);
+                    }
+                    None => enc.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(prim, d.start as usize, d.count as usize, 1, b),
+                }
+                return;
+            }
             match &g.index {
                 Some((ib, ty)) => {
                     let stride = if *ty == MTLIndexType::UInt16 { 2 } else { 4 };
@@ -1554,8 +1572,12 @@ impl ThreeScene {
             };
         }
         if t.sample != "float" {
-            // integer samplers: no integer texture uploads yet (three's batchingIdTexture): a zero integer texture
-            return (if t.sample == "uint" { &n.uint_2d } else { &n.int_2d }, &p.nearest_clamp);
+            // integer samplers (three's batchingIdTexture): the uploaded integer texture of that kind, else a zero one
+            let want = t.sample == "uint";
+            if let Some(tx) = self.texs.get(&id).filter(|x| x.1.integer() == Some(want) && t.kind == "2d" && x.1.dim <= 1).map(|x| &x.0) {
+                return (tx, &p.nearest_clamp);
+            }
+            return (if want { &n.uint_2d } else { &n.int_2d }, &p.nearest_clamp);
         }
         if self.dbg & 16 != 0 {
             return (&n.white_2d, &p.linear_clamp);

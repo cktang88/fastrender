@@ -160,6 +160,10 @@ export function demangle(name) {
  *     point) becomes `_` (glslang rejects `#` and `"` there; `/` could open a comment, `\` continue the line);
  *  7. a whole identifier in VULKAN_RESERVED (e.g. three's `textureBicubic( sampler2D sampler, ... )`) that the source
  *     does not #define becomes RESERVED_PREFIX + word, outside // and block comments, on lines rules 1-2 keep.
+ *  8. `uniform int _gl_DrawID;` alone on its line (three's multi-draw fallback, BatchedMesh) becomes
+ *     `#define _gl_DrawID gl_BaseInstance`, and with `#define USE_BATCHING` in the source the `#version` line
+ *     `#version 460`: the multi-draw index is the draw's
+ *     base instance natively (one shared uniform block for the whole batch).
  * A trailing `// comment` is ignored (and dropped from a line rules 3/4 change).
  * Line endings become `\n`; the output always ends with `\n`. Idempotent.
  */
@@ -169,11 +173,13 @@ export function normalizeGlsl(src) {
   const out = [];
   let foundObject = false, foundFrame = false;
   const macros = definedMacros(src), st = { c: false };
+  let versionAt = -1, drawId = false;
   for (let i = 0; i < segs.length; i++) {
     let line = segs[i];
     if ((i < segs.length - 1 || src.endsWith('\n')) && line.endsWith('\r')) line = line.slice(0, -1); // Rust str::lines
     let t = line.trim();
-    if (t.startsWith('#version')) { out.push('#version 450'); continue; }
+    if (t.startsWith('#version')) { versionAt = out.length; out.push('#version 450'); continue; }
+    if (t === '#define _gl_DrawID gl_BaseInstance') drawId = true; // (rule 8 already applied)
     if (t.startsWith('#extension')) { out.push(''); continue; }
     const named = shaderName(line);
     if (named !== null) line = named;
@@ -189,6 +195,7 @@ export function normalizeGlsl(src) {
     const u = splitUniform(body);
     if (!u) { out.push(line); continue; }
     const [prec, ty, names] = u;
+    if (prec === null && ty === 'int' && names.length === 1 && names[0] === '_gl_DrawID') { drawId = true; out.push('#define _gl_DrawID gl_BaseInstance'); continue; }
     const keep = [];
     let removed = false;
     for (const n of names) {
@@ -198,6 +205,7 @@ export function normalizeGlsl(src) {
     }
     out.push(!removed ? line : keep.length === 0 ? '' : `uniform ${prec !== null ? prec + ' ' : ''}${ty} ${keep.join(', ')};`);
   }
+  if (drawId && macros.has('USE_BATCHING') && versionAt >= 0) out[versionAt] = '#version 460';
   if (foundObject || foundFrame) {
     let depth = 0, at = out.length;
     for (let i = 0; i < out.length; i++) {
@@ -908,6 +916,8 @@ export class ThreePrograms {
       inst.objectValues = { bindMatrix: { value: null }, bindMatrixInverse: { value: null }, boneTexture: { value: null } };
       // WebGLRenderer.setProgram: p_uniforms.setValue('center', object.center) for a Sprite
       if (object.isSprite) inst.objectValues.center = { value: object.center };
+      // WebGLRenderer.setProgram for a BatchedMesh: its matrices, multi-draw indirection and colour textures
+      if (object.isBatchedMesh) Object.assign(inst.objectValues, { batchingTexture: { value: null }, batchingIdTexture: { value: null }, batchingColorTexture: { value: null } });
     }
     this._bindValues(inst, ms);
     return inst;
@@ -1056,6 +1066,7 @@ export class ThreePrograms {
 
   _refreshObject(inst) {
     const o = inst.object, ov = inst.objectValues, g = o.geometry;
+    if (o.isBatchedMesh) { ov.batchingTexture.value = o._matricesTexture; ov.batchingIdTexture.value = o._indirectTexture; ov.batchingColorTexture.value = o._colorsTexture; }
     if (o.isSkinnedMesh) {
       ov.bindMatrix.value = o.bindMatrix; ov.bindMatrixInverse.value = o.bindMatrixInverse;
       const sk = o.skeleton;

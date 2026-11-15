@@ -161,7 +161,7 @@ float F_Schlick( const in float f0, const in float f90, const in float dotVH ) {
 #ifdef USE_BATCHING
 	#if ! defined( GL_ANGLE_multi_draw )
 	#define gl_DrawID _gl_DrawID
-	uniform int _gl_DrawID;
+#define _gl_DrawID gl_BaseInstance
 	#endif
 	uniform highp sampler2D batchingTexture;
 	uniform highp usampler2D batchingIdTexture;

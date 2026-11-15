@@ -73,7 +73,7 @@ export function compileProgram(vertexGlsl, fragmentGlsl) {
           if (!m) throw new Error(`glslang failed: ${log}`.slice(0, 2000));
           return `out ${m[1]} ${n}${m[2] || ''};`;
         });
-        vs = vs.replace(/^#version 450$/m, (v) => `${v}\n${decls.join(' ')}`);
+        vs = vs.replace(/^#version 4[56]0$/m, (v) => `${v}\n${decls.join(' ')}`);
       }
     }
     const out = {};
