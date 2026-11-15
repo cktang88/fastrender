@@ -630,7 +630,8 @@ impl ThreeScene {
         for (id, key, p) in self.host.take_programs() {
             self.progs.add(dev, id, key, p);
         }
-        let res = self.host.take_resources();
+        // releases wait for the frame written before them (three::defer_releases; render targets: mac_targets.rs)
+        let res = three::defer_releases(&mut self.targets.pending_releases, self.host.take_resources());
         if !res.is_empty() {
             self.apply(dev, queue, res);
         }

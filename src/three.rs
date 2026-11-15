@@ -879,8 +879,43 @@ pub enum Resource {
     Release { kind: u32, id: u32 },
 }
 
+/// Releases take effect one frame late. JS runs a whole frame (and, at load, three's PMREMGenerator) before the GPU
+/// work it describes: `pmrem.dispose()` right after `fromScene()` releases the source cube target and the blur
+/// materials whose passes have not run yet. WebGL executes each call at once; here a release waits until the frame
+/// that was written before it has been encoded. `pending` holds the releases of the previous batch: they are
+/// returned first (applied before this batch's uploads), this batch's releases become the new `pending`. A release
+/// followed by an upload of the same (kind, id) in the same batch (dispose, then reuse) is dropped.
+pub fn defer_releases(pending: &mut Vec<(u32, u32)>, res: Vec<Resource>) -> Vec<Resource> {
+    let mut out: Vec<Resource> = pending.drain(..).map(|(kind, id)| Resource::Release { kind, id }).collect();
+    for r in res {
+        match r {
+            Resource::Release { kind, id } => pending.push((kind, id)),
+            Resource::Upload { kind, id, .. } => {
+                pending.retain(|&p| p != (kind, id));
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn releases_wait_a_frame() {
+        use super::{defer_releases, Resource};
+        let up = |kind, id| Resource::Upload { kind, id, meta: String::new(), arrays: Vec::new() };
+        let ids = |v: &[Resource]| v.iter().map(|r| match r { Resource::Upload { kind, id, .. } => ('u', *kind, *id), Resource::Release { kind, id } => ('r', *kind, *id) }).collect::<Vec<_>>();
+        let mut pending = Vec::new();
+        // load: a target and a material uploaded, then disposed (PMREMGenerator.dispose) before any frame ran
+        let a = defer_releases(&mut pending, vec![up(5, 1), up(4, 2), Resource::Release { kind: 5, id: 1 }, Resource::Release { kind: 4, id: 2 }]);
+        assert_eq!(ids(&a), vec![('u', 5, 1), ('u', 4, 2)]);
+        // next batch: the releases come first; a dispose + re-upload of the same id in one batch keeps the upload
+        let b = defer_releases(&mut pending, vec![Resource::Release { kind: 1, id: 7 }, up(1, 7)]);
+        assert_eq!(ids(&b), vec![('r', 5, 1), ('r', 4, 2), ('u', 1, 7)]);
+        assert!(pending.is_empty());
+    }
+
     use super::*;
 
     fn fw(x: f32) -> u32 { x.to_bits() }

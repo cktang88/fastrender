@@ -182,6 +182,8 @@ pub(super) struct Targets {
     /// target (mean colour per face / level, reported with the stats): 0 off, 1 armed, 2 taken
     probe: u8,
     probes: Vec<(String, Buffer, MTLPixelFormat, usize)>,
+    /// resource releases of the last batch, applied with the next one (`three::defer_releases`)
+    pub pending_releases: Vec<(u32, u32)>,
 }
 
 impl Targets {
@@ -204,6 +206,7 @@ impl Targets {
             stats: [0; 6],
             probe: if std::env::var("FASTRENDER_RT_PROBE").is_ok_and(|v| v == "1") { 1 } else { 0 },
             probes: Vec::new(),
+            pending_releases: Vec::new(),
         }
     }
 
