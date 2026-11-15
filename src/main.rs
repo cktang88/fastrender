@@ -2,6 +2,7 @@ mod core;
 mod voxel;
 mod script;
 mod three;
+mod xlat;
 #[cfg(target_os = "macos")]
 mod jsc;
 #[cfg(target_os = "macos")]
@@ -18,6 +19,7 @@ const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
   probe    print GPU capabilities
   voxel-mesh  generate a 512x128x512 island and greedy-mesh it natively (any OS)
   selftest stage-by-stage render diagnostics (writes selftest-*.png)
+  xlat-dump <dir> <out>  translate every NAME.vert.glsl/NAME.frag.glsl three.js program in <dir> to MSL (any OS)
 options: --scene city|voxel|script|three --script game.js (props = box count) --three bundle.js (real three.js game) --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|bilinear
          --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
          --warmup n --seconds s --warmup-seconds s --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
@@ -25,10 +27,21 @@ options: --scene city|voxel|script|three --script game.js (props = box count) --
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mode, rest) = match args.first().map(String::as_str) {
-        Some("run" | "bench" | "matrix" | "probe" | "selftest" | "voxel-mesh") => (args[0].clone(), &args[1..]),
+        Some("run" | "bench" | "matrix" | "probe" | "selftest" | "voxel-mesh" | "xlat-dump") => (args[0].clone(), &args[1..]),
         Some("-h" | "--help") => { println!("{USAGE}"); return; }
         _ => ("run".to_string(), &args[..]),
     };
+    if mode == "xlat-dump" {
+        let (Some(input), Some(out)) = (rest.first(), rest.get(1)) else {
+            eprintln!("usage: fastrender xlat-dump <dir> <out>");
+            std::process::exit(2);
+        };
+        if let Err(e) = xlat::dump(std::path::Path::new(input), std::path::Path::new(out)) {
+            eprintln!("xlat-dump: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if mode == "voxel-mesh" {
         voxel_mesh_bench();
         return;
