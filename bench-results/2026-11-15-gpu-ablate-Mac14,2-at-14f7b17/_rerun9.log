@@ -1,0 +1,47 @@
+== lights0  14:43:46
+[js] [ablate] lights0 scene: {"lights":{"HemisphereLight":1,"AmbientLight":0,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":27,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11623,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.58, main 8.42, upscale 0.00; frame 10.01
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@64  14:44:02
+[js] [ablate] none scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11623,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.67, main 8.71, upscale 0.00; frame 10.38
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nolights  14:44:16
+[js] [ablate] nolights scene: {"lights":{"HemisphereLight":0,"AmbientLight":0,"DirectionalLight":0,"SpotLight":10,"PointLight":17},"zero":27,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11623,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.00, main 8.63, upscale 0.00; frame 8.63
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== notransparent  14:44:40
+[js] [ablate] notransparent scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":9,"meshes":12498,"materials":{"ShaderMaterial":22,"MeshStandardMaterial":11147,"MeshBasicMaterial":46,"MeshPhysicalMaterial":1866}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.65, main 8.62, upscale 0.00; frame 10.27
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== noenv  14:44:54
+[js] [ablate] noenv scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11623,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.69, main 8.63, upscale 0.00; frame 10.31
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nomaps  14:45:18
+[js] [ablate] nomaps scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11623,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.77, main 8.74, upscale 0.00; frame 10.51
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== lambert  14:45:35
+[js] [ablate] lambert scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshLambertMaterial":14171,"MeshBasicMaterial":799}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 2.55, main 9.35, upscale 0.00; frame 11.90
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== basic  14:46:00
+[js] [ablate] basic scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshBasicMaterial":14970}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 3.23, main 5.87, upscale 0.00; frame 9.10
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== notransparent,noenv  14:46:16
+[js] [ablate] notransparent,noenv scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":9,"meshes":12498,"materials":{"ShaderMaterial":22,"MeshStandardMaterial":11147,"MeshBasicMaterial":46,"MeshPhysicalMaterial":1866}}
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.69, main 8.16, upscale 0.00; frame 9.86
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+ALL DONE 14:46:29
+/dev/disk3s1s1   460Gi    13Gi   139Gi     9%    484k  1.5G    0%   /
