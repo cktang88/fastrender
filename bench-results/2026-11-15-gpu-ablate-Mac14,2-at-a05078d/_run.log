@@ -1,0 +1,185 @@
+== alllights
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.18, main 41.22, upscale 0.00; frame 41.40
+three frame cost: render() CPU 41.06 ms avg (JS 11.52, native apply 0.601, prepare 1.088, encode 0.709), GPU 41.40 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 326 libraries in 23 ms of worker time (182 shared), 177 pipelines in 666 ms (154 from the binary archive); manifest at launch 194 programs / 177 pipelines, prewarmed 194 / 177; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 91 (0 ms); first frame +5011 ms, first complete frame +5011 ms, last incomplete frame -, all pipelines ready +6891 ms; frames over 50 ms: 36, longest 689 ms; archive: 17 pipelines added (1 left out: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-6393f2/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-b4d9b9.metallib': missing 'vertex' stage in pipeline no. '190'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+[js] [census] lights: 31 visible, 31 in three's light state (dir 2, point 17, spot 10, hemi 1); zero intensity: 28 (point 17, spot 10); dropped from the light state: 0
+[js] [census] shadows: 3 shadow lights (dir 2, point 1, spot 0), 1 passes this frame, 1.0 M texels: PointLight 16x16 x6 (kept), DirectionalLight 1024x1024, DirectionalLight 1024x1024 (kept)
+[js] [census] draws: 1485 (3.92 M tris); casters 695 (0.76 M tris per shadow pass before culling); transparent 44; opaque with discard 89 (0.23 M tris); opaque without 1352
+[js] [census] programs: 59 in the frame; lit draws 1425, 221 lines of main() per lit draw (after the preprocessor, light loops unrolled)
+[js] [census]   program  draws   tris(k)  main lines  tex  lights d/p/s/h  shadows d/p/s  discard  name
+[js] [census]        65     51      1577         209   11       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]        55    164       585         209   11       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]       851     26       538         210   11       2/17/10/1          2/1/0       no  car-mid
+[js] [census]        61    144       292         209   11       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]       860     12       139         210   11       2/17/10/1          2/1/0       no  car-far-paint
+[js] [census]      2254      2       136         232   11       2/17/10/1          2/1/0      yes  MeshStandardMaterial
+[js] [census]        97     44       107         223   15       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]        67     11       105         211   10       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]       848      9        69          34    0         0/0/0/0          0/0/0       no  car-shadow-proxy
+[js] [census]       206    203        39         260   13       2/17/10/1          2/1/0       no  painted_metal #414234
+[js] [census]       101    321        39         208   11       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]       179      2        35         197   11       2/17/10/1          2/1/0       no  far-shore
+== none
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.38, main 7.73, upscale 0.00; frame 9.11
+three frame cost: render() CPU 12.92 ms avg (JS 10.16, native apply 0.506, prepare 0.898, encode 0.639), GPU 9.11 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 326 libraries in 22 ms of worker time (172 shared), 177 pipelines in 716 ms (158 from the binary archive); manifest at launch 194 programs / 177 pipelines, prewarmed 194 / 177; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +4814 ms, first complete frame +4814 ms, last incomplete frame -, all pipelines ready +6506 ms; frames over 50 ms: 35, longest 466 ms; archive: 6 pipelines added (8 left out: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-e20704/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-6b6f58.metallib': expecting 'fragment' stage in pipeline no. '197'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+[js] [census] lights: 31 visible, 4 in three's light state (dir 2, point 0, spot 0, hemi 1); zero intensity: 1 (point 0, spot 0); dropped from the light state: 27
+[js] [census] shadows: 2 shadow lights (dir 2, point 0, spot 0), 1 passes this frame, 1.0 M texels: DirectionalLight 1024x1024, DirectionalLight 1024x1024 (kept)
+[js] [census] draws: 1485 (3.92 M tris); casters 695 (0.76 M tris per shadow pass before culling); transparent 44; opaque with discard 89 (0.23 M tris); opaque without 1352
+[js] [census] programs: 59 in the frame; lit draws 1425, 122 lines of main() per lit draw (after the preprocessor, light loops unrolled)
+[js] [census]   program  draws   tris(k)  main lines  tex  lights d/p/s/h  shadows d/p/s  discard  name
+[js] [census]        65     51      1577         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]        55    164       585         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       837     26       538         111   10         2/0/0/1          2/0/0       no  car-mid
+[js] [census]        61    144       292         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       846     12       139         111   10         2/0/0/1          2/0/0       no  car-far-paint
+[js] [census]      2215      2       136         133   10         2/0/0/1          2/0/0      yes  MeshStandardMaterial
+[js] [census]        97     44       107         124   14         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]        67     11       105         112    9         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       834      9        69          34    0         0/0/0/0          0/0/0       no  car-shadow-proxy
+[js] [census]       202    203        39         161   12         2/0/0/1          2/0/0       no  painted_metal #414234
+[js] [census]       101    321        39         109   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       179      2        35          98   10         2/0/0/1          2/0/0       no  far-shore
+== nostatic
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.74, main 9.44, upscale 0.00; frame 11.18
+three frame cost: render() CPU 16.64 ms avg (JS 13.79, native apply 0.538, prepare 0.918, encode 0.676), GPU 11.18 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 326 libraries in 20 ms of worker time (172 shared), 177 pipelines in 766 ms (157 from the binary archive); manifest at launch 194 programs / 177 pipelines, prewarmed 194 / 177; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +4877 ms, first complete frame +4877 ms, last incomplete frame -, all pipelines ready +6574 ms; frames over 50 ms: 36, longest 478 ms; archive: 1 pipelines added (14 left out: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-772466/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-e90e84.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nofarlod
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.43, main 7.65, upscale 0.00; frame 9.08
+three frame cost: render() CPU 12.80 ms avg (JS 10.17, native apply 0.458, prepare 0.899, encode 0.622), GPU 9.08 ms avg, 1912 draws, programs: three
+draws per pass (last frame): main 1163 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47807 of 183498 drawn in 789 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 326 libraries in 33 ms of worker time (172 shared), 177 pipelines in 1017 ms (157 from the binary archive); manifest at launch 194 programs / 177 pipelines, prewarmed 194 / 177; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +4999 ms, first complete frame +4999 ms, last incomplete frame -, all pipelines ready +6689 ms; frames over 50 ms: 16, longest 467 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-05b7f6/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-e93a17.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+[js] [census] lights: 31 visible, 4 in three's light state (dir 2, point 0, spot 0, hemi 1); zero intensity: 1 (point 0, spot 0); dropped from the light state: 27
+[js] [census] shadows: 2 shadow lights (dir 2, point 0, spot 0), 1 passes this frame, 1.0 M texels: DirectionalLight 1024x1024, DirectionalLight 1024x1024 (kept)
+[js] [census] draws: 1470 (5.05 M tris); casters 695 (0.96 M tris per shadow pass before culling); transparent 44; opaque with discard 89 (0.24 M tris); opaque without 1337
+[js] [census] programs: 59 in the frame; lit draws 1410, 122 lines of main() per lit draw (after the preprocessor, light loops unrolled)
+[js] [census]   program  draws   tris(k)  main lines  tex  lights d/p/s/h  shadows d/p/s  discard  name
+[js] [census]        65     51      1577         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       837     17      1124         111   10         2/0/0/1          2/0/0       no  car-mid
+[js] [census]        55    164       914         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       846      6       336         111   10         2/0/0/1          2/0/0       no  car-far-paint
+[js] [census]        61    144       292         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]      2229      2       136         133   10         2/0/0/1          2/0/0      yes  MeshStandardMaterial
+[js] [census]        97     44       108         124   14         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]        67     11       105         112    9         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       834      9        69          34    0         0/0/0/0          0/0/0       no  car-shadow-proxy
+[js] [census]       202    203        39         161   12         2/0/0/1          2/0/0       no  painted_metal #414234
+[js] [census]       101    321        39         109   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       179      2        35          98   10         2/0/0/1          2/0/0       no  far-shore
+== none@2048
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.01, main 9.81, upscale 0.00; frame 10.83
+three frame cost: render() CPU 12.49 ms avg (JS 10.37, native apply 0.536, prepare 0.202, encode 0.660), GPU 10.83 ms avg, 1370 draws, programs: three
+draws per pass (last frame): main 1241 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 0 of 0 drawn in 0 runs (0 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 326 libraries in 225 ms of worker time (172 shared), 177 pipelines in 863 ms (157 from the binary archive); manifest at launch 194 programs / 177 pipelines, prewarmed 194 / 177; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5059 ms, first complete frame +5059 ms, last incomplete frame -, all pipelines ready +6782 ms; frames over 50 ms: 35, longest 493 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-a59212/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-2f1706.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@4096
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.05, main 9.59, upscale 0.00; frame 10.64
+three frame cost: render() CPU 12.55 ms avg (JS 10.35, native apply 0.537, prepare 0.321, encode 0.633), GPU 10.64 ms avg, 1390 draws, programs: three
+draws per pass (last frame): main 1193 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 10334 of 28350 drawn in 171 runs (48 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 326 libraries in 23 ms of worker time (172 shared), 177 pipelines in 836 ms (157 from the binary archive); manifest at launch 194 programs / 177 pipelines, prewarmed 194 / 177; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5088 ms, first complete frame +5088 ms, last incomplete frame -, all pipelines ready +6992 ms; frames over 50 ms: 35, longest 522 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-348626/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-ab177d.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@512
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.34, main 8.22, upscale 0.00; frame 9.56
+three frame cost: render() CPU 15.99 ms avg (JS 12.75, native apply 0.586, prepare 1.017, encode 0.790), GPU 9.56 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 326 libraries in 20 ms of worker time (172 shared), 177 pipelines in 788 ms (157 from the binary archive); manifest at launch 194 programs / 177 pipelines, prewarmed 194 / 177; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5129 ms, first complete frame +5129 ms, last incomplete frame -, all pipelines ready +6923 ms; frames over 50 ms: 37, longest 552 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-6b8163/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-ccf163.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@1024
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.58, main 7.06, upscale 0.00; frame 8.64
+three frame cost: render() CPU 12.53 ms avg (JS 9.91, native apply 0.503, prepare 0.896, encode 0.554), GPU 8.64 ms avg, 1840 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 0 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 237 libraries in 18 ms of worker time (172 shared), 122 pipelines in 871 ms (106 from the binary archive); manifest at launch 139 programs / 122 pipelines, prewarmed 139 / 122; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5322 ms, first complete frame +5322 ms, last incomplete frame -, all pipelines ready +7060 ms; frames over 50 ms: 34, longest 465 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-9c0cc8/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-2473b8.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@4
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 2.06, main 5.74, upscale 0.00; frame 7.80
+three frame cost: render() CPU 16.23 ms avg (JS 13.10, native apply 0.631, prepare 1.065, encode 0.587), GPU 7.80 ms avg, 1064 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 237 libraries in 18 ms of worker time (172 shared), 122 pipelines in 800 ms (106 from the binary archive); manifest at launch 139 programs / 122 pipelines, prewarmed 139 / 122; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +4894 ms, first complete frame +4894 ms, last incomplete frame -, all pipelines ready +6622 ms; frames over 50 ms: 35, longest 489 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-5b6160/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-fab73b.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@64
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.31, main 6.90, upscale 0.00; frame 8.20
+three frame cost: render() CPU 13.17 ms avg (JS 10.53, native apply 0.497, prepare 0.891, encode 0.579), GPU 8.20 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 140 libraries in 11 ms of worker time (172 shared), 73 pipelines in 804 ms (62 from the binary archive); manifest at launch 81 programs / 73 pipelines, prewarmed 81 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5230 ms, first complete frame +5230 ms, last incomplete frame -, all pipelines ready +7096 ms; frames over 50 ms: 36, longest 587 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-eda566/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-62a03f.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== lights0
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.36, main 7.59, upscale 0.00; frame 8.95
+three frame cost: render() CPU 13.07 ms avg (JS 10.21, native apply 0.520, prepare 0.982, encode 0.641), GPU 8.95 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 140 libraries in 9 ms of worker time (172 shared), 73 pipelines in 781 ms (62 from the binary archive); manifest at launch 81 programs / 73 pipelines, prewarmed 81 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +4961 ms, first complete frame +4961 ms, last incomplete frame -, all pipelines ready +6892 ms; frames over 50 ms: 34, longest 576 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-5fcdeb/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-cbbef1.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nopoint
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.44, main 7.83, upscale 0.00; frame 9.28
+three frame cost: render() CPU 13.79 ms avg (JS 10.91, native apply 0.542, prepare 0.937, encode 0.678), GPU 9.28 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 140 libraries in 9 ms of worker time (172 shared), 73 pipelines in 823 ms (62 from the binary archive); manifest at launch 81 programs / 73 pipelines, prewarmed 81 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +4968 ms, first complete frame +4968 ms, last incomplete frame -, all pipelines ready +6708 ms; frames over 50 ms: 35, longest 491 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-c37a5d/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-29b2c3.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nolights
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.00, main 7.84, upscale 0.00; frame 7.84
+three frame cost: render() CPU 12.30 ms avg (JS 9.81, native apply 0.525, prepare 0.869, encode 0.612), GPU 7.84 ms avg, 1922 draws, programs: three
+draws per pass (last frame): main 1174 opaque + 86 discard + 43 transparent; shadow 0 passes, 0 draws; instances 47729 of 178983 drawn in 796 runs (31 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 229 libraries in 12 ms of worker time (125 shared), 128 pipelines in 815 ms (113 from the binary archive); manifest at launch 81 programs / 73 pipelines, prewarmed 81 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 162 (18 ms); first frame +5318 ms, first complete frame +5318 ms, last incomplete frame -, all pipelines ready +7095 ms; frames over 50 ms: 34, longest 515 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-eeab21/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-e85aaa.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== notransparent
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.50, main 8.06, upscale 0.00; frame 9.57
+three frame cost: render() CPU 14.86 ms avg (JS 12.01, native apply 0.508, prepare 0.964, encode 0.651), GPU 9.57 ms avg, 1889 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 6 transparent; shadow 2 passes, 1613 draws; instances 47666 of 183326 drawn in 792 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 229 libraries in 11 ms of worker time (162 shared), 128 pipelines in 784 ms (113 from the binary archive); manifest at launch 136 programs / 128 pipelines, prewarmed 136 / 128; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 81 (0 ms); first frame +4871 ms, first complete frame +4871 ms, last incomplete frame -, all pipelines ready +6574 ms; frames over 50 ms: 38, longest 483 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-c19ce8/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-b9ea1d.metallib': expecting 'fragment' stage in pipeline no. '200'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== noenv
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.38, main 7.18, upscale 0.00; frame 8.56
+three frame cost: render() CPU 13.65 ms avg (JS 10.78, native apply 0.542, prepare 0.922, encode 0.679), GPU 8.56 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 312 libraries in 15 ms of worker time (133 shared), 176 pipelines in 776 ms (113 from the binary archive); manifest at launch 136 programs / 128 pipelines, prewarmed 136 / 128; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 156 (17 ms); first frame +5097 ms, first complete frame +5097 ms, last incomplete frame -, all pipelines ready +6933 ms; frames over 50 ms: 35, longest 500 ms; archive: 5 pipelines added (1 left out: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-c8e42b/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-914b29.metallib': missing 'vertex' stage in pipeline no. '241'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nomaps
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.47, main 7.89, upscale 0.00; frame 9.36
+three frame cost: render() CPU 14.45 ms avg (JS 11.43, native apply 0.554, prepare 0.987, encode 0.709), GPU 9.36 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 331 libraries in 18 ms of worker time (159 shared), 186 pipelines in 1176 ms (154 from the binary archive); manifest at launch 185 programs / 176 pipelines, prewarmed 185 / 176; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 99 (5 ms); first frame +5173 ms, first complete frame +5173 ms, last incomplete frame -, all pipelines ready +6905 ms; frames over 50 ms: 35, longest 482 ms; archive: 1 pipelines added in 1600 ms, 236876 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== lambert
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 2.22, main 8.19, upscale 0.00; frame 10.41
+three frame cost: render() CPU 18.12 ms avg (JS 15.25, native apply 0.677, prepare 0.941, encode 0.553), GPU 10.41 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1206 opaque + 58 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 389 libraries in 26 ms of worker time (140 shared), 226 pipelines in 1315 ms (164 from the binary archive); manifest at launch 195 programs / 186 pipelines, prewarmed 195 / 186; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 139 (20 ms); first frame +4810 ms, first complete frame +4810 ms, last incomplete frame -, all pipelines ready +6550 ms; frames over 50 ms: 34, longest 478 ms; archive: 19 pipelines added in 1855 ms, 278036 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== basic
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 2.58, main 5.29, upscale 0.00; frame 7.87
+three frame cost: render() CPU 15.40 ms avg (JS 12.63, native apply 0.699, prepare 0.950, encode 0.481), GPU 7.87 ms avg, 1935 draws, programs: three
+draws per pass (last frame): main 1206 opaque + 58 discard + 52 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 412 libraries in 24 ms of worker time (139 shared), 245 pipelines in 1689 ms (200 from the binary archive); manifest at launch 235 programs / 226 pipelines, prewarmed 235 / 226; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 100 (8 ms); first frame +4903 ms, first complete frame +4903 ms, last incomplete frame -, all pipelines ready +6694 ms; frames over 50 ms: 34, longest 494 ms; archive: 1 pipelines added in 2135 ms, 344004 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== notransparent,noenv
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.49, main 7.72, upscale 0.00; frame 9.21
+three frame cost: render() CPU 13.57 ms avg (JS 10.85, native apply 0.515, prepare 0.916, encode 0.610), GPU 9.21 ms avg, 1889 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 6 transparent; shadow 2 passes, 1613 draws; instances 47666 of 183326 drawn in 792 runs (63 instanced draws out of view)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 412 libraries in 21 ms of worker time (202 shared), 245 pipelines in 1981 ms (206 from the binary archive); manifest at launch 252 programs / 245 pipelines, prewarmed 252 / 245; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 101 (0 ms); first frame +5026 ms, first complete frame +5026 ms, last incomplete frame -, all pipelines ready +6824 ms; frames over 50 ms: 34, longest 539 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-5f53f3/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-c541d2.metallib': expecting 'fragment' stage in pipeline no. '329'
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+logs: bench-results/2026-11-15-gpu-ablate-Mac14,2 (commit and push this folder)

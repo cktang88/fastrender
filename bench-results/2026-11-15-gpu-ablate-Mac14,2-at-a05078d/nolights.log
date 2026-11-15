@@ -1,0 +1,50 @@
+[js] [boot] modules loaded 0s
+[js] [boot] quality applied 0s
+[js] [boot] manifest 0s
+[js] [boot] museum data 0s
+[js] [boot] pbr 0s
+[js] [boot] rebuilt index 0s
+[js] [boot] ready 0s
+[js] [boot] level build start 0s
+[js] [boot] level built 0s
+[js] [boot] programs compiled (0) 0s
+[js] [warn] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: fetch blocked (remote, offline run): https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_48d_partly_cloudy_puresky_1k.hdr
+[js] [boot] first frame (0 programs, 989 calls, 0 ms) 0.02s
+[js] world-objects: 1434 draws, 224 material instances; unsupported per frame: {"texture source without pixels":94.8,"transmission":0.1}; assets: {"local":118,"missing":0,"remote":33,"bytes":15401598} images {"decoded":101,"failed":0} canvases {"real":0,"stub":106}
+[js] [census] lights: 0 visible, 0 in three's light state (dir 0, point 0, spot 0, hemi 0); zero intensity: 0 (point 0, spot 0); dropped from the light state: 0
+[js] [census] shadows: 0 shadow lights (dir 0, point 0, spot 0), 0 passes this frame, 0.0 M texels: 
+[js] [census] draws: 1392 (3.77 M tris); casters 602 (0.61 M tris per shadow pass before culling); transparent 44; opaque with discard 86 (0.23 M tris); opaque without 1262
+[js] [census] programs: 58 in the frame; lit draws 0, 0 lines of main() per lit draw (after the preprocessor, light loops unrolled)
+[js] [census]   program  draws   tris(k)  main lines  tex  lights d/p/s/h  shadows d/p/s  discard  name
+[js] [census]       266     51      1577          94    5         0/0/0/0          0/0/0       no  MeshStandardMaterial
+[js] [census]       790     26       538          95    5         0/0/0/0          0/0/0       no  car-mid
+[js] [census]       294    144       475          94    5         0/0/0/0          0/0/0       no  MeshStandardMaterial
+[js] [census]       249    132       276          94    5         0/0/0/0          0/0/0       no  MeshStandardMaterial
+[js] [census]       799     12       139          95    5         0/0/0/0          0/0/0       no  car-far-paint
+[js] [census]      1942      2       136         117    5         0/0/0/0          0/0/0      yes  MeshStandardMaterial
+[js] [census]       269     11       105          96    4         0/0/0/0          0/0/0       no  MeshStandardMaterial
+[js] [census]       335     39        97         108    9         0/0/0/0          0/0/0       no  MeshStandardMaterial
+[js] [census]       787      9        69          34    0         0/0/0/0          0/0/0       no  car-shadow-proxy
+[js] [census]       204    202        39         145    7         0/0/0/0          0/0/0       no  painted_metal #414234
+[js] [census]       197    298        35          93    5         0/0/0/0          0/0/0       no  MeshStandardMaterial
+[js] [census]       180      2        35          82    5         0/0/0/0          0/0/0       no  far-shore
+[js] [ablate] nolights scene: {"lights":{"HemisphereLight":0,"AmbientLight":0,"DirectionalLight":0,"SpotLight":10,"PointLight":17},"zero":27,"transparent":1921,"meshes":14425,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11638,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+pipeline cache: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-eeab21/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-e85aaa.metallib': expecting 'fragment' stage in pipeline no. '200'
+ (none of 10 pipelines could be kept)
+backend: metal3 (auto: Metal4 family true, MTL4CommandQueue true)
+frame loop: frames in flight 1.06 avg, 2 max (limit 3); slot wait 0.000 ms avg, 0.00 max, 0 of 180 frames > 1 ms; drawable wait 0.000 ms avg, 0.00 max; fence: completion handler; render thread QoS Some(UserInteractive)
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.00, main 7.84, upscale 0.00; frame 7.84
+three frame cost: render() CPU 12.30 ms avg (JS 9.81, native apply 0.525, prepare 0.869, encode 0.612), GPU 7.84 ms avg, 1922 draws, programs: three
+draws per pass (last frame): main 1174 opaque + 86 discard + 43 transparent; shadow 0 passes, 0 draws; instances 47729 of 178983 drawn in 796 runs (31 instanced draws out of view)
+three programs: 107 compiled (Metal 12 ms total), 68 pipelines (815 ms), 329 material instances; shadows: 0 maps, 0 passes, 0 casters with three's depth programs, 0 native depth-only, 0 VSM blurs; ring 777 KB/frame, 0 refused writes; 211 bind lists (1268 built); graveyard 448 waiting (53697 buried, 53473 freed)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 229 libraries in 12 ms of worker time (125 shared), 128 pipelines in 815 ms (113 from the binary archive); manifest at launch 81 programs / 73 pipelines, prewarmed 81 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 162 (18 ms); first frame +5318 ms, first complete frame +5318 ms, last incomplete frame -, all pipelines ready +7095 ms; frames over 50 ms: 34, longest 515 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-eeab21/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-e85aaa.metallib': expecting 'fragment' stage in pipeline no. '200'
+ (none of 10 pipelines could be kept)
+
+### fastrender bench: Apple M2
+
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+|---|---:|---:|---:|
+| three forward memoryless scale=1.00 up=bilinear shadow=cached lights=64 cull=gpu props=150000 | 81.0 | 7.84 | 12.09 | JS 9.81 ms/frame |
+
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+(wrote bench-results.json)
