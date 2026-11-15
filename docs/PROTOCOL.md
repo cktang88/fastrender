@@ -32,7 +32,12 @@ in any order (the decoder does not depend on it; JS writes DRAWS before LIGHTS a
 | 5 DRAWS | n, then n × 20: geometry id, material id, flags, instance-buffer id, index start, index count, instance count, renderOrder, 3×4 world matrix rows |
 
 Draw flags: 1 cast shadow, 2 receive shadow, 4 transparent, 8 double-sided, 16 back side, 32 instanced, 64 vertex colours,
-128 no frustum cull, 256 flat shading.
+128 no frustum cull, 256 flat shading; v3 also: 512 unsorted (`renderer.sortObjects === false`: draws keep their
+order), 1024 points, 2048 line segments, 4096 line strip, 8192 line loop (drawn as a strip; Metal has no loop),
+16384 BatchedMesh entry (the instance-buffer word is the multi-draw index, drawn as the base instance: three's
+`gl_DrawID`, xlat rule 8). Draws are ordered by renderOrder first (three's painterSortStable /
+reversePainterSortStable: then state for opaque draws, back to front for transparent ones; equal keys keep the draw
+order); groupOrder (a Group's renderOrder) is not applied.
 
 ## v3: three.js's own programs (`new FastRenderer({ programs: 'three' })`)
 
@@ -134,6 +139,13 @@ and rewrites only the words whose values changed: three refreshes material unifo
 edit `material.color` / `uniforms.x.value` without `needsUpdate`, so values are compared, not versions
 (`docs/notes/three-programs.md`).
 The draw list's material id is the instance id; draw flags are unchanged.
+Textures: RedInteger / RGInteger / RGBAInteger with UnsignedInt / Int type upload as R/RG/RGBA32Uint / Sint and bind to
+`usampler2D` / `isampler2D` slots (three's `batchingIdTexture`); an integer slot with no such texture binds a zero one.
+
+A `render()` / `clear()` / `copyFramebufferToTexture()` from an `onBeforeRender` hook while a pass is being written
+(Reflector, Water, Refractor) goes into the stream BEFORE that pass: JS sets the open pass aside (its words and
+per-pass state), writes the hook's passes where it began, then moves it after them. Renders nested in program
+selection (an env map converted to PMREM inside `render()`) still abort and redo the outer pass.
 
 ## Render targets and passes (v3)
 

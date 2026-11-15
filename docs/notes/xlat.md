@@ -71,9 +71,20 @@ derives from) cannot be configured out through these crates. LTO might trim some
      fragment program). The reflected uniform, texture and attribute names are mapped back (`demangle`), so the layout
      keeps the game's names (`u.fr_kw_shared` → `u.shared`). three's transmission chunk (`textureBicubic( sampler2D
      sampler, … )`) needed it. `tests/fixtures/xlat/normalize/names-and-reserved-words` covers both rules.
+  5d. **`uniform int _gl_DrawID;`** alone on its line (three's multi-draw fallback for BatchedMesh, inside `#ifdef
+     USE_BATCHING` of every vertex shader) becomes `#define _gl_DrawID gl_BaseInstance`; when the source `#define`s
+     `USE_BATCHING`, the `#version` line becomes `#version 460` (gl_BaseInstance is core there; idempotent: an already
+     rewritten `#define` line counts). SPIRV-Cross maps it to `[[base_instance]]`, and the native side draws each
+     multi-draw entry with base instance = its index, so a whole batch shares one uniform block
+     (`tests/fixtures/xlat/normalize/batching-draw-id.vert`).
   6. Lines are split on `\n` or `\r\n`, a final newline adds no extra empty line, and the output is the lines joined
      with `\n` plus a trailing `\n`. Every other line is kept byte for byte, so line numbers in glslang errors match
      three's source, shifted by one after the inserted block.
+- MSL options: besides the bindings, **every local is zero-initialised** (SPIRV-Cross
+  `force_zero_initialized_variables`), as ANGLE does for WebGL shaders: Metal leaves uninitialised locals undefined,
+  and real shaders read them (3d-world-objects' window shader: `roomShade(out float lampGlow)` writes `lampGlow` on
+  one path only; glslang copies `out` parameters through an uninitialised temporary, Metal read garbage, NaN, and every
+  glass pane of the city came out black: 55 % of the real game's golden error).
 - `translate(vertex, fragment) -> Result<Program, String>`. `Program { vertex_msl, fragment_msl, vertex_entry: "fr_vertex", fragment_entry: "fr_fragment", layout }`.
   Errors are glslang/SPIRV-Cross logs prefixed with `vertex:`, `fragment:`, `link:` or `SPIRV-Cross:`.
 - `Cache::{open_default, new(dir), translate(v, f) -> (Program, hit), key, get, put, default_dir}`.

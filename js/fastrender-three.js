@@ -177,6 +177,18 @@ export class FastRenderer {
   forceContextLoss() {}
   getContext() { return null; }
 
+  /**
+   * Debugging (v3): every material instance drawn in the last screen pass whose material name, type or program name
+   * matches `re`, as ThreePrograms.describeInstance reads it (program + #defines, packed uniforms, texture slots with
+   * the ids sent). The node run prints it with `--debug-material <regex>`.
+   */
+  debugMaterials(re) {
+    if (!this._tp) return [];
+    const rx = re instanceof RegExp ? re : new RegExp(re);
+    const desc = (t) => `${t.constructor.name}${t.name ? ' "' + t.name + '"' : ''} ${t.image && t.image.width ? t.image.width + 'x' + t.image.height : 'no image'}${t.isRenderTargetTexture ? ' (render target)' : ''} id ${this._ids.get(t) ?? '-'}`;
+    return this._used.filter((i) => rx.test(i.material.name || '') || rx.test(i.material.type) || rx.test(i.program.name || '')).map((i) => this._tp.describeInstance(i, desc));
+  }
+
   _unsupported(what) { this.info.unsupported[what] = (this.info.unsupported[what] || 0) + 1; }
 
   _id(obj) {

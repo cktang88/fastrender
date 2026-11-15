@@ -1033,6 +1033,32 @@ export class ThreePrograms {
     return false;
   }
 
+  /**
+   * Debugging: what a material instance hands the native side, readable: its program (name, three's #defines), every
+   * uniform as packed this frame (name -> numbers at its reflected offset) and every texture slot (name -> the id sent
+   * plus what three's value there is). `describe(texture)` names a texture (FastRenderer passes one).
+   */
+  describeInstance(inst, describe = (t) => (t ? `${t.constructor.name}${t.name ? ' ' + t.name : ''}` : null)) {
+    const p = inst.program, c = p.packer, block = inst.block;
+    if (!c || !block) return { program: p.name, layout: false };
+    const f = new Float32Array(block.buffer, block.byteOffset, block.length);
+    const uniforms = {};
+    for (const l of c.leaves) {
+      const name = [l.root, ...l.steps].map((x, i) => (typeof x === 'number' ? `[${x}]` : i ? `.${x}` : x)).join('');
+      const v = [];
+      for (let i = 0; i < l.span; i++) v.push(+f[l.offset + i].toPrecision(5));
+      uniforms[name] = v.length === 1 ? v[0] : v;
+    }
+    const textures = c.textures.map((t, i) => {
+      const h = inst.holders[c.leaves.length + i];
+      let v = h ? h.value : null;
+      for (let k = 0; k < t.steps.length && v; k++) v = v[t.steps[k]];
+      return { slot: t.name, id: block[c.words + i] >>> 0, value: v && v.isTexture ? describe(v) : v ? typeof v : null };
+    });
+    const defines = [...new Set((p.vertex + '\n' + p.fragment).split('\n').map((l) => /^#define\s+(\w+)/.exec(l)).filter(Boolean).map((m) => m[1]))];
+    return { program: p.name, id: p.id, material: inst.material.name || inst.material.type, defines, uniforms, textures };
+  }
+
   /** a program's light block: the light leaves' words, packed from lights.state (see _packLights) */
   _initLights(prog) {
     const c = prog.packer, r = c.lightRanges;

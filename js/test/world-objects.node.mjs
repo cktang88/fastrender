@@ -26,6 +26,7 @@ const search = opt('--search', '?mode=world&quality=low&weather=clear&tod=noon&s
 const jsonOut = opt('--json', '');
 const dumpDir = opt('--dump-programs', '');
 const viewArg = opt('--view', '');
+const debugMaterial = opt('--debug-material', ''); // e.g. 'Standard' or a material name: its uniforms + textures as sent
 const size = opt('--size', '1280x800').split('x').map(Number);
 const gameDir = resolve(args[0] || process.env.WORLD_OBJECTS_DIR || '../3d-world-objects');
 const pub = join(gameDir, 'public');
@@ -178,6 +179,7 @@ const result = {
   camera: W().camera.position.toArray().map((v) => +v.toFixed(2)), player: { pos: W().player.pos.toArray().map((v) => +v.toFixed(2)), yaw: +W().player.yaw.toFixed(3), pitch: +W().player.pitch.toFixed(3) },
 };
 console.log(JSON.stringify(result, null, 2));
+if (debugMaterial) console.log(JSON.stringify(renderer.debugMaterials(debugMaterial), null, 1));
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify(result, null, 2));
 // --dump-programs <dir>: every program the game compiled, as NAME.vert.glsl / NAME.frag.glsl for `fastrender xlat-dump`
 if (dumpDir) {

@@ -41,11 +41,11 @@ every push (docs/notes/real-game-3d-world-objects.md: MAE, per-frame costs, what
 | Feature | Plan |
 |---|---|
 | Post-processing cost on the Air tier | EffectComposer runs as three wrote it (render targets natively, `docs/PROTOCOL.md` "Render targets and passes"); merging fullscreen passes into one tile pass is a later optimisation |
-| Sprites, Points, Lines | Instanced billboards / point quads / line strips (three's own programs once the primitive types are bound) |
+| Line loops, points/lines casting shadows | Sprites, Points and Lines are drawn with three's programs (Metal point / line / line-strip primitives); a LineLoop's closing segment and point/line shadow casters are counted |
 | Transmission pass, non-colour backgrounds | the transmission render target is the remaining render-target feature; background textures need three's background mesh |
 | Compressed textures without a host decoder | Native upload of ASTC/BC/ETC/EAC mip chains is done (`CompressedTexture`); `FastRenderer.extensions` does not advertise them yet, so KTX2Loader transcodes to RGBA; cube/array compressed textures are counted |
 | WebGPU `SunLight` maps, spot light maps, per-cascade shadow camera layers | SHADOWS kind 4 binds a lit map; `spotLightMap` not bound. (CSM cascades are ordinary directional maps and render, r187 depth maps and r170 RGBA-packed maps alike; three's shadow autoUpdate/needsUpdate rules are honoured: SHADOW_KEEP) |
-| BatchedMesh instance colours, integer textures | BatchedMesh draws per instance with the plain program; integer samplers bind a zero integer texture |
+| BatchedMesh in shadow maps per shadow camera | BatchedMesh runs three's batching program (one draw per multi-draw entry, gl_DrawID = base instance, colours, integer indirection texture); its shadow casters use the main camera's entry list (three re-culls per shadow camera in onBeforeShadow) |
 | r170 point-light / VSM shadow maps | bound lit (r187 renders them all) |
 | Async program compile | `host.program` is synchronous (~15 ms cold translate + Metal compile per new program, cached on disk after); precompile at load |
 | DOM UI, input, audio | Free with the Electron host |
