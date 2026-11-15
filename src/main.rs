@@ -3,6 +3,7 @@ mod voxel;
 mod script;
 mod three;
 mod xlat;
+mod ring; // v3 per-slot ring layout + bounds-checked writes (src/mac_three.rs)
 mod image; // __fr.readFile / __fr.decodeImage for real web games (JavaScriptCore host)
 #[cfg(target_os = "macos")]
 mod jsc;

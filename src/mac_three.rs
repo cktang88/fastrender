@@ -35,9 +35,8 @@ type RenderEnc = ProtocolObject<dyn MTLRenderCommandEncoder>;
 
 const MAX_LIGHTS: usize = 256;
 const OBJ_BYTES: usize = 64;
-/// v3 ring buffer granularity: Metal wants constant-buffer offsets 256-byte aligned on Mac-family GPUs
-const RING_ALIGN: usize = 256;
-const fn align(n: usize) -> usize { n.div_ceil(RING_ALIGN) * RING_ALIGN }
+// v3 ring buffer: layout, alignment and bounds-checked writes (portable, unit-tested)
+use crate::ring::{align, Bump, RingLayout, RingWriter, RING_ALIGN};
 
 /// `FrObject` (xlat::OBJECT_BLOCK): modelMatrix, modelViewMatrix, normalMatrix as 3 columns of float4. 176 bytes.
 #[repr(C)]
@@ -190,13 +189,11 @@ pub struct ThreeScene {
     /// material instance id -> (block offset in this frame's ring, first texture id in `uni_tex`)
     uni: HashMap<u32, (usize, usize)>,
     uni_tex: Vec<u32>,
-    /// ring offsets this frame: main-pass FrFrame and FrPass, the shadow passes' area (FrFrame/FrPass per pass, VSM
-    /// blocks), the main pass's FrObjects, the shadow passes' FrObjects (one per draw, identity view)
-    frame_off: usize,
-    pass_off: usize,
-    shadow_area_off: usize,
-    objects_off: usize,
-    shadow_objects_off: usize,
+    /// ring regions this frame (src/ring.rs): uniform blocks, main-pass FrFrame and FrPass, the shadow passes' area
+    /// (FrFrame/FrPass per pass, VSM blocks), the main pass's FrObjects, the shadow passes' FrObjects (one per draw,
+    /// identity view); `layout_slot`: the slot whose ring holds this layout's uniform blocks
+    layout: RingLayout,
+    layout_slot: usize,
     /// SHADOW_PASS / SHADOW_DRAWS of the last frame
     shadow_ty: u32,
     shadow_depth_textures: bool,
@@ -556,11 +553,8 @@ impl ThreeScene {
             mats3: HashMap::new(),
             uni: HashMap::new(),
             uni_tex: Vec::new(),
-            frame_off: 0,
-            pass_off: 0,
-            shadow_area_off: 0,
-            objects_off: 0,
-            shadow_objects_off: 0,
+            layout: RingLayout::default(),
+            layout_slot: 0,
             shadow_ty: three::shadow_type::PCF,
             shadow_depth_textures: false,
             shadow_vsm: Vec::new(),
@@ -598,8 +592,7 @@ impl ThreeScene {
         self.last_t = t;
         self.progs.ensure_lit_depth(dev, queue);
         let (slots, uni, uni_tex, shadows) = (&mut self.slots, &mut self.uni, &mut self.uni_tex, &mut self.shadows);
-        let (frame_off, objects_off) = (&mut self.frame_off, &mut self.objects_off);
-        let (pass_off, shadow_area_off, shadow_objects_off) = (&mut self.pass_off, &mut self.shadow_area_off, &mut self.shadow_objects_off);
+        let (layout, layout_slot) = (&mut self.layout, &mut self.layout_slot);
         let (shadow_ty, shadow_depth_textures, shadow_vsm, shadow_ids) = (&mut self.shadow_ty, &mut self.shadow_depth_textures, &mut self.shadow_vsm, &mut self.shadow_ids);
         let result = self.host.frame(t as f64, dt as f64).and_then(|words| {
             let f = three::decode(words)?;
@@ -609,28 +602,26 @@ impl ThreeScene {
                 // for the shadow passes (identity view)
                 let blocks: usize = f.uniforms.map(|u| align(u.block.len() * 4)).sum();
                 let faces: usize = f.shadows.iter().map(|s| if s.kind == three::tex::POINT { 6 } else { 1 }).sum();
-                let shadow_area = (2 * faces + f.shadows.len()) * RING_ALIGN + f.shadows.len() * 2 * VSM_BLOCK;
-                let need = blocks + 2 * RING_ALIGN + shadow_area + 2 * f.draws.len() * align(std::mem::size_of::<FrObject>());
+                let l = RingLayout::new(blocks, faces, f.shadows.len(), VSM_BLOCK, f.draws.len(), std::mem::size_of::<FrObject>());
                 let s = &mut slots[slot_i];
-                if s.ring_cap < need {
-                    s.ring_cap = need.next_power_of_two();
+                if s.ring_cap < l.need {
+                    // the slot's previous frame has finished (its semaphore), so its buffer can be replaced
+                    s.ring_cap = RingLayout::capacity_for(l.need);
                     s.ring = ring(dev, s.ring_cap);
                 }
-                let base = s.ring.contents().as_ptr() as *mut u8;
+                let w = unsafe { RingWriter::new(s.ring.contents().as_ptr() as *mut u8, s.ring_cap) };
                 uni.clear();
                 uni_tex.clear();
                 let mut off = 0;
                 for u in f.uniforms {
-                    unsafe { std::ptr::copy_nonoverlapping(u.block.as_ptr() as *const u8, base.add(off), u.block.len() * 4) };
+                    let bytes = unsafe { std::slice::from_raw_parts(u.block.as_ptr() as *const u8, u.block.len() * 4) };
+                    w.bytes(off, bytes);
                     uni.insert(u.id, (off, uni_tex.len()));
                     uni_tex.extend_from_slice(u.textures);
                     off += align(u.block.len() * 4);
                 }
-                *frame_off = off;
-                *pass_off = off + RING_ALIGN;
-                *shadow_area_off = off + 2 * RING_ALIGN;
-                *objects_off = *shadow_area_off + shadow_area;
-                *shadow_objects_off = *objects_off + f.draws.len() * align(std::mem::size_of::<FrObject>());
+                *layout = l;
+                *layout_slot = slot_i;
                 shadows.clear();
                 shadows.extend_from_slice(f.shadows);
                 let sp = f.shadow_pass.unwrap_or_default();
@@ -943,7 +934,7 @@ impl ThreeScene {
         let p = &self.progs;
         self.view.v3.then(|| {
             format!(
-                "three programs: {} compiled (Metal {:.0} ms total), {} pipelines ({:.0} ms), {} material instances; shadows: {} maps, {} passes, {} casters with three's depth programs, {} native depth-only, {} VSM blurs",
+                "three programs: {} compiled (Metal {:.0} ms total), {} pipelines ({:.0} ms), {} material instances; shadows: {} maps, {} passes, {} casters with three's depth programs, {} native depth-only, {} VSM blurs; ring {} KB/frame, {} refused writes",
                 p.compiled,
                 p.compile_ms,
                 p.pipelines_built,
@@ -953,7 +944,9 @@ impl ThreeScene {
                 self.shadow_jobs.len(),
                 self.shadow_list.iter().filter(|d| d.prog.is_some()).count(),
                 self.shadow_list.iter().filter(|d| d.prog.is_none()).count(),
-                self.vsm_jobs.len()
+                self.vsm_jobs.len(),
+                self.layout.need >> 10,
+                crate::ring::OVERFLOWS.load(std::sync::atomic::Ordering::Relaxed)
             )
         })
     }
@@ -1018,7 +1011,13 @@ impl ThreeScene {
         transparent.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let n = opaque.len() + transparent.len() + shadow_only.len();
         if self.slots[slot_i].cap < n {
-            self.slots[slot_i] = slot(dev, n.next_power_of_two());
+            // grow the object records only: the slot's ring already holds this frame's uniform blocks (update()), and
+            // replacing the whole slot here dropped them for a 64 KB ring the v3 writes below then overran (the real
+            // game's EXC_BAD_ACCESS in prepare, run 43698589636)
+            let cap = n.next_power_of_two();
+            let s = &mut self.slots[slot_i];
+            s.objects = dev.newBufferWithLength_options(cap * OBJ_BYTES, MTLResourceOptions::StorageModeShared).expect("objects");
+            s.cap = cap;
         }
         let s = &self.slots[slot_i];
         let objs = s.objects.contents().as_ptr() as *mut ThreeObj;
@@ -1050,25 +1049,49 @@ impl ThreeScene {
         let nl = self.light_count();
         unsafe { std::ptr::copy_nonoverlapping(self.lights.as_ptr(), s.lights.contents().as_ptr() as *mut ThreeLight, nl) };
         if v3 {
+            self.ensure_ring(dev, slot_i);
             self.prepare_v3(dev, slot_i, projection);
-            let ring = self.slots[slot_i].ring.contents().as_ptr() as *mut u8;
-            unsafe { (ring.add(self.pass_off) as *mut [f32; 4]).write_unaligned([viewport_h, 1.0, 0.0, 0.0]) };
+            self.ring_writer(slot_i).put(self.layout.pass, [viewport_h, 1.0, 0.0, 0.0f32]);
             self.prepare_shadows_v3(dev, slot_i);
         }
         self.prepare_ms = t0.elapsed().as_secs_f64() * 1000.0;
         n
     }
 
+    /// Bounds-checked writer over `slot_i`'s ring.
+    fn ring_writer(&self, slot_i: usize) -> RingWriter {
+        let s = &self.slots[slot_i];
+        unsafe { RingWriter::new(s.ring.contents().as_ptr() as *mut u8, s.ring_cap) }
+    }
+
+    /// Make `slot_i`'s ring hold this frame's layout. update() sized it and copied the uniform blocks into it; when
+    /// the game's frame failed (the last good draw list is kept), the blocks are in another slot's ring: grow this
+    /// one if needed and copy them over (that slot's frame may still be in flight: it is only read).
+    fn ensure_ring(&mut self, dev: &Device, slot_i: usize) {
+        let need = self.layout.need;
+        if self.slots[slot_i].ring_cap < need {
+            let cap = RingLayout::capacity_for(need);
+            self.slots[slot_i].ring = ring(dev, cap);
+            self.slots[slot_i].ring_cap = cap;
+        }
+        let from = self.layout_slot;
+        if from != slot_i && from < self.slots.len() {
+            let n = self.layout.frame.min(self.slots[from].ring_cap);
+            let src = unsafe { std::slice::from_raw_parts(self.slots[from].ring.contents().as_ptr() as *const u8, n) };
+            self.ring_writer(slot_i).bytes(0, src);
+            self.layout_slot = slot_i;
+        }
+    }
+
     /// v3: FrFrame + an FrObject per visible draw in the ring, and each draw's pipeline / depth state (built on
     /// first use: the only place pipelines are created, never inside the encoder loop).
     fn prepare_v3(&mut self, dev: &Device, slot_i: usize, projection: Mat4) {
-        let ring = self.slots[slot_i].ring.contents().as_ptr() as *mut u8;
-        let ring_cap = self.slots[slot_i].ring_cap;
+        let w = self.ring_writer(slot_i);
         let view = self.view.view;
         let c = self.view.cam_pos;
         let frame = FrFrame { projection: projection.to_cols_array(), view: view.to_cols_array(), camera_position: [c.x, c.y, c.z, 0.0] };
-        unsafe { (ring.add(self.frame_off) as *mut FrFrame).write_unaligned(frame) };
-        let mut obj = self.objects_off;
+        w.put(self.layout.frame, frame);
+        let mut obj = Bump::new(self.layout.objects, self.layout.shadow_objects);
         self.progs.name_id("instanceMatrix");
         self.progs.name_id("instanceColor");
         self.progs.name_id("position");
@@ -1082,12 +1105,12 @@ impl ThreeScene {
             if pipe == u32::MAX {
                 continue;
             }
-            if obj + std::mem::size_of::<FrObject>() > ring_cap {
-                break; // cannot happen: update() sized the ring for every draw
+            // one FrObject per draw: the region holds them all (RingLayout), so neither check fails unless the sizing is wrong
+            let Some(obj) = obj.take(std::mem::size_of::<FrObject>()) else { break };
+            if !w.put(obj, fr_object(&view, &d.rows)) {
+                break;
             }
-            unsafe { (ring.add(obj) as *mut FrObject).write_unaligned(fr_object(&view, &d.rows)) };
             self.vis3.push(Draw3 { i, obj, block, tex, pipe, depth });
-            obj += align(std::mem::size_of::<FrObject>());
         }
     }
 
@@ -1139,14 +1162,11 @@ impl ThreeScene {
         if !self.shadow_depth_textures || self.dbg & 2 != 0 {
             return; // older three (RGBA-packed maps) or bisecting: every shadow slot samples a lit map
         }
-        let ring = self.slots[slot_i].ring.contents().as_ptr() as *mut u8;
+        let rw = self.ring_writer(slot_i);
         let vsm = self.shadow_ty == three::shadow_type::VSM;
-        let mut area = self.shadow_area_off;
-        let mut take = |n: usize| {
-            let o = area;
-            area += n;
-            o
-        };
+        // every FrFrame / FrPass / VSM block of the shadow passes comes from the shadow area (RingLayout sized it from
+        // the same SHADOWS list); a full area ends the shadow passes for this frame instead of writing past it
+        let mut area = Bump::new(self.layout.shadow_area, self.layout.shadow_area_end);
         // native depth-only caster: three's MeshDepthMaterial state (LessEqual, depth write)
         let depth_le = self.depth_le;
         let flip_y = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
@@ -1181,13 +1201,10 @@ impl ThreeScene {
             for face in 0..if point { 6 } else { 1 } {
                 let vp = if point { point_face_vp(pos, rec.near, rec.far, face) } else { Mat4::from_cols_array(&rec.vp) };
                 let planes = frustum_planes(&three::gl_to_metal(&vp));
-                let frame = take(RING_ALIGN);
-                let pass = take(RING_ALIGN);
+                let (Some(frame), Some(pass)) = (area.take(RING_ALIGN), area.take(RING_ALIGN)) else { return };
                 let fr = FrFrame { projection: (flip_y * vp).to_cols_array(), view: Mat4::IDENTITY.to_cols_array(), camera_position: [pos.x, pos.y, pos.z, 0.0] };
-                unsafe {
-                    (ring.add(frame) as *mut FrFrame).write_unaligned(fr);
-                    (ring.add(pass) as *mut [f32; 4]).write_unaligned([h as f32, 0.0, 0.0, 0.0]);
-                }
+                rw.put(frame, fr);
+                rw.put(pass, [h as f32, 0.0, 0.0, 0.0]);
                 let first = self.shadow_list.len();
                 for i in 0..self.draws.len() {
                     let d = self.draws[i];
@@ -1215,10 +1232,12 @@ impl ThreeScene {
                     } else {
                         None
                     };
-                    let obj = self.shadow_objects_off + i * align(std::mem::size_of::<FrObject>());
+                    let obj = self.layout.shadow_objects + i * align(std::mem::size_of::<FrObject>());
                     if !written[i] {
+                        if !rw.put(obj, fr_object(&Mat4::IDENTITY, &d.rows)) {
+                            continue;
+                        }
                         written[i] = true;
-                        unsafe { (ring.add(obj) as *mut FrObject).write_unaligned(fr_object(&Mat4::IDENTITY, &d.rows)) };
                     }
                     // side rendered (WebGLShadowMap.getDepthMaterial): shadowSide, else the opposite side (VSM: the same)
                     let side = match &prog {
@@ -1232,22 +1251,26 @@ impl ThreeScene {
             if want_vsm {
                 // three's VSMPass: vertical blur of the depth map into mapPass, horizontal back into map (RG16F)
                 let ids = self.shadow_vsm[k];
-                let pass = take(RING_ALIGN);
-                unsafe { (ring.add(pass) as *mut [f32; 4]).write_unaligned([h as f32, 0.0, 0.0, 0.0]) };
+                let Some(pass) = area.take(RING_ALIGN) else { return };
+                rw.put(pass, [h as f32, 0.0, 0.0, 0.0]);
                 let mut job = VsmJob { map, pass, blocks: [0; 2], pipes: [u32::MAX; 2], progs: ids };
                 for (n, &pid) in ids.iter().enumerate() {
-                    let block = take(VSM_BLOCK);
+                    let Some(block) = area.take(VSM_BLOCK) else { return };
                     job.blocks[n] = block;
                     let Some(p) = self.progs.progs.get(&pid) else { continue };
                     if p.layout.size as usize > VSM_BLOCK {
                         continue;
                     }
-                    unsafe { std::ptr::write_bytes(ring.add(block), 0, VSM_BLOCK) };
+                    rw.zero(block, VSM_BLOCK);
                     for m in &p.layout.members {
-                        let at = unsafe { ring.add(block + m.offset as usize) as *mut f32 };
+                        let at = block + m.offset as usize;
                         match m.name.as_str() {
-                            "resolution" => unsafe { (at as *mut [f32; 2]).write_unaligned([w as f32, h as f32]) },
-                            "radius" => unsafe { at.write_unaligned(rec.radius) },
+                            "resolution" => {
+                                rw.put(at, [w as f32, h as f32]);
+                            }
+                            "radius" => {
+                                rw.put(at, rec.radius);
+                            }
                             _ => {}
                         }
                     }
@@ -1345,7 +1368,7 @@ impl ThreeScene {
                 enc.setCullMode(MTLCullMode::None);
                 unsafe {
                     for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER, xlat::FRAME_BLOCK_BUFFER] {
-                        let off = if b == xlat::DEFAULT_BLOCK_BUFFER { job.blocks[n] } else { self.frame_off };
+                        let off = if b == xlat::DEFAULT_BLOCK_BUFFER { job.blocks[n] } else { self.layout.frame };
                         enc.setVertexBuffer_offset_atIndex(Some(ring), off, b as usize);
                         enc.setFragmentBuffer_offset_atIndex(Some(ring), off, b as usize);
                     }
@@ -1505,9 +1528,9 @@ impl ThreeScene {
                 enc.setVertexBuffer_offset_atIndex(Some(ring), 0, b as usize);
                 enc.setFragmentBuffer_offset_atIndex(Some(ring), 0, b as usize);
             }
-            enc.setVertexBuffer_offset_atIndex(Some(ring), self.frame_off, xlat::FRAME_BLOCK_BUFFER as usize);
-            enc.setFragmentBuffer_offset_atIndex(Some(ring), self.frame_off, xlat::FRAME_BLOCK_BUFFER as usize);
-            enc.setFragmentBuffer_offset_atIndex(Some(ring), self.pass_off, xlat::PASS_BUFFER as usize);
+            enc.setVertexBuffer_offset_atIndex(Some(ring), self.layout.frame, xlat::FRAME_BLOCK_BUFFER as usize);
+            enc.setFragmentBuffer_offset_atIndex(Some(ring), self.layout.frame, xlat::FRAME_BLOCK_BUFFER as usize);
+            enc.setFragmentBuffer_offset_atIndex(Some(ring), self.layout.pass, xlat::PASS_BUFFER as usize);
         }
         let (mut last_pipe, mut last_depth, mut last_bias, mut last_wire) = (u32::MAX, u32::MAX, (0.0f32, 0.0f32), false);
         let mut drawn = 0;
@@ -1517,7 +1540,7 @@ impl ThreeScene {
                 let m = &self.mats3[&d.material].meta;
                 println!(
                     "v3 first draw: {} prog {} geo {} flags {:#x} start {} count {} inst {} x{} block@{} obj@{} frame@{} pipe {} geo attrs {:?} side {} blend {:?} depth {} {} {}",
-                    m.ty, m.program, d.geometry, d.flags, d.start, d.count, d.instances, d.instance_count, v.block, v.obj, self.frame_off, v.pipe,
+                    m.ty, m.program, d.geometry, d.flags, d.start, d.count, d.instances, d.instance_count, v.block, v.obj, self.layout.frame, v.pipe,
                     self.geos.get(&d.geometry).map(|g| g.attrs.iter().map(|a| (a.0, a.2)).collect::<Vec<_>>()),
                     m.side, three::blend_of(m), m.depth_test, m.depth_func, m.depth_write
                 );

@@ -220,6 +220,8 @@ jobs:
       - name: real game 3d-world-objects - native vs browser golden (non-gating)
         if: ${{ !cancelled() }}
         continue-on-error: true
+        env:
+          MTL_DEBUG_LAYER: "1"  # Metal API validation (the paravirtual GPU: no shader validation)
         run: |
           if ! git clone --depth 1 https://github.com/cktang88/3d-world-objects ../3d-world-objects > wo-clone.txt 2>&1; then
             echo "game repo not readable from this job: skipped"; bash .github/annotate.sh warning "world-objects: skipped (clone failed)" wo-clone.txt 5; exit 0
