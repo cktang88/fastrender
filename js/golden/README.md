@@ -21,3 +21,20 @@ Expected differences, some of them by design:
 - **Anti-aliasing:** none on either side.
 
 The reference is regenerated with SwiftShader, so it doesn't depend on a GPU.
+
+## Parity scene
+
+`../examples/parity-scene.mjs` covers what the city does not: every shadow-casting light kind (two directional, spot,
+point), casters drawn with three's own depth programs (alphaTest cut-out, skinned, morphed), flat shading, wireframe
+and a tangent-less normal map. References for three shadow map types:
+
+```bash
+node js/golden/reference.mjs 1 js/golden/ref-parity-t1.png 960x600 parity            # PCF (PCFSoft is PCF on r186+)
+node js/golden/reference.mjs 1 js/golden/ref-parity-vsm-t1.png 960x600 parity vsm
+node js/golden/reference.mjs 1 js/golden/ref-parity-basic-t1.png 960x600 parity basic
+node js/build.mjs js/examples/parity-scene.entry.mjs js/dist/parity.js   # -vsm / -basic entries likewise
+cargo run --release -- bench --three js/dist/parity.js --time 1 --scale 1 --upscale bilinear --size 960x600 \
+  --frames 3 --warmup 2 --shot golden-parity-t1.png
+```
+
+CI gates all three at MAE < 1.5 (Nov 2026: PCF 0.96, VSM 0.84).

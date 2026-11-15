@@ -7,6 +7,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuff
 renderer.setPixelRatio(1);
 renderer.setSize(w, h);
 configure(renderer);
+if (shadow === 'off') renderer.shadowMap.enabled = false; // sensitivity check: what the shadows contribute to the diff
 document.body.appendChild(renderer.domElement);
 update(t);
 camera.aspect = w / h;

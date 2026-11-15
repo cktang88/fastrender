@@ -135,32 +135,42 @@ jobs:
           set -o pipefail
           node js/build.mjs js/examples/parity-scene.entry.mjs js/dist/parity.js
           node js/build.mjs js/examples/parity-scene-vsm.entry.mjs js/dist/parity-vsm.js
+          node js/build.mjs js/examples/parity-scene-basic.entry.mjs js/dist/parity-basic.js
           rc=0; ./target/release/fastrender selftest --three js/dist/parity.js --upscale bilinear --scale 1 --size 640x400 > parity-selftest.txt 2>&1 || rc=$?
           bash .github/annotate.sh notice "parity selftest (exit $rc)" parity-selftest.txt 25
           rc2=0; ./target/release/fastrender selftest --three js/dist/parity-vsm.js --upscale bilinear --scale 1 --size 640x400 > parity-vsm-selftest.txt 2>&1 || rc2=$?
           bash .github/annotate.sh notice "parity VSM selftest (exit $rc2)" parity-vsm-selftest.txt 25
           grep -q "three-programs selftest: PASS" parity-selftest.txt
+          rc3=0; ./target/release/fastrender selftest --three js/dist/parity-basic.js --upscale bilinear --scale 1 --size 640x400 > parity-basic-selftest.txt 2>&1 || rc3=$?
+          bash .github/annotate.sh notice "parity Basic selftest (exit $rc3)" parity-basic-selftest.txt 25
           grep -q "three-programs selftest: PASS" parity-vsm-selftest.txt
-      - name: golden parity scene (PCF) and parity VSM
+          grep -q "three-programs selftest: PASS" parity-basic-selftest.txt
+      - name: golden parity scene (PCF, VSM, Basic shadow maps)
         if: always()
         run: |
           set -o pipefail
           test -s js/dist/parity.js || node js/build.mjs js/examples/parity-scene.entry.mjs js/dist/parity.js
           test -s js/dist/parity-vsm.js || node js/build.mjs js/examples/parity-scene-vsm.entry.mjs js/dist/parity-vsm.js
+          test -s js/dist/parity-basic.js || node js/build.mjs js/examples/parity-scene-basic.entry.mjs js/dist/parity-basic.js
           rc=0; ./target/release/fastrender bench --three js/dist/parity.js --time 1 --scale 1 --upscale bilinear --size 960x600 --frames 3 --warmup 2 --shot golden-parity-t1.png > golden-parity-bench.txt 2>&1 || rc=$?
           bash .github/annotate.sh notice "golden parity bench (exit $rc)" golden-parity-bench.txt 20
           rc2=0; ./target/release/fastrender bench --three js/dist/parity-vsm.js --time 1 --scale 1 --upscale bilinear --size 960x600 --frames 3 --warmup 2 --shot golden-parity-vsm-t1.png > golden-parity-vsm-bench.txt 2>&1 || rc2=$?
           bash .github/annotate.sh notice "golden parity VSM bench (exit $rc2)" golden-parity-vsm-bench.txt 20
-          [ "$rc" = 0 ] && [ "$rc2" = 0 ]
+          rc3=0; ./target/release/fastrender bench --three js/dist/parity-basic.js --time 1 --scale 1 --upscale bilinear --size 960x600 --frames 3 --warmup 2 --shot golden-parity-basic-t1.png > golden-parity-basic-bench.txt 2>&1 || rc3=$?
+          bash .github/annotate.sh notice "golden parity Basic bench (exit $rc3)" golden-parity-basic-bench.txt 20
+          [ "$rc" = 0 ] && [ "$rc2" = 0 ] && [ "$rc3" = 0 ]
           node js/golden/diff.mjs js/golden/ref-parity-t1.png golden-parity-t1.png golden-diff-parity-t1.png | tee golden-parity.json
           node js/golden/diff.mjs js/golden/ref-parity-vsm-t1.png golden-parity-vsm-t1.png golden-diff-parity-vsm-t1.png | tee golden-parity-vsm.json
-          echo "golden parity: $(cat golden-parity.json), VSM: $(cat golden-parity-vsm.json)" >> "$GITHUB_STEP_SUMMARY"
+          node js/golden/diff.mjs js/golden/ref-parity-basic-t1.png golden-parity-basic-t1.png golden-diff-parity-basic-t1.png | tee golden-parity-basic.json
+          echo "golden parity: $(cat golden-parity.json), VSM: $(cat golden-parity-vsm.json), Basic: $(cat golden-parity-basic.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=golden parity (Basic)::$(cat golden-parity-basic.json)"
           echo "::notice title=golden parity (PCF)::$(cat golden-parity.json)"
           echo "::notice title=golden parity (VSM)::$(cat golden-parity-vsm.json)"
-          grep "three programs:" golden-parity-bench.txt golden-parity-vsm-bench.txt >> "$GITHUB_STEP_SUMMARY" || true
-      - name: golden parity MAE<4 (PCF and VSM)
+          grep "three programs:" golden-parity-bench.txt golden-parity-vsm-bench.txt golden-parity-basic-bench.txt >> "$GITHUB_STEP_SUMMARY" || true
+      # first run (43694580347): PCF 0.96, VSM 0.84; with every shadow disabled the browser image is 2.51 off
+      - name: golden parity MAE<1.5 (PCF, VSM, Basic)
         if: always()
-        run: node -e "for(const f of ['golden-parity.json','golden-parity-vsm.json']){const r=JSON.parse(require('fs').readFileSync(f,'utf8'));console.log(f,'MAE',r.mae);if(!(r.mae<4))process.exit(1)}"
+        run: node -e "for(const f of ['golden-parity.json','golden-parity-vsm.json','golden-parity-basic.json']){const r=JSON.parse(require('fs').readFileSync(f,'utf8'));console.log(f,'MAE',r.mae);if(!(r.mae<1.5))process.exit(1)}"
       - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
         run: |
           ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000 --rounds 1

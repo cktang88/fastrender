@@ -121,6 +121,8 @@ by NAME to the location the program reflected; an attribute the program reads bu
 |---|---|
 | 8 MATERIAL_UNIFORMS | n, then per material instance used this frame: id, byteSize, textureCount, `byteSize/4` words of the packed default block, `textureCount` texture ids (one per `layout.textures` entry, same order) |
 | 9 SHADOWS | n, then n × 28: kind (1 directional, 2 spot, 3 point, 4 sun), index (three's lights-state index), mapSize x y, bias, normalBias, radius, camera near, far, light world position xyz, shadow camera view-projection 4×4 (point lights: face 0) |
+| 10 SHADOW_PASS | shadowMap.type (0 Basic, 1 PCF, 3 VSM; r186+ never 2), depth-texture maps (1: r180+ convention, rendered natively; 0: older three's RGBA-packed maps, bound lit), n (= SHADOWS n), then per SHADOWS entry: VSM vertical + horizontal blur program ids (0 0 unless VSM; point lights never) |
+| 11 SHADOW_DRAWS | n (= DRAWS n), then per draw in DRAWS order: depth material instance id, distance material instance id (three's MeshDepthMaterial / MeshDistanceMaterial or custom depth materials; 0 = the native depth-only caster path). Written by `js/three-programs.js` (shadow section) |
 
 Texture ids in MATERIAL_UNIFORMS are uploaded texture ids or special ids:
 `0xFF000000 | kind << 16 | index` = the shadow map the native side rendered for SHADOWS entry (kind, index);

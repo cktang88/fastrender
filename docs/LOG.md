@@ -45,6 +45,38 @@ unchanged (`shadowDraw` fills a reused record per draw index; `writeShadowDraws`
 three-programs.test.mjs): an unchanged frame changes no block and emits the same stream; after 8 kinds of edit the kept
 blocks equal a from-scratch pack; allocation < 8 B per extra draw (300 vs 3000 draws).
 
+## 2026-11-15: parity: every shadow map, three's depth programs, GL gl_FragCoord, per-stage samplers; parity golden 0.96 / VSM 0.84
+
+The known gaps of the three-programs path, closed natively (CI run 43694580347, macos-26 paravirtual GPU, first try):
+
+| | how |
+|---|---|
+| all shadow maps | one map per SHADOWS entry, sized from `shadow.mapSize`: directional and spot lights a 2D Depth32Float, point lights a **cube** (r187 renders point shadows into a `CubeDepthTexture`, not the old 4:2 packed 2D map; faces from three's `_cubeDirections` / `_cubeUps`). Every shadow camera y-flipped so rows are stored as WebGL stores them, so three's shadow matrices and cube lookups sample them unchanged. PCF (compare, linear), Basic (nearest), **VSM** (RG16F map + mapPass, blurred by three's own `vsm.glsl` ShaderMaterials translated like any program; resolution/radius packed natively by name). PCFSoft is PCF on r186+, as in three. Older three (RGBA-packed maps, r170) is detected and binds lit maps |
+| casters | `js/three-programs.js` (shadow section) mirrors `WebGLShadowMap.getDepthMaterial`: casters with alphaTest + map/alphaMap, skinning, morphs, batching, displacement, clipping or a custom depth/distance material are drawn with three's MeshDepthMaterial / MeshDistanceMaterial programs (per caster material, shadowSide rules, VSM receivers); the rest with a native depth-only vertex shader (`vs_three_depth`), cheaper on a TBDR GPU. New ops SHADOW_PASS (10) and SHADOW_DRAWS (11) |
+| `gl_FragCoord` | rebuilt GL-style in the MSL from FrPass (fragment buffer 0: height, flip); flip 1 in the main pass, 0 in the GL-oriented shadow / VSM passes |
+| samplers | numbered per stage; three-fixed sampler states (shadow maps, DFG/LTC, bone/morph/batching) are `constexpr` samplers; literal-indexed sampler arrays split per element so shadow maps need no sampler slot |
+| textures | 2D-array (r187 morph targets: `DataArrayTexture`) and 3D uploads (`dim` in TEXTURE meta); `CompressedTexture` mip chains for ASTC/BC/ETC2/EAC mapped to MTLPixelFormat (support checked per device) |
+| wireframe | `setTriangleFillMode(.lines)` (main and shadow passes) |
+
+Golden (`js/golden`, 960×600, t = 1, vs browser three r187 / SwiftShader), the new parity scene
+(`js/examples/parity-scene.mjs`: 2 directional + spot + point shadows, alphaTest cut-out caster, skinned mesh posed by
+its skeleton, morph-target mesh, flat-shaded, wireframe, tangent-less normal map, instanced posts):
+
+| scene | MAE (0–255) | pixels off by > 24/255 |
+|---|---:|---:|
+| parity, PCF (PCFSoft requested) | **0.96** | 1.2 % |
+| parity, VSM | **0.84** | 1.23 % |
+| (browser with shadows off vs the PCF reference: what shadows weigh) | 2.51 | 2.45 % |
+| city (unchanged) | 0.97 | 2.2 % |
+
+Parity frame: 4 maps / 9 depth passes (2 + spot + 6 cube faces), 13 caster draws through three's depth programs, 26
+native depth-only; all 15 programs compile and validate under the Metal API validation layer (MTL_DEBUG_LAYER), 0
+problems, 0 GPU errors. CI gates parity (PCF, VSM, Basic) at MAE < 1.5.
+
+Left: sun (cascaded) shadows and `spotLightMap` bind lit / nothing; `FastRenderer.extensions` does not yet advertise
+ASTC/BC/ETC (KTX2Loader transcodes to RGBA); compressed cube/array textures; > 16 game textures in one stage would
+need argument buffers.
+
 ## 2026-11-15: three.js's own programs run natively: golden MAE 0.97 (hand-written path: 2.23)
 
 `FastRenderer({ programs: 'three' })` is now drawn end to end on Metal: JS hands three's exact GLSL to

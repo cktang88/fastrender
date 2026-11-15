@@ -78,10 +78,11 @@ derives from) cannot be configured out through these crates. LTO might trim some
 | `FrObject` | `buffer(2)`: `modelMatrix` @0, `modelViewMatrix` @64, `normalMatrix` @128 (3 columns × 16 B), size 176. Filled natively per draw. |
 | `FrFrame` | `buffer(3)`: `projectionMatrix` @0, `viewMatrix` @64, `cameraPosition` @128, size 144. Filled natively per pass (main pass: three's projection with the MetalFX jitter). |
 | vertex attributes | `[[stage_in]]` with `attribute(location)` from `layout.attributes`. A `mat4` attribute (`instanceMatrix`) takes 4 consecutive locations, as columns `instanceMatrix_0..3`. Vertex buffers must use buffer indices ≥ 4. Only attributes the shader actually reads are listed. |
-| `sampler2D`/`samplerCube`/… | Each combined sampler is split into `texture(i)` + `sampler(i)` with the same `i`. Indices are program-wide: textures the fragment stage uses come first from 0, in glslang binding order, then vertex-only textures. A texture used in both stages has the same `i` in both. An array `sampler2D s[N]` (shadow maps) takes N consecutive indices and is listed as `s[0]`…`s[N-1]`; a length-1 array is still `s[0]`, as in WebGL. |
+| `sampler2D`/`samplerCube`/… | Each combined sampler is split into `texture(t)` + `sampler(s)`, **numbered per stage** (`textures[i].vertex` / `.fragment` = `{texture, sampler}`; Metal allows 16 samplers per stage). `textures[i].index` is the slot ordinal the JS packer writes ids in (fragment textures first, then vertex-only ones). Sampler states three fixes (shadow maps: PCF compare / VSM linear / Basic nearest; DFG and LTC LUTs; bone, morph and batching data textures) are compiled in as `constexpr sampler`s (`sampler: null`: nothing to bind). Sampler arrays indexed only by literals (shadow maps after three's loop unrolling) are split per element before glslang (`NAME_frs_K`, reported as `NAME[K]`), because SPIRV-Cross cannot make a sampler array constexpr; so shadow maps cost no sampler slot. |
+| `gl_FragCoord` | GL's origin is bottom-left, Metal's top-left. The fragment entry's `[[position]]` is renamed `fr_FragCoordMtl` and `gl_FragCoord` rebuilt from `FrPass` (fragment `buffer(0)`, `float4(height, flip, 0, 0)`): `y = flip ? height - y : y`. The main pass uses flip 1 (three's PCF noise, dithering and transmission now see GL's pixel); shadow / VSM passes, stored GL-oriented by a y-flipped projection, use flip 0. |
 | entry points | `fr_vertex` and `fr_fragment`. Each stage is a separate MSL source, so compile them as two `MTLLibrary`s: both declare `struct _RESERVED_IDENTIFIER_FIXUP_gl_DefaultUniformBlock`. |
 | clip space | `fixup_clipspace` is on. Feed three's OpenGL-convention `projectionMatrix` unchanged; the vertex shader remaps z to [0, w]. There is no y flip (GL and Metal NDC are both y-up). |
-| derivatives | Metal's window y points down, so `dfdy` has the opposite sign of GLSL's `dFdy`; every `dfdy(` in the MSL is routed through `fr_gl_dfdy` (= `-dfdy`), which keeps three's flat shading (`cross(dFdx, dFdy)`) and tangent-less normal maps (`getTangentFrame`) facing the right way. `gl_FragCoord.y` stays top-down (only three's dithering / shadow noise reads it). |
+| derivatives | Metal's window y points down, so `dfdy` has the opposite sign of GLSL's `dFdy`; every `dfdy(` in the MSL is routed through `fr_gl_dfdy` (= `-dfdy`), which keeps three's flat shading (`cross(dFdx, dFdy)`) and tangent-less normal maps (`getTangentFrame`) facing the right way. `gl_FragCoord` is GL's (see above). |
 | varyings | glslang auto-maps locations per stage in declaration order, and three declares varyings in a different order per stage (Lambert); Metal pairs `[[user(locnN)]]` by number. The fragment inputs are renumbered to the vertex outputs of the same name (crossed varyings hung the GPU on CI before this). Inputs the vertex stage never writes get spare locations ≥ 32. |
 | layout extras | `textures[i].kind` (`2d`/`2dArray`/`3d`/`cube`) and `.shadow` (depth-compare sampler), `attributes[i].type`, from SPIR-V reflection: the binder picks neutral textures, compare samplers and vertex formats from them. |
 
@@ -148,11 +149,9 @@ later step can add `MTLBinaryArchive` for that.
 
 ## Risks / follow-ups
 
-- **Sampler count:** Metal allows 16 samplers per stage without argument buffers. A Physical material with many
-  shadowed lights plus maps can exceed this, because every combined sampler becomes its own `sampler(i)`. Fix: dedupe
-  samplers by state on the native side (constexpr samplers via `remap_constexpr_sampler`) or use argument buffers.
-- `gl_FragCoord` is top-left in Metal and bottom-left in GL. three uses it only for dithering and noise today; anything
-  that uses it for screen UVs (transmission, custom shaders) will be flipped.
+- **Sampler count:** per-stage numbering + constexpr samplers for every three-fixed state leave only material maps
+  needing sampler slots; a program with more than 16 game textures in one stage is reported and the rest left
+  unbound (argument buffers would lift it; not needed by any three material).
 - `gl_FrontFacing`: set the pipeline's front-face winding to counter-clockwise, as in GL.
 - Arrays of arrays and non-literal (spec-constant) array sizes return an error. three does not emit them.
 - `normalize_glsl` is textual. A custom shader that declares a global (non-uniform) named `modelMatrix`, `modelViewMatrix`
