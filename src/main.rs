@@ -8,6 +8,10 @@ mod jsc;
 #[cfg(target_os = "macos")]
 mod mac_three;
 #[cfg(target_os = "macos")]
+mod dfg_lut;
+#[cfg(target_os = "macos")]
+mod mac_programs;
+#[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
 mod app;
@@ -20,7 +24,7 @@ const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
   voxel-mesh  generate a 512x128x512 island and greedy-mesh it natively (any OS)
   selftest stage-by-stage render diagnostics (writes selftest-*.png)
   xlat-dump <dir> <out>  translate every NAME.vert.glsl/NAME.frag.glsl three.js program in <dir> to MSL (any OS)
-options: --scene city|voxel|script|three --script game.js (props = box count) --three bundle.js (real three.js game) --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|temporal|bilinear
+options: --scene city|voxel|script|three --script game.js (props = box count) --three bundle.js (real three.js game) --programs three|native --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|temporal|bilinear
          --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
          --warmup n --seconds s --warmup-seconds s --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
 

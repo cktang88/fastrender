@@ -33,7 +33,9 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 /// Bumped whenever the translation output (MSL or layout) can change, so stale cache entries are never used.
-pub const TRANSLATOR_VERSION: &str = "xlat-1 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae";
+/// The `xlat-N` part is bumped by hand when this module's output changes; the crate versions are checked against
+/// Cargo.lock by the `translator_version_matches_lockfile` test.
+pub const TRANSLATOR_VERSION: &str = "xlat-3 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
 
 pub const DEFAULT_BLOCK_BUFFER: u32 = 1;
 pub const OBJECT_BLOCK_BUFFER: u32 = 2;
@@ -45,44 +47,83 @@ pub const OBJECT_BLOCK: &str =
     "layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; };";
 const OBJECT_UNIFORMS: [(&str, &str); 3] =
     [("mat4", "modelMatrix"), ("mat4", "modelViewMatrix"), ("mat3", "normalMatrix")];
+/// The per-pass camera block `normalize_glsl` declares: `projectionMatrix` @0, `viewMatrix` @64, `cameraPosition`
+/// @128, 144 bytes, `buffer(3)`. Filled natively for each pass (main pass: three's projection with this frame's
+/// MetalFX jitter; a shadow pass: the shadow camera), so material blocks hold no camera state.
+pub const FRAME_BLOCK: &str =
+    "layout(std140) uniform FrFrame { mat4 projectionMatrix; mat4 viewMatrix; vec3 cameraPosition; };";
+const FRAME_UNIFORMS: [(&str, &str); 3] = [("mat4", "projectionMatrix"), ("mat4", "viewMatrix"), ("vec3", "cameraPosition")];
+pub const FRAME_BLOCK_SIZE: u32 = 144;
 
 // ---------------------------------------------------------------------------------------------------------------
 // normalize_glsl
 
 /// GLSL ES 3.00 as three.js emits it -> GLSL 4.50 for glslang's Vulkan target. Purely line based, idempotent; the JS
-/// side (`normalizeGlsl`) implements the same rules, kept in sync by `tests/fixtures/xlat/*.norm.glsl`:
+/// side (`normalizeGlsl`) implements the same rules, kept in sync by `tests/fixtures/xlat/normalize`:
 /// 1. a line whose trimmed text starts with `#version` becomes `#version 450`;
 /// 2. a line whose trimmed text starts with `#extension` becomes empty (WebGL extensions mean nothing to glslang);
 /// 3. a `precision <q> <type>;` statement alone on its line becomes empty;
-/// 4. `uniform [<precision>] mat4 modelMatrix;`, `uniform [<precision>] mat4 modelViewMatrix;` and
-///    `uniform [<precision>] mat3 normalMatrix;` alone on their line become empty, and if any was found,
-///    [`OBJECT_BLOCK`] (always all three members, so the block is identical in both stages) is inserted as its own
-///    line before the first line that is not blank, not a `//` comment, not a preprocessor directive and not inside
-///    `#if`/`#ifdef`/`#ifndef` (end of file if none).
-/// "Alone on its line": after trimming whitespace the line ends in `;` and the part before it, split on whitespace,
-/// is exactly those tokens (the `;` may also be attached to the last token or separated by spaces).
+/// 4. in a `uniform [<precision>] <type> a, b, ...;` declaration alone on its line, the names that are object
+///    uniforms (`mat4 modelMatrix`, `mat4 modelViewMatrix`, `mat3 normalMatrix`) or camera uniforms
+///    (`mat4 projectionMatrix`, `mat4 viewMatrix`, `vec3 cameraPosition`) are removed: the line becomes empty, or
+///    `uniform [<precision> ]<type> <rest joined with ", ">;` when other names remain;
+/// 5. if any object uniform was removed [`OBJECT_BLOCK`], and if any camera uniform was removed [`FRAME_BLOCK`], is
+///    inserted (both on ONE line, object block first, separated by a space) before the first line that is not
+///    blank, not a `//` comment, not a preprocessor directive and not inside `#if`/`#ifdef`/`#ifndef` (end of file
+///    if none). Each block always declares all its members, so it is identical in both stages.
+/// "Alone on its line": a trailing `// comment` is ignored (and dropped from a line rule 3 or 4 changes); after
+/// trimming whitespace the statement ends in `;`; the part before it is split on whitespace (names also on `,`).
 /// Line endings are normalised to `\n`.
 pub fn normalize_glsl(src: &str) -> String {
     let mut out: Vec<String> = Vec::new();
-    let mut found_object = false;
+    let (mut found_object, mut found_frame) = (false, false);
     for line in src.lines() {
         let t = line.trim();
         if t.starts_with("#version") {
             out.push("#version 450".into());
+            continue;
         } else if t.starts_with("#extension") {
             out.push(String::new());
-        } else if let Some(toks) = statement_tokens(t) {
-            let is_precision = toks.len() == 3 && toks[0] == "precision" && is_precision_qualifier(toks[1]);
-            let is_object = object_uniform(&toks);
-            if is_object {
-                found_object = true;
-            }
-            out.push(if is_precision || is_object { String::new() } else { line.to_string() });
-        } else {
+            continue;
+        }
+        let code = match t.find("//") {
+            Some(i) => t[..i].trim_end(),
+            None => t,
+        };
+        let Some(body) = code.strip_suffix(';') else {
             out.push(line.to_string());
+            continue;
+        };
+        let toks: Vec<&str> = body.split_whitespace().collect();
+        if toks.len() == 3 && toks[0] == "precision" && is_precision_qualifier(toks[1]) {
+            out.push(String::new());
+            continue;
+        }
+        match split_uniform(body) {
+            Some((prec, ty, names)) => {
+                let mut keep = Vec::new();
+                let mut removed = false;
+                for n in names {
+                    if OBJECT_UNIFORMS.iter().any(|(t, m)| *t == ty && *m == n) {
+                        found_object = true;
+                        removed = true;
+                    } else if FRAME_UNIFORMS.iter().any(|(t, m)| *t == ty && *m == n) {
+                        found_frame = true;
+                        removed = true;
+                    } else {
+                        keep.push(n);
+                    }
+                }
+                out.push(match (removed, keep.is_empty()) {
+                    (false, _) => line.to_string(),
+                    (true, true) => String::new(),
+                    (true, false) => format!("uniform {}{ty} {};", prec.map(|p| format!("{p} ")).unwrap_or_default(), keep.join(", ")),
+                });
+            }
+            None => out.push(line.to_string()),
         }
     }
-    if found_object {
+    if found_object || found_frame {
         let mut depth = 0i32;
         let mut at = out.len();
         for (i, l) in out.iter().enumerate() {
@@ -102,30 +143,45 @@ pub fn normalize_glsl(src: &str) -> String {
             at = i;
             break;
         }
-        out.insert(at, OBJECT_BLOCK.to_string());
+        let blocks = match (found_object, found_frame) {
+            (true, true) => format!("{OBJECT_BLOCK} {FRAME_BLOCK}"),
+            (true, false) => OBJECT_BLOCK.to_string(),
+            _ => FRAME_BLOCK.to_string(),
+        };
+        out.insert(at, blocks);
     }
     let mut s = out.join("\n");
     s.push('\n');
     s
 }
 
-/// `a b c;` / `a b c ;` -> `[a, b, c]`; anything not ending in `;` -> None.
-fn statement_tokens(t: &str) -> Option<Vec<&str>> {
-    let body = t.strip_suffix(';')?;
-    Some(body.split_whitespace().collect())
+/// `uniform [<precision>] <type> a, b , c` (no `;`) -> (precision, type, [a, b, c]); None for anything else
+/// (arrays, initialisers and other declarations are not split: their names are not plain identifiers).
+fn split_uniform(body: &str) -> Option<(Option<&str>, &str, Vec<&str>)> {
+    let rest = body.trim_start().strip_prefix("uniform")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut it = rest.split_whitespace();
+    let mut ty = it.next()?;
+    let mut prec = None;
+    if is_precision_qualifier(ty) {
+        prec = Some(ty);
+        ty = it.next()?;
+    }
+    // the names: everything after the type
+    let base = prec.and_then(|p| rest.find(p).map(|i| i + p.len())).unwrap_or(0);
+    let at = base + rest[base..].find(ty)? + ty.len();
+    let names: Vec<&str> = rest[at..].split(',').map(str::trim).collect();
+    let ident = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !n.starts_with(|c: char| c.is_ascii_digit());
+    if !ty.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || !names.iter().all(|n| ident(n)) {
+        return None;
+    }
+    Some((prec, ty, names))
 }
 
 fn is_precision_qualifier(s: &str) -> bool {
     matches!(s, "lowp" | "mediump" | "highp")
-}
-
-fn object_uniform(toks: &[&str]) -> bool {
-    let rest = match toks {
-        ["uniform", q, ty, name] if is_precision_qualifier(q) => [*ty, *name],
-        ["uniform", ty, name] => [*ty, *name],
-        _ => return false,
-    };
-    OBJECT_UNIFORMS.iter().any(|(ty, name)| rest == [*ty, *name])
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -162,11 +218,25 @@ pub struct Texture {
     pub name: String,
     /// `texture(index)` and `sampler(index)`, in every stage that uses it.
     pub index: u32,
+    /// `2d`, `2dArray`, `3d` or `cube` (what the native side must bind: a mismatched texture type is a Metal error).
+    #[serde(default = "kind_2d")]
+    pub kind: String,
+    /// A depth-comparison sampler (`sampler2DShadow`, `samplerCubeShadow`): bind a depth texture and a sampler with
+    /// a compare function (three: `LessEqualCompare`, linear filtering).
+    #[serde(default)]
+    pub shadow: bool,
+}
+
+fn kind_2d() -> String {
+    "2d".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attribute {
     pub name: String,
+    /// GLSL type as read by the shader (`float`, `vec2`..`vec4`, `ivec4`, `mat4`, ...): the vertex format to use.
+    #[serde(rename = "type", default)]
+    pub ty: String,
     /// `attribute(location)`. A `mat4` attribute (`instanceMatrix`) takes 4 consecutive locations from here.
     pub location: u32,
 }
@@ -181,6 +251,9 @@ pub struct Layout {
     /// `FrObject` at buffer(2), when the program declares one.
     #[serde(rename = "objectBlock")]
     pub object_block: Option<Block>,
+    /// `FrFrame` (camera) at buffer(3), when the program declares one. Filled natively per pass; JS never packs it.
+    #[serde(rename = "frameBlock", default)]
+    pub frame_block: Option<Block>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +336,10 @@ mod glsl {
 
     /// (vertex SPIR-V, fragment SPIR-V)
     pub fn compile(vertex: &str, fragment: &str) -> Result<(Vec<u32>, Vec<u32>), String> {
+        // one translation at a time per process: `warm_up` may still be running on its background thread when the
+        // first `host.program` call arrives (it then simply waits for the warm-up to finish)
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if glslang::Compiler::acquire().is_none() {
             return Err("glslang_initialize_process failed".into());
         }
@@ -390,8 +467,9 @@ fn block_of(c: &Msl, ty: spirv_cross2::handle::Handle<spirv_cross2::handle::Type
 struct StageInfo {
     default_block: Option<Block>,
     object_block: Option<Block>,
-    /// (name, array length if declared as an array) in binding order
-    textures: Vec<(String, Option<u32>)>,
+    frame_block: Option<Block>,
+    /// (name, array length if declared as an array, kind, shadow) in binding order
+    textures: Vec<(String, Option<u32>, String, bool)>,
     attributes: Vec<Attribute>,
 }
 
@@ -400,13 +478,14 @@ fn reflect(words: &[u32], model: ExecutionModel) -> Result<StageInfo, String> {
     // only what the shader statically uses: SPIRV-Cross leaves unused inputs and resources out of the MSL
     let res = sc(c.shader_resources_for_active_variables(sc(c.active_interface_variables())?))?;
     let all = sc(res.all_resources())?;
-    let mut info = StageInfo { default_block: None, object_block: None, textures: vec![], attributes: vec![] };
+    let mut info = StageInfo { default_block: None, object_block: None, frame_block: None, textures: vec![], attributes: vec![] };
     for ub in &all.uniform_buffers {
         let block_name = sc(c.name(ub.base_type_id))?.map(|s| s.to_string()).unwrap_or_default();
         match block_name.as_str() {
             "gl_DefaultUniformBlock" => info.default_block = Some(block_of(&c, ub.base_type_id)?),
             "FrObject" => info.object_block = Some(block_of(&c, ub.base_type_id)?),
-            other => return Err(format!("unsupported uniform block `{other}` (only loose uniforms and FrObject)")),
+            "FrFrame" => info.frame_block = Some(block_of(&c, ub.base_type_id)?),
+            other => return Err(format!("unsupported uniform block `{other}` (only loose uniforms, FrObject and FrFrame)")),
         }
     }
     for kind in [&all.storage_buffers, &all.storage_images, &all.separate_images, &all.separate_samplers, &all.push_constant_buffers] {
@@ -421,29 +500,60 @@ fn reflect(words: &[u32], model: ExecutionModel) -> Result<StageInfo, String> {
             _ => 0,
         };
         let t = sc(c.type_description(r.type_id))?;
-        let count = match &t.inner {
-            TypeInner::Array { dimensions, .. } => Some(array_len(dimensions)?),
-            _ => None,
+        let (count, image) = match &t.inner {
+            TypeInner::Array { dimensions, base, .. } => (Some(array_len(dimensions)?), *base),
+            _ => (None, r.type_id),
         };
-        tex.push((binding, r.name.to_string(), count));
+        let (kind, shadow) = image_kind(&c, image)?;
+        tex.push((binding, r.name.to_string(), count, kind, shadow));
     }
     tex.sort();
-    info.textures = tex.into_iter().map(|(_, n, c)| (n, c)).collect();
+    info.textures = tex.into_iter().map(|(_, n, c, k, s)| (n, c, k, s)).collect();
     if model == ExecutionModel::Vertex {
         for r in &all.stage_inputs {
             let location = match sc(c.decoration(r.id, Decoration::Location))? {
                 Some(DecorationValue::Literal(l)) => l,
                 _ => return Err(format!("vertex input `{}` has no location", r.name)),
             };
-            info.attributes.push(Attribute { name: r.name.to_string(), location });
+            let t = sc(c.type_description(r.base_type_id))?;
+            let ty = match &t.inner {
+                TypeInner::Scalar(_) | TypeInner::Vector { .. } | TypeInner::Matrix { .. } => type_name(&t.inner)?,
+                other => return Err(format!("vertex input `{}`: unsupported type {other:?}", r.name)),
+            };
+            info.attributes.push(Attribute { name: r.name.to_string(), ty, location });
         }
         info.attributes.sort_by_key(|a| a.location);
     }
     Ok(info)
 }
 
+/// (kind, shadow) of a sampled image type (see [`Texture::kind`]).
+fn image_kind(c: &Msl, ty: spirv_cross2::handle::Handle<spirv_cross2::handle::TypeId>) -> Result<(String, bool), String> {
+    use spirv_cross2::reflect::ImageClass;
+    use spirv_cross2::spirv::Dim;
+    let mut t = sc(c.type_description(ty))?;
+    while let TypeInner::Pointer { base, .. } | TypeInner::Array { base, .. } = t.inner {
+        t = sc(c.type_description(base))?;
+    }
+    let TypeInner::Image(img) = &t.inner else { return Err(format!("sampler type {:?} is not an image", t.inner)) };
+    let (depth, arrayed) = match img.class {
+        ImageClass::Sampled { depth, arrayed, .. } => (depth, arrayed),
+        ImageClass::Texture { arrayed, .. } => (false, arrayed),
+        ImageClass::Storage { .. } => return Err("storage images are not supported".into()),
+    };
+    let kind = match (img.dimension, arrayed) {
+        (Dim::Dim2D, false) => "2d",
+        (Dim::Dim2D, true) => "2dArray",
+        (Dim::Dim3D, _) => "3d",
+        (Dim::DimCube, false) => "cube",
+        (d, a) => return Err(format!("unsupported texture dimension {d:?} (arrayed: {a})")),
+    };
+    Ok((kind.into(), depth))
+}
+
 const KEY_DEFAULT: u32 = 0;
 const KEY_OBJECT: u32 = 1;
+const KEY_FRAME: u32 = 2;
 const KEY_TEXTURE0: u32 = 100;
 
 fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture]) -> Result<String, String> {
@@ -455,7 +565,11 @@ fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture
     };
     for ub in &all.uniform_buffers {
         let block_name = sc(c.name(ub.base_type_id))?.map(|s| s.to_string()).unwrap_or_default();
-        let (key, buffer) = if block_name == "FrObject" { (KEY_OBJECT, OBJECT_BLOCK_BUFFER) } else { (KEY_DEFAULT, DEFAULT_BLOCK_BUFFER) };
+        let (key, buffer) = match block_name.as_str() {
+            "FrObject" => (KEY_OBJECT, OBJECT_BLOCK_BUFFER),
+            "FrFrame" => (KEY_FRAME, FRAME_BLOCK_BUFFER),
+            _ => (KEY_DEFAULT, DEFAULT_BLOCK_BUFFER),
+        };
         set_key(&mut c, ub.id, key)?;
         sc(c.add_resource_binding(model, ResourceBinding::Qualified { set: 0, binding: key }, &BindTarget { buffer, texture: 0, sampler: 0, count: None }))?;
     }
@@ -487,7 +601,29 @@ fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture
     o.common.fixup_clipspace = model == ExecutionModel::Vertex;
     o.common.flip_vertex_y = false;
     let out = sc(c.compile(&o))?;
-    Ok(out.to_string())
+    Ok(gl_derivatives(&out.to_string()))
+}
+
+/// The MSL option set `to_msl` uses, part of every cache key (a change in the options is a change in the output).
+pub const MSL_OPTIONS: &str = "msl3.0 macos no-argument-buffers fixup_clipspace(vertex) no-flip-y dfdy-gl";
+
+/// Metal's window y axis points down, GL's up: `dfdy` has the opposite sign of GLSL's `dFdy`. three relies on the GL
+/// sign (flat shading: `cross(dFdx(p), dFdy(p))`; normal mapping without tangents: `getTangentFrame`), so every
+/// `dfdy(` call is routed through a wrapper that negates it. (`fwidth` uses absolute values and is unaffected.)
+fn gl_derivatives(msl: &str) -> String {
+    if !msl.contains("dfdy(") {
+        return msl.to_string();
+    }
+    let body = msl.replace("dfdy(", "fr_gl_dfdy(");
+    let helper = "\n// GL's dFdy (window y up) from Metal's dfdy (y down)\ntemplate<typename T> inline T fr_gl_dfdy(T x) { return -dfdy(x); }\n";
+    // after the `using namespace metal;` line SPIRV-Cross always emits
+    match body.find("using namespace metal;") {
+        Some(i) => {
+            let at = i + "using namespace metal;".len();
+            format!("{}{helper}{}", &body[..at], &body[at..])
+        }
+        None => format!("#include <metal_stdlib>\nusing namespace metal;{helper}{body}"),
+    }
 }
 
 /// The first translation in a process also pays glslang's one-time setup (process init + built-in symbol tables,
@@ -517,22 +653,26 @@ fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String>
         (Some(a), Some(b)) if a != b => return Err("FrObject differs between stages".into()),
         (a, b) => a.clone().or_else(|| b.clone()),
     };
+    let frame_block = match (&vi.frame_block, &fi.frame_block) {
+        (Some(a), Some(b)) if a != b => return Err("FrFrame differs between stages".into()),
+        (a, b) => a.clone().or_else(|| b.clone()),
+    };
 
     let mut textures: Vec<Texture> = Vec::new();
     let mut next = 0;
-    for (name, count) in fi.textures.iter().chain(vi.textures.iter()) {
+    for (name, count, kind, shadow) in fi.textures.iter().chain(vi.textures.iter()) {
         if textures.iter().any(|t| t.name == *name || t.name == format!("{name}[0]")) {
             continue;
         }
         match count {
             Some(n) => {
                 for i in 0..*n {
-                    textures.push(Texture { name: format!("{name}[{i}]"), index: next });
+                    textures.push(Texture { name: format!("{name}[{i}]"), index: next, kind: kind.clone(), shadow: *shadow });
                     next += 1;
                 }
             }
             None => {
-                textures.push(Texture { name: name.clone(), index: next });
+                textures.push(Texture { name: name.clone(), index: next, kind: kind.clone(), shadow: *shadow });
                 next += 1;
             }
         }
@@ -551,6 +691,7 @@ fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String>
             textures,
             attributes: vi.attributes,
             object_block,
+            frame_block,
         },
     })
 }
@@ -609,7 +750,7 @@ impl Cache {
     }
 
     pub fn key(vertex_normalized: &str, fragment_normalized: &str) -> String {
-        hash_hex(&[TRANSLATOR_VERSION, vertex_normalized, fragment_normalized])
+        hash_hex(&[TRANSLATOR_VERSION, MSL_OPTIONS, vertex_normalized, fragment_normalized])
     }
 
     fn path(&self, key: &str) -> PathBuf {
@@ -643,6 +784,22 @@ impl Cache {
         }
         Ok((p, false))
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The host side of `host.program(key, vertexGlsl, fragmentGlsl)` (docs/PROTOCOL.md v3), shared by every JS host
+// (JavaScriptCore today, the Electron addon later): translate through the cache, answer JS with the layout JSON and
+// hand the program to the renderer.
+
+/// Translates one program for `host.program`. Returns the layout as the JSON string JS receives and the program
+/// (MSL + layout) for the renderer. `key` is three's program cache key; it only labels errors.
+pub fn host_program(cache: &Cache, key: &str, vertex: &str, fragment: &str) -> Result<(String, Program), String> {
+    let (p, _hit) = cache.translate(vertex, fragment).map_err(|e| {
+        let name = key.split(',').next().unwrap_or(key);
+        format!("program {name}: {e}")
+    })?;
+    let json = serde_json::to_string(&p.layout).map_err(|e| e.to_string())?;
+    Ok((json, p))
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -758,6 +915,26 @@ mod tests {
     }
 
     #[test]
+    fn translator_version_matches_lockfile() {
+        let lock = include_str!("../Cargo.lock");
+        for krate in ["glslang-sys", "spirv-cross-sys", "spirv-cross2"] {
+            let at = lock.find(&format!("name = \"{krate}\"\nversion = \"")).unwrap_or_else(|| panic!("{krate} not in Cargo.lock"));
+            let v = lock[at..].lines().nth(1).unwrap().trim_start_matches("version = ").trim_matches('"');
+            assert!(TRANSLATOR_VERSION.contains(&format!("{krate} {v}")), "TRANSLATOR_VERSION must name {krate} {v} (Cargo.lock)");
+        }
+    }
+
+    #[test]
+    fn normalize_declarations() {
+        let n = normalize_glsl("uniform mat4 modelViewMatrix, projectionMatrix, custom; // raw\nuniform highp vec3 cameraPosition;// eye\nvoid main(){}\n");
+        assert_eq!(n, format!("{OBJECT_BLOCK} {FRAME_BLOCK}\nuniform mat4 custom;\n\nvoid main(){{}}\n"));
+        // arrays, initialisers and other types are not ours
+        for keep in ["uniform mat4 viewMatrix[2];", "uniform vec3 cameraPosition = vec3(0.0);", "uniform mat3 modelViewMatrix;", "uniform float a, b;"] {
+            assert_eq!(normalize_glsl(keep), format!("{keep}\n"));
+        }
+    }
+
+    #[test]
     fn normalize_rules() {
         let src = "#version 300 es\r\nprecision highp float;\r\n#if defined(X)\r\nuniform mat4 modelMatrix;\r\n#endif\r\nvoid main() {}";
         let out = normalize_glsl(src);
@@ -771,7 +948,7 @@ mod tests {
             for s in [v, f] {
                 let n = normalize_glsl(&s);
                 assert_eq!(normalize_glsl(&n), n, "{name}");
-                let extra = n.contains("uniform FrObject") as usize;
+                let extra = (n.contains("uniform FrObject") || n.contains("uniform FrFrame")) as usize;
                 assert_eq!(n.lines().count(), s.lines().count() + extra, "{name}");
                 assert!(!n.contains("precision highp float;"), "{name}");
             }
@@ -970,9 +1147,10 @@ mod tests {
         let default = Block { size: l.size, members: l.members.clone() };
         let mut declared = 0;
         for msl in [&p.vertex_msl, &p.fragment_msl] {
-            if check_msl_agrees(name, msl, MSL_DEFAULT_BLOCK, &default) {
+            // a stage may declare the merged struct without reading it (its own uniforms all moved to FrObject/FrFrame)
+            if msl.contains(&format!("{MSL_DEFAULT_BLOCK}& ")) && check_msl_agrees(name, msl, MSL_DEFAULT_BLOCK, &default) {
                 declared += 1;
-                assert!(msl.contains(&format!("{MSL_DEFAULT_BLOCK}& ")) && msl.contains(&format!("[[buffer({DEFAULT_BLOCK_BUFFER})]]")), "{name}");
+                assert!(msl.contains(&format!("{MSL_DEFAULT_BLOCK}& _")) && msl.contains(&format!("[[buffer({DEFAULT_BLOCK_BUFFER})]]")), "{name}");
             }
         }
         assert!(l.members.is_empty() || declared > 0, "{name}: default block in no stage");
@@ -988,9 +1166,24 @@ mod tests {
             }
         }
         assert!(
-            !l.members.iter().any(|m| ["modelMatrix", "modelViewMatrix", "normalMatrix"].contains(&m.name.as_str())),
-            "{name}: object uniform left in the default block"
+            !l.members.iter().any(|m| ["modelMatrix", "modelViewMatrix", "normalMatrix", "projectionMatrix", "viewMatrix", "cameraPosition"].contains(&m.name.as_str())),
+            "{name}: object/camera uniform left in the default block"
         );
+        if let Some(fb) = &l.frame_block {
+            check_block(name, fb.size, &fb.members);
+            let names: Vec<_> = fb.members.iter().map(|m| (m.name.as_str(), m.offset, m.ty.as_str())).collect();
+            assert_eq!(names, [("projectionMatrix", 0, "mat4"), ("viewMatrix", 64, "mat4"), ("cameraPosition", 128, "vec3")], "{name}");
+            assert_eq!(fb.size, FRAME_BLOCK_SIZE);
+            for msl in [&p.vertex_msl, &p.fragment_msl] {
+                if check_msl_agrees(name, msl, "FrFrame", fb) && msl.contains("FrFrame& ") {
+                    assert!(msl.contains(&format!("[[buffer({FRAME_BLOCK_BUFFER})]]")), "{name}");
+                }
+            }
+        }
+        // every derivative in y goes through the GL-sign wrapper
+        for msl in [&p.vertex_msl, &p.fragment_msl] {
+            assert!(!msl.replace("fr_gl_dfdy(", "").replace("return -dfdy(x)", "").contains("dfdy("), "{name}: raw dfdy");
+        }
         // textures: unique contiguous indices, bound as texture(i) + sampler(i) in some stage
         let mut idx: Vec<u32> = l.textures.iter().map(|t| t.index).collect();
         idx.sort();
@@ -1098,6 +1291,12 @@ mod tests {
         for a in ["position", "normal", "uv", "instanceMatrix", "instanceColor"] {
             assert!(attrs.contains(&a), "{a}");
         }
+        let ty = |n: &str| p.layout.attributes.iter().find(|a| a.name == n).unwrap().ty.clone();
+        assert_eq!((ty("position").as_str(), ty("uv").as_str(), ty("instanceMatrix").as_str(), ty("instanceColor").as_str()), ("vec3", "vec2", "mat4", "vec3"));
+        let t = |n: &str| p.layout.textures.iter().find(|t| t.name == n).unwrap().clone();
+        assert_eq!((t("map").kind.as_str(), t("map").shadow), ("2d", false));
+        assert_eq!((t("directionalShadowMap[1]").kind.as_str(), t("directionalShadowMap[1]").shadow), ("2d", true));
+        assert_eq!(t("pointShadowMap[0]").kind, "cube");
         assert!(p.layout.object_block.is_some());
         assert!(p.vertex_msl.contains("FrObject& ") && p.vertex_msl.contains("[[buffer(2)]]"));
         // three's GL-convention projection is fed unchanged; z is remapped to Metal's range in the shader

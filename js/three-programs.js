@@ -40,13 +40,31 @@ export const SHADOW_KIND = { directionalShadowMap: 1, spotShadowMap: 2, pointSha
 
 // ------------------------------------------------------------------ GLSL normalisation (shared contract with src/xlat.rs)
 export const OBJECT_BLOCK = 'layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; };';
+export const FRAME_BLOCK = 'layout(std140) uniform FrFrame { mat4 projectionMatrix; mat4 viewMatrix; vec3 cameraPosition; };';
 const OBJECT_UNIFORMS = new Set(['mat4 modelMatrix', 'mat4 modelViewMatrix', 'mat3 normalMatrix']);
+const FRAME_UNIFORMS = new Set(['mat4 projectionMatrix', 'mat4 viewMatrix', 'vec3 cameraPosition']);
+/** names the native side fills itself (FrObject per draw, FrFrame per pass): JS never packs them */
+export const NATIVE_UNIFORMS = new Set(['modelMatrix', 'modelViewMatrix', 'normalMatrix', 'projectionMatrix', 'viewMatrix', 'cameraPosition']);
 const PRECISION_Q = new Set(['lowp', 'mediump', 'highp']);
+const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const WORD = /^[A-Za-z0-9_]+$/;
 
-/** `a b c;` / `a b c ;` -> ['a', 'b', 'c']; a line not ending in `;` -> null */
-function statementTokens(t) {
-  if (!t.endsWith(';')) return null;
-  return t.slice(0, -1).split(/\s+/).filter(Boolean);
+/** `uniform [<q>] <type> a, b , c` (no `;`) -> [precision|null, type, names]; null for anything else */
+function splitUniform(body) {
+  const b = body.trimStart();
+  if (!b.startsWith('uniform')) return null;
+  const rest = b.slice(7);
+  if (!/^\s/.test(rest)) return null;
+  const toks = rest.split(/\s+/).filter(Boolean);
+  let k = 0, prec = null;
+  let ty = toks[k++];
+  if (ty === undefined) return null;
+  if (PRECISION_Q.has(ty)) { prec = ty; ty = toks[k++]; if (ty === undefined) return null; }
+  const base = prec !== null ? rest.indexOf(prec) + prec.length : 0;
+  const tyAt = rest.indexOf(ty, base);
+  const names = rest.slice(tyAt + ty.length).split(',').map((n) => n.trim());
+  if (!WORD.test(ty) || !names.every((n) => IDENT.test(n))) return null;
+  return [prec, ty, names];
 }
 
 /**
@@ -55,36 +73,45 @@ function statementTokens(t) {
  *  1. a line whose trimmed text starts with `#version` becomes `#version 450`;
  *  2. a line whose trimmed text starts with `#extension` becomes empty (line numbers are kept);
  *  3. a `precision <q> <type>;` statement alone on its line becomes empty;
- *  4. `uniform [<q>] mat4 modelMatrix;`, `uniform [<q>] mat4 modelViewMatrix;`, `uniform [<q>] mat3 normalMatrix;`
- *     alone on their line become empty and, if any was found, OBJECT_BLOCK (always all three members: offsets
- *     0 / 64 / 128, 176 bytes, filled natively per draw) is inserted as its own line before the first line that is
- *     not blank, not a `//` comment, not a preprocessor directive and not inside #if/#ifdef/#ifndef (else at the end).
+ *  4. in a `uniform [<q>] <type> a, b, ...;` declaration alone on its line, object uniforms (mat4 modelMatrix,
+ *     mat4 modelViewMatrix, mat3 normalMatrix) and camera uniforms (mat4 projectionMatrix, mat4 viewMatrix,
+ *     vec3 cameraPosition) are removed: the line becomes empty, or `uniform [<q> ]<type> <rest, ", ">;`;
+ *  5. if any object uniform was removed OBJECT_BLOCK, and if any camera uniform was removed FRAME_BLOCK, is inserted
+ *     (both on ONE line, separated by a space) before the first line that is not blank, not a `//` comment, not a
+ *     preprocessor directive and not inside #if/#ifdef/#ifndef (else at the end).
+ * A trailing `// comment` is ignored (and dropped from a line rules 3/4 change).
  * Line endings become `\n`; the output always ends with `\n`. Idempotent.
  */
 export function normalizeGlsl(src) {
   const segs = src.split('\n');
   if (segs[segs.length - 1] === '') segs.pop();
   const out = [];
-  let foundObject = false;
+  let foundObject = false, foundFrame = false;
   for (let i = 0; i < segs.length; i++) {
     let line = segs[i];
     if ((i < segs.length - 1 || src.endsWith('\n')) && line.endsWith('\r')) line = line.slice(0, -1); // Rust str::lines
     const t = line.trim();
     if (t.startsWith('#version')) { out.push('#version 450'); continue; }
     if (t.startsWith('#extension')) { out.push(''); continue; }
-    const toks = statementTokens(t);
-    if (toks) {
-      const isPrecision = toks.length === 3 && toks[0] === 'precision' && PRECISION_Q.has(toks[1]);
-      let isObject = false;
-      if (toks[0] === 'uniform') {
-        if (toks.length === 4 && PRECISION_Q.has(toks[1])) isObject = OBJECT_UNIFORMS.has(toks[2] + ' ' + toks[3]);
-        else if (toks.length === 3) isObject = OBJECT_UNIFORMS.has(toks[1] + ' ' + toks[2]);
-      }
-      if (isObject) foundObject = true;
-      out.push(isPrecision || isObject ? '' : line);
-    } else out.push(line);
+    const c = t.indexOf('//');
+    const code = c >= 0 ? t.slice(0, c).trimEnd() : t;
+    if (!code.endsWith(';')) { out.push(line); continue; }
+    const body = code.slice(0, -1);
+    const toks = body.split(/\s+/).filter(Boolean);
+    if (toks.length === 3 && toks[0] === 'precision' && PRECISION_Q.has(toks[1])) { out.push(''); continue; }
+    const u = splitUniform(body);
+    if (!u) { out.push(line); continue; }
+    const [prec, ty, names] = u;
+    const keep = [];
+    let removed = false;
+    for (const n of names) {
+      if (OBJECT_UNIFORMS.has(ty + ' ' + n)) { foundObject = true; removed = true; }
+      else if (FRAME_UNIFORMS.has(ty + ' ' + n)) { foundFrame = true; removed = true; }
+      else keep.push(n);
+    }
+    out.push(!removed ? line : keep.length === 0 ? '' : `uniform ${prec !== null ? prec + ' ' : ''}${ty} ${keep.join(', ')};`);
   }
-  if (foundObject) {
+  if (foundObject || foundFrame) {
     let depth = 0, at = out.length;
     for (let i = 0; i < out.length; i++) {
       const t = out[i].trim();
@@ -97,7 +124,7 @@ export function normalizeGlsl(src) {
       at = i;
       break;
     }
-    out.splice(at, 0, OBJECT_BLOCK);
+    out.splice(at, 0, foundObject && foundFrame ? `${OBJECT_BLOCK} ${FRAME_BLOCK}` : foundObject ? OBJECT_BLOCK : FRAME_BLOCK);
   }
   return out.join('\n') + '\n';
 }
@@ -387,17 +414,10 @@ export class ThreePrograms {
     this.lights.setupView(lights, camera);
     this._clippingEnabled = this.clipping.init(r.clippingPlanes || [], !!r.localClippingEnabled);
     const f = this.frame;
-    // temporal-upscaler jitter hook (MetalFX): host.projectionJitter() or renderer.projectionJitter -> [jx, jy] in
-    // NDC units; clip.xy += j * clip.w, i.e. row 3 of the projection is added to rows 0/1 (perspective and ortho).
-    // Must match the native jitter (core::jittered) of the same frame. Unset: three's matrix, unchanged.
-    const jit = this.host && typeof this.host.projectionJitter === 'function' ? this.host.projectionJitter() : r.projectionJitter;
-    if (jit && (jit[0] || jit[1])) {
-      const pm = this._jitterProj || (this._jitterProj = camera.projectionMatrix.clone());
-      pm.copy(camera.projectionMatrix);
-      const el = pm.elements;
-      for (let c = 0; c < 4; c++) { el[c * 4] += jit[0] * el[c * 4 + 3]; el[c * 4 + 1] += jit[1] * el[c * 4 + 3]; }
-      f.projectionMatrix.value = pm;
-    } else f.projectionMatrix.value = camera.projectionMatrix;
+    // projectionMatrix / viewMatrix / cameraPosition are moved by normalizeGlsl into FrFrame, which the native side
+    // fills per pass (with this frame's MetalFX jitter in the main pass); kept here for programs a host compiles
+    // without that move
+    f.projectionMatrix.value = camera.projectionMatrix;
     f.viewMatrix.value = camera.matrixWorldInverse;
     const e = camera.matrixWorld.elements;
     this._camPos.x = e[12]; this._camPos.y = e[13]; this._camPos.z = e[14];
@@ -521,9 +541,11 @@ export class ThreePrograms {
     const p = this.programCache.acquireProgram(parameters, key); // three's WebGLProgram on the recording GL
     const vs = p.program.shaders.find((s) => s.type === GL.VERTEX_SHADER).source;
     const fs = p.program.shaders.find((s) => s.type === GL.FRAGMENT_SHADER).source;
-    let layout = this.host && this.host.program ? this.host.program(key, vs, fs) : null;
+    // the native side refers to the program by this short id (material uploads carry it), not by three's long key
+    const id = this.newId();
+    let layout = this.host && this.host.program ? this.host.program(key, vs, fs, id) : null;
     if (typeof layout === 'string') layout = JSON.parse(layout);
-    prog = { id: this.newId(), key, vertex: vs, fragment: fs, layout, webglProgram: p, usedTimes: 1, name: parameters.shaderName || parameters.shaderType };
+    prog = { id, key, vertex: vs, fragment: fs, layout, webglProgram: p, usedTimes: 1, name: parameters.shaderName || parameters.shaderType };
     if (layout) {
       const c = compileLayout(layout);
       prog.packer = c;

@@ -4,9 +4,12 @@ import { FastRenderer } from '../fastrender-three.js';
 
 const blocks = Number(globalThis.__fr?.params?.blocks ?? 6);
 const { scene, camera, update, configure, stats } = createCity({ blocks });
-const renderer = new FastRenderer();
+// three.js's own programs (translated to MSL natively) by default; `--programs native` selects the hand-written
+// fast-tier shader (protocol v2)
+const programs = globalThis.__fr?.params?.programs === 'native' ? undefined : 'three';
+const renderer = new FastRenderer({ programs });
 configure(renderer);
-console.log(`three-city: ${stats.buildings} buildings, ${stats.windows} instanced windows`);
+console.log(`three-city: ${stats.buildings} buildings, ${stats.windows} instanced windows, programs: ${programs || 'native'}`);
 let frames = 0;
 globalThis.frame = (t) => {
   update(t);

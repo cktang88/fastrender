@@ -1,6 +1,6 @@
 #version 450
 #define varying in
-layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; };
+layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; }; layout(std140) uniform FrFrame { mat4 projectionMatrix; mat4 viewMatrix; vec3 cameraPosition; };
 layout(location = 0) out highp vec4 pc_fragColor;
 #define gl_FragColor pc_fragColor
 #define gl_FragDepthEXT gl_FragDepth
@@ -36,8 +36,8 @@ layout(location = 0) out highp vec4 pc_fragColor;
 #define SHADER_NAME shadermaterial-layout-probe
 #define USE_SHADOWMAP
 #define SHADOWMAP_TYPE_PCF
-uniform mat4 viewMatrix;
-uniform vec3 cameraPosition;
+
+
 uniform bool isOrthographic;
 #define OPAQUE
 vec4 LinearTransferOETF( in vec4 value ) {

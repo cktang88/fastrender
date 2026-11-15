@@ -42,6 +42,8 @@ unsafe extern "C" {
     fn JSValueIsObject(ctx: JSContextRef, v: JSValueRef) -> bool;
     fn JSValueMakeNumber(ctx: JSContextRef, n: f64) -> JSValueRef;
     fn JSValueMakeUndefined(ctx: JSContextRef) -> JSValueRef;
+    fn JSValueMakeNull(ctx: JSContextRef) -> JSValueRef;
+    fn JSValueMakeString(ctx: JSContextRef, s: JSStringRef) -> JSValueRef;
     fn JSValueMakeFromJSONString(ctx: JSContextRef, s: JSStringRef) -> JSValueRef;
     fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exc: *mut JSValueRef) -> JSStringRef;
     fn JSValueProtect(ctx: JSContextRef, v: JSValueRef);
@@ -103,7 +105,40 @@ unsafe extern "C" fn no_dealloc(_bytes: *mut c_void, _ctx: *mut c_void) {}
 thread_local! {
     /// resource uploads/releases from `__fr._upload` / `__fr._release`, drained by the renderer
     static RESOURCES: std::cell::RefCell<Vec<Resource>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// programs translated for `__fr.program` (protocol v3), drained by the renderer: (program id, three's cache key, program)
+    static PROGRAMS: std::cell::RefCell<Vec<(u32, String, crate::xlat::Program)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// the shader cache `__fr.program` translates through
+    static XLAT_CACHE: crate::xlat::Cache = crate::xlat::Cache::open_default();
 }
+
+/// __fr.program(key, vertexGlsl, fragmentGlsl, id) -> layout JSON string, or null when translation failed (logged).
+/// `id` is the short id material uploads refer to the program by.
+/// Synchronous: three's program is needed for this frame's uniform packing. The translation itself is the
+/// host-independent `xlat::host_program` (the Electron addon calls the same function).
+unsafe extern "C" fn js_program(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectRef, argc: usize, argv: *const JSValueRef, _exc: *mut JSValueRef) -> JSValueRef {
+    if argc < 3 {
+        return JSValueMakeNull(ctx);
+    }
+    let key = to_rust_string(ctx, *argv);
+    let vs = to_rust_string(ctx, *argv.add(1));
+    let fs = to_rust_string(ctx, *argv.add(2));
+    let id = if argc > 3 { JSValueToNumber(ctx, *argv.add(3), null_mut()) as u32 } else { 0 };
+    let t = Instant::now();
+    match XLAT_CACHE.with(|c| crate::xlat::host_program(c, &key, &vs, &fs)) {
+        Ok((json, program)) => {
+            if std::env::var_os("FASTRENDER_LOG_PROGRAMS").is_some() {
+                println!("program {} translated in {:.1} ms", key.split(',').next().unwrap_or(""), t.elapsed().as_secs_f64() * 1000.0);
+            }
+            PROGRAMS.with(|p| p.borrow_mut().push((id, key, program)));
+            JSValueMakeString(ctx, JsStr::new(&json).0)
+        }
+        Err(e) => {
+            eprintln!("host.program: {e}");
+            JSValueMakeNull(ctx)
+        }
+    }
+}
+
 
 // JSTypedArrayType values (JavaScriptCore/JSValueRef.h)
 const TA_UINT8: u32 = 3;
@@ -196,6 +231,8 @@ impl ScriptHost {
             JSObjectSetProperty(ctx, fr, JsStr::new("_upload").0, up as JSValueRef, 0, null_mut());
             let rel = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("_release").0, js_release);
             JSObjectSetProperty(ctx, fr, JsStr::new("_release").0, rel as JSValueRef, 0, null_mut());
+            let prog = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("program").0, js_program);
+            JSObjectSetProperty(ctx, fr, JsStr::new("program").0, prog as JSValueRef, 0, null_mut());
             let params = JSValueMakeFromJSONString(ctx, JsStr::new(params_json).0);
             if !params.is_null() {
                 JSObjectSetProperty(ctx, fr, JsStr::new("params").0, params, 0, null_mut());
@@ -233,6 +270,14 @@ impl ScriptHost {
 
     /// Resource uploads/releases the script made since the last call (protocol v2).
     pub fn take_resources(&self) -> Vec<Resource> { RESOURCES.with(|r| std::mem::take(&mut *r.borrow_mut())) }
+
+    /// Programs `__fr.program` translated since the last call (protocol v3), in call order.
+    pub fn take_programs(&self) -> Vec<(u32, String, crate::xlat::Program)> { PROGRAMS.with(|p| std::mem::take(&mut *p.borrow_mut())) }
+
+    /// Pay glslang's one-time process setup (~120 ms) on a background thread, off the first program's path.
+    pub fn warm_up_translator() {
+        let _ = std::thread::Builder::new().name("xlat-warm-up".into()).spawn(crate::xlat::warm_up);
+    }
 
     /// Run one frame of the script; returns the command words it wrote.
     pub fn frame(&mut self, t: f64, dt: f64) -> Result<&[u32], String> {

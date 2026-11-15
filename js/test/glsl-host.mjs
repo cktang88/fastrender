@@ -127,14 +127,15 @@ export function buildLayout(vertexGlsl, fragmentGlsl) {
     }
   }
   const attributes = (r.vert.inputs || []).map((a) => ({ name: a.name, location: a.location })).sort((a, b) => a.location - b.location);
-  return { size: def.size, members: def.members, textures, attributes, objectBlock: block(r.vert, 'FrObject') || block(r.frag, 'FrObject') };
+  return { size: def.size, members: def.members, textures, attributes, objectBlock: block(r.vert, 'FrObject') || block(r.frag, 'FrObject'), frameBlock: block(r.vert, 'FrFrame') || block(r.frag, 'FrFrame') };
 }
 
 export function makeGlslHost(base = {}) {
-  const host = { programs: new Map(), ...base };
-  host.program = (key, vs, fs) => {
+  const host = { programs: new Map(), programIds: new Map(), ...base };
+  host.program = (key, vs, fs, id) => {
     const layout = buildLayout(vs, fs);
     host.programs.set(key, { vertex: vs, fragment: fs, layout });
+    host.programIds.set(id, key);
     return JSON.stringify(layout);
   };
   return host;

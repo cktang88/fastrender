@@ -5,6 +5,8 @@
 use serde::Deserialize;
 
 pub const MAGIC: u32 = 0x46524D32;
+/// protocol v3 (`programs: 'three'`): three.js's own programs, see docs/PROTOCOL.md
+pub const MAGIC3: u32 = 0x46524D33;
 const OP_CAMERA: u32 = 1;
 const OP_LIGHTS: u32 = 2;
 const OP_FOG: u32 = 3;
@@ -12,6 +14,24 @@ const OP_BACKGROUND: u32 = 4;
 const OP_DRAWS: u32 = 5;
 const OP_TONEMAP: u32 = 6;
 const OP_SHADOW: u32 = 7;
+const OP_MATERIAL_UNIFORMS: u32 = 8;
+const OP_SHADOWS: u32 = 9;
+pub const SHADOW_WORDS: usize = 28;
+
+/// Special texture ids in MATERIAL_UNIFORMS (docs/PROTOCOL.md v3).
+pub mod tex {
+    pub const NONE: u32 = 0;
+    /// `SHADOW | kind << 16 | index`: the shadow map of SHADOWS entry (kind, index)
+    pub const SHADOW: u32 = 0xFF00_0000;
+    pub const DFG_LUT: u32 = 0xFE00_0001;
+    pub const TRANSMISSION: u32 = 0xFE00_0002;
+    pub const UNSUPPORTED: u32 = 0xFE00_00FF;
+    /// SHADOWS kinds
+    pub const DIRECTIONAL: u32 = 1;
+    pub const SPOT: u32 = 2;
+    pub const POINT: u32 = 3;
+    pub const SUN: u32 = 4;
+}
 pub const DRAW_WORDS: usize = 20;
 pub const LIGHT_WORDS: usize = 16;
 
@@ -70,6 +90,73 @@ pub struct ThreeLight {
     pub extra: [f32; 3],
 }
 
+/// One SHADOWS record (28 words): a shadow-casting light in three's lights-state order.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShadowRec {
+    /// `tex::DIRECTIONAL`.. `tex::SUN`
+    pub kind: u32,
+    /// three's lights-state index (the `[i]` of `directionalShadowMap[i]`)
+    pub index: u32,
+    pub map_size: [f32; 2],
+    pub bias: f32,
+    pub normal_bias: f32,
+    pub radius: f32,
+    pub near: f32,
+    pub far: f32,
+    pub pos: [f32; 3],
+    /// shadow camera view-projection, column-major, OpenGL clip space (point lights: face 0)
+    pub vp: [f32; 16],
+}
+
+/// One material instance's packed uniform block and texture ids for this frame (MATERIAL_UNIFORMS).
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialUniforms<'a> {
+    pub id: u32,
+    /// the default uniform block, `layout.size` bytes
+    pub block: &'a [u32],
+    /// one id per `layout.textures` entry
+    pub textures: &'a [u32],
+}
+
+/// Iterates the MATERIAL_UNIFORMS payload without allocating.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UniformsIter<'a> {
+    words: &'a [u32],
+    left: usize,
+}
+
+impl<'a> Iterator for UniformsIter<'a> {
+    type Item = MaterialUniforms<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        let w = self.words;
+        let (id, bytes, nt) = (w[0], w[1] as usize, w[2] as usize);
+        let nb = bytes.div_ceil(4);
+        let m = MaterialUniforms { id, block: &w[3..3 + nb], textures: &w[3 + nb..3 + nb + nt] };
+        self.words = &w[3 + nb + nt..];
+        Some(m)
+    }
+}
+
+/// validate the MATERIAL_UNIFORMS payload once, so iterating it cannot go out of bounds
+fn uniforms_iter(p: &[u32]) -> Result<UniformsIter<'_>, String> {
+    let n = *p.first().ok_or("material uniforms: no count")? as usize;
+    let mut w = 1;
+    for i in 0..n {
+        let h = p.get(w..w + 3).ok_or_else(|| format!("material uniforms: record {i} header past the end"))?;
+        let len = 3 + (h[1] as usize).div_ceil(4) + h[2] as usize;
+        if w + len > p.len() {
+            return Err(format!("material uniforms: record {i} ({} bytes, {} textures) past the end", h[1], h[2]));
+        }
+        w += len;
+    }
+    Ok(UniformsIter { words: &p[1..], left: n })
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Fog {
     pub color: [f32; 3],
@@ -94,6 +181,12 @@ pub struct Frame<'a> {
     pub tonemap: (u32, f32),
     /// the game's shadow camera (view-projection, OpenGL clip space) for the shadow-casting sun
     pub shadow_vp: Option<[f32; 16]>,
+    /// protocol v3 stream (magic 'FRM3')
+    pub v3: bool,
+    /// v3: shadow casters (SHADOWS)
+    pub shadows: &'a [ShadowRec],
+    /// v3: packed uniform blocks per material instance in use (MATERIAL_UNIFORMS)
+    pub uniforms: UniformsIter<'a>,
 }
 
 fn view<T>(words: &[u32], count: usize, stride: usize) -> Result<&[T], String> {
@@ -106,7 +199,7 @@ fn view<T>(words: &[u32], count: usize, stride: usize) -> Result<&[T], String> {
 }
 
 pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
-    if words.len() < 2 || words[0] != MAGIC {
+    if words.len() < 2 || (words[0] != MAGIC && words[0] != MAGIC3) {
         return Err("bad magic: renderer.render() was not called this frame".into());
     }
     let end = words[1] as usize;
@@ -114,7 +207,7 @@ pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
         return Err(format!("stream length {end} exceeds buffer {}", words.len()));
     }
     let f = |w: u32| f32::from_bits(w);
-    let mut out = Frame::default();
+    let mut out = Frame { v3: words[0] == MAGIC3, ..Frame::default() };
     let mut w = 2;
     while w + 1 < end {
         let (op, n) = (words[w], words[w + 1] as usize);
@@ -144,6 +237,14 @@ pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
                 }
                 out.lights = view(&p[1..], count, LIGHT_WORDS)?;
             }
+            OP_SHADOWS => {
+                let count = *p.first().ok_or("shadows: no count")? as usize;
+                if n != 1 + count * SHADOW_WORDS {
+                    return Err(format!("shadows: {count} records need {} words, got {n}", 1 + count * SHADOW_WORDS));
+                }
+                out.shadows = view(&p[1..], count, SHADOW_WORDS)?;
+            }
+            OP_MATERIAL_UNIFORMS => out.uniforms = uniforms_iter(p)?,
             OP_DRAWS => {
                 let count = *p.first().ok_or("draws: no count")? as usize;
                 if n != 1 + count * DRAW_WORDS {
@@ -174,6 +275,9 @@ pub struct GeometryMeta {
     #[serde(default)]
     pub color_size: u32,
     pub sphere: [f32; 4],
+    /// v3: further attributes by name (arrays 5.. of the upload)
+    #[serde(default)]
+    pub attributes: Vec<AttributeMeta>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -200,7 +304,19 @@ pub struct TextureMeta {
     pub wrap: [u32; 2],
     #[serde(default = "one_u")]
     pub anisotropy: u32,
+    /// three's format / type constants (RGBAFormat 1023, RGFormat 1030, RedFormat 1028; UnsignedByteType 1009,
+    /// FloatType 1015, HalfFloatType 1016)
+    #[serde(default = "rgba_format")]
+    pub format: u32,
+    #[serde(default = "ubyte_type", rename = "type")]
+    pub ty: u32,
+    /// v3: flip rows at upload (WebGL's UNPACK_FLIP_Y), three's shaders sample the texture as stored
+    #[serde(default)]
+    pub flip_rows: bool,
 }
+
+fn rgba_format() -> u32 { 1023 }
+fn ubyte_type() -> u32 { 1009 }
 
 fn linear() -> u32 { 1006 }
 fn linear_mip_linear() -> u32 { 1008 }
@@ -209,13 +325,30 @@ fn one_u() -> u32 { 1 }
 
 impl Default for TextureMeta {
     fn default() -> Self {
-        TextureMeta { width: 1, height: 1, srgb: false, repeat: [1.0, 1.0], offset: [0.0, 0.0], flip_y: false, mipmaps: false, mag_filter: 1006, min_filter: 1006, wrap: clamp2(), anisotropy: 1 }
+        TextureMeta { width: 1, height: 1, srgb: false, repeat: [1.0, 1.0], offset: [0.0, 0.0], flip_y: false, mipmaps: false, mag_filter: 1006, min_filter: 1006, wrap: clamp2(), anisotropy: 1, format: 1023, ty: 1009, flip_rows: false }
     }
 }
 
 impl TextureMeta {
     /// three's mipmap-using min filters (Nearest/Linear MipmapNearest/Linear)
     pub fn min_filter_mips(&self) -> bool { matches!(self.min_filter, 1004 | 1005 | 1007 | 1008) }
+
+    /// (channels, bytes per channel) of the pixel data, or None for formats the native side cannot take
+    pub fn texel(&self) -> Option<(usize, usize)> {
+        let channels = match self.format {
+            1023 => 4,
+            1030 => 2,
+            1028 => 1,
+            _ => return None,
+        };
+        let bytes = match self.ty {
+            1009 => 1,
+            1016 => 2,
+            1015 => 4,
+            _ => return None,
+        };
+        Some((channels, bytes))
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -239,6 +372,102 @@ pub struct MaterialMeta {
     pub alpha_test: f32,
     #[serde(default)]
     pub flags: u32,
+}
+
+/// A geometry attribute beyond position/normal/uv/color (v3), sent by name after the index array.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributeMeta {
+    pub name: String,
+    pub item_size: u32,
+}
+
+/// MATERIAL meta in v3: a material instance running three's program `program_key` with WebGLRenderer's pipeline state.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramMaterialMeta {
+    /// the id `host.program(key, vs, fs, id)` was called with
+    pub program: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub ty: String,
+    /// FrontSide 0, BackSide 1, DoubleSide 2
+    #[serde(default)]
+    pub side: u32,
+    /// shadow pass side (null: three's default, the opposite of `side`)
+    #[serde(default)]
+    pub shadow_side: Option<u32>,
+    #[serde(default)]
+    pub transparent: bool,
+    /// NoBlending 0, Normal 1, Additive 2, Subtractive 3, Multiply 4, Custom 5
+    #[serde(default = "one_u")]
+    pub blending: u32,
+    #[serde(default = "src_alpha")]
+    pub blend_src: u32,
+    #[serde(default = "one_minus_src_alpha")]
+    pub blend_dst: u32,
+    #[serde(default = "add_eq")]
+    pub blend_equation: u32,
+    #[serde(default)]
+    pub blend_src_alpha: Option<u32>,
+    #[serde(default)]
+    pub blend_dst_alpha: Option<u32>,
+    #[serde(default)]
+    pub blend_equation_alpha: Option<u32>,
+    #[serde(default)]
+    pub premultiplied_alpha: bool,
+    #[serde(default = "yes")]
+    pub depth_test: bool,
+    #[serde(default = "yes")]
+    pub depth_write: bool,
+    /// three's depth constants: Never 0, Always 1, Less 2, LessEqual 3 (default), Equal 4, GreaterEqual 5, Greater 6, NotEqual 7
+    #[serde(default = "less_equal")]
+    pub depth_func: u32,
+    #[serde(default = "yes")]
+    pub color_write: bool,
+    #[serde(default)]
+    pub polygon_offset: Option<[f32; 2]>,
+    #[serde(default)]
+    pub wireframe: bool,
+}
+
+fn src_alpha() -> u32 { 204 }
+fn one_minus_src_alpha() -> u32 { 205 }
+fn add_eq() -> u32 { 100 }
+fn less_equal() -> u32 { 3 }
+
+/// Blend state as WebGLState.setMaterial/setBlending derive it: None = blending off.
+/// (src rgb, dst rgb, src alpha, dst alpha, equation rgb, equation alpha), three's constants.
+pub fn blend_of(m: &ProgramMaterialMeta) -> Option<[u32; 6]> {
+    const ZERO: u32 = 200;
+    const ONE: u32 = 201;
+    const SRC_COLOR_1M: u32 = 203;
+    const SRC_ALPHA: u32 = 204;
+    const SRC_ALPHA_1M: u32 = 205;
+    const DST_COLOR: u32 = 208;
+    const ADD: u32 = 100;
+    if m.blending == 0 || (m.blending == 1 && !m.transparent) {
+        return None;
+    }
+    Some(match (m.blending, m.premultiplied_alpha) {
+        (1, true) => [ONE, SRC_ALPHA_1M, ONE, SRC_ALPHA_1M, ADD, ADD],
+        (2, true) => [ONE, ONE, ONE, ONE, ADD, ADD],
+        (3, true) => [ZERO, SRC_COLOR_1M, ZERO, ONE, ADD, ADD],
+        (4, true) => [DST_COLOR, SRC_ALPHA_1M, ZERO, ONE, ADD, ADD],
+        (1, false) => [SRC_ALPHA, SRC_ALPHA_1M, ONE, SRC_ALPHA_1M, ADD, ADD],
+        (2, false) => [SRC_ALPHA, ONE, ONE, ONE, ADD, ADD],
+        (5, _) => [
+            m.blend_src,
+            m.blend_dst,
+            m.blend_src_alpha.unwrap_or(m.blend_src),
+            m.blend_dst_alpha.unwrap_or(m.blend_dst),
+            m.blend_equation,
+            m.blend_equation_alpha.unwrap_or(m.blend_equation),
+        ],
+        // three logs an error and leaves blending as it was; we fall back to normal blending
+        _ => [SRC_ALPHA, SRC_ALPHA_1M, ONE, SRC_ALPHA_1M, ADD, ADD],
+    })
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -302,6 +531,43 @@ mod tests {
         assert_eq!(f.draws[0].rows[2][3], 11.0);
         assert_eq!(std::mem::size_of::<Draw>(), DRAW_WORDS * 4);
         assert_eq!(std::mem::size_of::<ThreeLight>(), LIGHT_WORDS * 4);
+    }
+
+    #[test]
+    fn decodes_v3_ops() {
+        let mut s = vec![MAGIC3, 0];
+        s.extend([OP_SHADOWS, 1 + 28, 1, tex::DIRECTIONAL, 0]);
+        s.extend((0..26).map(|i| fw(i as f32)));
+        // two instances: 8-byte block + 1 texture, 4-byte block + 0 textures
+        s.extend([OP_MATERIAL_UNIFORMS, 1 + 3 + 2 + 1 + 3 + 1, 2, 11, 8, 1, fw(1.0), fw(2.0), tex::DFG_LUT, 12, 4, 0, fw(3.0)]);
+        s[1] = s.len() as u32;
+        let f = decode(&s).unwrap();
+        assert!(f.v3);
+        assert_eq!(f.shadows.len(), 1);
+        assert_eq!(f.shadows[0].map_size, [0.0, 1.0]);
+        assert_eq!(f.shadows[0].vp[15], 25.0);
+        let u: Vec<_> = f.uniforms.collect();
+        assert_eq!(u.len(), 2);
+        assert_eq!((u[0].id, u[0].block.len(), u[0].textures), (11, 2, &[tex::DFG_LUT][..]));
+        assert_eq!((u[1].id, u[1].block, u[1].textures.len()), (12, &[fw(3.0)][..], 0));
+        assert_eq!(std::mem::size_of::<ShadowRec>(), SHADOW_WORDS * 4);
+        // a record running past the payload is refused up front
+        let bad = vec![MAGIC3, 7, OP_MATERIAL_UNIFORMS, 3, 1, 5, 64];
+        assert!(decode(&bad).is_err());
+    }
+
+    #[test]
+    fn v3_meta_and_blending() {
+        let m: ProgramMaterialMeta = serde_json::from_str(r#"{"program":7,"name":"","type":"MeshStandardMaterial","side":0,"shadowSide":null,"transparent":true,"opacity":0.35,"blending":1,"blendSrc":204,"blendDst":205,"blendEquation":100,"blendSrcAlpha":null,"blendDstAlpha":null,"blendEquationAlpha":null,"premultipliedAlpha":false,"depthTest":true,"depthWrite":true,"depthFunc":3,"colorWrite":true,"alphaToCoverage":false,"polygonOffset":null,"wireframe":false}"#).unwrap();
+        assert_eq!(blend_of(&m), Some([204, 205, 201, 205, 100, 100]));
+        let opaque = ProgramMaterialMeta { transparent: false, ..m.clone() };
+        assert_eq!(blend_of(&opaque), None);
+        let add = ProgramMaterialMeta { blending: 2, premultiplied_alpha: true, ..m.clone() };
+        assert_eq!(blend_of(&add), Some([201, 201, 201, 201, 100, 100]));
+        let g: GeometryMeta = serde_json::from_str(r#"{"vertices":3,"indexed":false,"sphere":[0,0,0,1],"attributes":[{"name":"skinIndex","itemSize":4}]}"#).unwrap();
+        assert_eq!((g.attributes[0].name.as_str(), g.attributes[0].item_size), ("skinIndex", 4));
+        let t: TextureMeta = serde_json::from_str(r#"{"width":16,"height":16,"format":1030,"type":1016,"flipRows":true}"#).unwrap();
+        assert_eq!((t.texel(), t.flip_rows), (Some((2, 2)), true));
     }
 
     #[test]

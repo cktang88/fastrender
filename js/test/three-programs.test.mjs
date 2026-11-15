@@ -9,7 +9,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { ThreePrograms, normalizeGlsl, packUniforms, compileLayout, TEX, SHADOW_KIND, OBJECT_BLOCK } from '../three-programs.js';
+import { ThreePrograms, normalizeGlsl, packUniforms, compileLayout, TEX, SHADOW_KIND, OBJECT_BLOCK, FRAME_BLOCK, NATIVE_UNIFORMS } from '../three-programs.js';
 import { FastRenderer, OP, KIND } from '../fastrender-three.js';
 import { makeGlslHost, buildLayout, glslTokens } from './glsl-host.mjs';
 import { makeCases, SIZE } from './three-programs.cases.mjs';
@@ -19,7 +19,6 @@ const fixturePath = new URL(`./fixtures/three-programs.r${REV}.json`, import.met
 assert.ok(existsSync(fixturePath), `no reference capture for r${REV}: run node test/capture-three-programs.mjs`);
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
 const sha = (s) => createHash('sha1').update(s).digest('hex');
-const OBJECT_UNIFORMS = new Set(['modelMatrix', 'modelViewMatrix', 'normalMatrix']);
 
 /** read a member's values back from a packed block, flattened the way gl.getUniform returns them */
 function readMember(m, f32, u32, e = 0) {
@@ -68,7 +67,11 @@ for (const c of cases) {
   const size = tp.pack(inst, f32, u32, 0, (t) => 1000 + (t.id ?? 0), texIds, 0);
   assert.equal(size, layout.size);
   for (const [name, want] of Object.entries(ref.uniforms)) {
-    if (OBJECT_UNIFORMS.has(name)) continue;
+    if (NATIVE_UNIFORMS.has(name)) {
+      // filled natively (FrObject per draw, FrFrame per pass): in one of those blocks, never in the material block
+      assert.ok(!layout.members.some((m) => m.name === name), `${c.name}: ${name} left in the material block`);
+      continue;
+    }
     // a primitive array element "x[3]" -> member "x" element 3
     const am = /^(.*)\[(\d+)\]$/.exec(name);
     let hits = layout.members.filter((m) => m.name === name).map((m) => [m, 0]);
@@ -105,6 +108,9 @@ console.log(`[three r${REV}] ${cases.length} programs identical to WebGLRenderer
   const src = '#version 300 es\r\nprecision highp float;\r\n#if defined(X)\r\nuniform mat4 modelMatrix;\r\n#endif\r\nvoid main() {}';
   assert.equal(normalizeGlsl(src), `#version 450\n\n#if defined(X)\n\n#endif\n${OBJECT_BLOCK}\nvoid main() {}\n`, 'the rule example from src/xlat.rs');
   assert.ok(!normalizeGlsl('#version 300 es\nuniform mat4 viewMatrix;\nvoid main(){}\n').includes('FrObject'));
+  assert.equal(normalizeGlsl('uniform mat4 modelViewMatrix, projectionMatrix, custom; // raw\nuniform highp vec3 cameraPosition;// eye\nvoid main(){}\n'),
+    `${OBJECT_BLOCK} ${FRAME_BLOCK}\nuniform mat4 custom;\n\nvoid main(){}\n`, 'comma declarations and trailing comments (normalize_declarations in src/xlat.rs)');
+  for (const keep of ['uniform mat4 viewMatrix[2];', 'uniform vec3 cameraPosition = vec3(0.0);', 'uniform mat3 modelViewMatrix;', 'uniform float a, b;']) assert.equal(normalizeGlsl(keep), keep + '\n');
   // FrObject layout is fixed: 0 / 64 / 128, 176 bytes
   const L = buildLayout('#version 300 es\nuniform mat4 modelMatrix;\nuniform mat4 modelViewMatrix;\nuniform mat3 normalMatrix;\nin vec3 position;\nvoid main(){ gl_Position = modelMatrix * modelViewMatrix * vec4(normalMatrix * position, 1.0); }\n',
     '#version 300 es\nprecision highp float;\nuniform vec3 tint;\nout vec4 c;\nvoid main(){ c = vec4(tint, 1.0); }\n');
@@ -206,11 +212,11 @@ function decode(buf) {
   let fr = decode(h.cmd);
   const mats = h.uploads.filter((x) => x.kind === KIND.MATERIAL);
   assert.equal(mats.length, 3, 'one material, three blocks: receiveShadow on/off and the instanced program');
-  assert.ok(mats.every((m) => typeof m.meta.programKey === 'string' && h.programs.has(m.meta.programKey)), 'material uploads carry a programKey the host compiled');
+  assert.ok(mats.every((m) => typeof m.meta.program === 'number' && h.programs.has(h.programIds.get(m.meta.program))), 'material uploads carry the id of a program the host compiled');
   assert.equal(h.programs.size, 2, 'two programs: plain and instanced');
   assert.equal(fr.blocks.size, 3, 'a block per material instance in use');
   assert.equal(new Set(fr.draws.map((d) => d.material)).size, 3);
-  const L = h.programs.get(mats[0].meta.programKey).layout;
+  const L = h.programs.get(h.programIds.get(mats[0].meta.program)).layout;
   const blockA = fr.blocks.get(fr.draws[0].material);
   const texSlot = L.textures.findIndex((t) => t.name === 'map');
   const texUp = h.uploads.find((x) => x.kind === KIND.TEXTURE);
@@ -234,17 +240,8 @@ function decode(buf) {
   assert.ok(near([...fr.blocks.get(fr.draws[0].material).f32.slice(diffuse.offset / 4, diffuse.offset / 4 + 3)], [1, 0, 0]));
   assert.equal(h.uploads.length, uploadsBefore, 'steady state: no uploads, no new programs');
 
-  // temporal-upscaler jitter hook: clip.xy += j * clip.w
-  r.projectionJitter = [0.01, -0.02];
-  r.render(scene, camera);
-  fr = decode(h.cmd);
-  const pmM = L.members.find((m) => m.name === 'projectionMatrix');
-  const expect = new THREE.Matrix4().copy(camera.projectionMatrix);
-  for (let c = 0; c < 4; c++) { expect.elements[c * 4] += 0.01 * expect.elements[c * 4 + 3]; expect.elements[c * 4 + 1] += -0.02 * expect.elements[c * 4 + 3]; }
-  assert.ok(near(readMember(pmM, fr.blocks.get(fr.draws[0].material).f32, fr.blocks.get(fr.draws[0].material).u32), expect.elements), 'jittered projectionMatrix packed');
-  r.projectionJitter = null;
-  r.render(scene, camera);
-  fr = decode(h.cmd);
+  // camera uniforms live in FrFrame (filled natively per pass, MetalFX jitter included), never in a material block
+  assert.ok(!L.members.some((m) => m.name === 'projectionMatrix') && L.frameBlock && L.frameBlock.members[0].name === 'projectionMatrix');
 
   // a new light changes three's lights state: new programs (more lights), same native material ids
   const idsBefore = fr.draws.map((d) => d.material).join();
@@ -255,7 +252,7 @@ function decode(buf) {
   fr = decode(h.cmd);
   assert.equal(h.programs.size, programsBefore + 2, 'NUM_POINT_LIGHTS changed: both programs recompiled by key');
   assert.equal(fr.draws.map((d) => d.material).join(), idsBefore, 'material instance ids are stable across program changes');
-  const L2 = h.programs.get(h.uploads.filter((x) => x.kind === KIND.MATERIAL).at(-1).meta.programKey).layout;
+  const L2 = h.programs.get(h.programIds.get(h.uploads.filter((x) => x.kind === KIND.MATERIAL).at(-1).meta.program)).layout;
   assert.ok(L2.members.some((m) => m.name === 'pointLights[0].color'), 'the new program has the point light');
   scene.remove(lamp);
 
@@ -272,7 +269,7 @@ function decode(buf) {
   fr = decode(h.cmd);
   const valueOf = (mesh, name) => {
     const id = fr.draws.find((d, i) => r._drawList[i].matrix === mesh.matrixWorld.elements).material;
-    const key = h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.id === id).at(-1).meta.programKey;
+    const key = h.programIds.get(h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.id === id).at(-1).meta.program);
     const m = h.programs.get(key).layout.members.find((x) => x.name === name);
     return fr.blocks.get(id).f32[m.offset / 4];
   };

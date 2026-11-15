@@ -20,3 +20,9 @@ float precisionSafe( float x ) { return x; } precision highp float;
 void main() {
 	gl_Position = projectionMatrix * modelViewMatrix * modelMatrix * vec4( normalMatrix * vec3( 0.0 ), 1.0 );
 }
+uniform mat4 modelViewMatrix, projectionMatrix, customMatrix; // RawShaderMaterial style
+uniform highp vec3 cameraPosition;// eye
+uniform mat4 viewMatrix , modelMatrix ;
+uniform float a, viewMatrix;
+uniform mat4 viewMatrix[2];
+uniform vec3 cameraPosition = vec3(0.0);

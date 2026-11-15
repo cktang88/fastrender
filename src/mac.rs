@@ -335,7 +335,7 @@ impl Content {
         Ok(match cfg.scene {
             SceneKind::Three => {
                 let src = std::fs::read_to_string("shaders/fastrender.metal").unwrap_or_else(|_| SHADER_SRC.to_string());
-                let params = format!("{{\"boxes\": {}, \"lights\": {}}}", cfg.props, cfg.lights);
+                let params = format!("{{\"boxes\": {}, \"lights\": {}, \"programs\": \"{}\"}}", cfg.props, cfg.lights, cfg.programs);
                 (Content::Three(Box::new(ThreeScene::new(dev, &src, &cfg.script, &params)?)), Vec::new())
             }
             SceneKind::Script => {
@@ -899,7 +899,8 @@ impl Renderer {
             || cfg.props != self.cfg.props
             || (cfg.lights != self.cfg.lights && !scripted)
             || cfg.seed != self.cfg.seed
-            || cfg.script != self.cfg.script;
+            || cfg.script != self.cfg.script
+            || cfg.programs != self.cfg.programs;
         let out = (cfg.width as usize, cfg.height as usize);
         let targets_changed = !self.targets.matches(&cfg, out, cfg.scale);
         if content_changed || targets_changed {
@@ -1055,7 +1056,7 @@ impl Renderer {
         let slot = (self.frame % FRAME_SLOTS as u64) as usize;
         // scripts run here, once the slot's buffers are free to overwrite
         if let Content::Three(s) = &mut self.content {
-            s.update(&self.dev, &self.queue, t);
+            s.update(&self.dev, &self.queue, slot, t);
         }
         self.content.update(t, self.frames[slot].script_inst.as_ref());
         self.env = self.content.env();
@@ -1086,7 +1087,9 @@ impl Renderer {
         let planes = frustum_planes(&vp);
         let shadow_planes = frustum_planes(&self.shadow_vp);
         if let Content::Three(s) = &mut self.content {
-            self.last_draws = s.prepare(&self.dev, slot, &planes, &shadow_planes, eye);
+            // three's own programs read projectionMatrix from FrFrame: three's matrix with this frame's jitter
+            let proj = if temporal { jittered(s.view.proj, self.jitter, (cw as f32, ch as f32)) } else { s.view.proj };
+            self.last_draws = s.prepare(&self.dev, slot, &planes, &shadow_planes, eye, proj);
         }
         if self.cfg.gpu_cull {
             let f = &self.frames[slot];
@@ -1213,7 +1216,7 @@ impl Renderer {
         enc.setFrontFacingWinding(MTLWinding::CounterClockwise);
         enc.setDepthStencilState(Some(&self.pipes.depth_less));
         if let Content::Three(s) = &self.content {
-            s.encode_main(&enc, slot, &f.uniforms, &self.shadow_map, &self.pipes.depth_less, &self.pipes.depth_test_only);
+            self.last_draws = s.encode_main(&enc, slot, &f.uniforms, &self.shadow_map, &self.pipes.depth_less, &self.pipes.depth_test_only);
             enc.endEncoding();
             return;
         }
@@ -1377,6 +1380,21 @@ impl Renderer {
         stats("3 frame: output", self.read_texture(&self.targets.offscreen));
         println!("  main-pass draws: {}", self.last_draws);
         let _ = self.screenshot("selftest-output.png");
+        // three.js's own programs: every program translated, compiled by Metal, its pipelines built, and drawn
+        if let Content::Three(s) = &self.content {
+            if let Some(st) = s.program_stats() {
+                println!("  {st}");
+                let (compiled, pipelines, problems, draws) = s.program_health();
+                let ok = compiled > 0 && pipelines > 0 && problems == 0 && draws > 0;
+                println!(
+                    "three-programs selftest: {} ({compiled} programs, {pipelines} pipelines, {problems} problems, {draws} draws)",
+                    if ok { "PASS" } else { "FAIL" }
+                );
+                if !ok {
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
@@ -1529,12 +1547,20 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     let mut logged = 0usize;
     let mut gpu = Stats::default();
     let mut js = Stats::default();
+    let mut cpu = Stats::default();
+    let mut native = (Stats::default(), Stats::default());
     let mut i = 0u32;
     // run for `frames` frames, and at least `seconds` seconds
     while i < cfg.frames || start.elapsed().as_secs_f32() < cfg.seconds {
         i += 1;
+        let f0 = Instant::now();
         r.render(at(cfg.warmup + extra + i), || None);
+        cpu.push(f0.elapsed().as_secs_f64() * 1000.0);
         if let Some(ms) = r.script_ms() { js.push(ms); }
+        if let Content::Three(s) = &r.content {
+            native.0.push(s.prepare_ms);
+            native.1.push(s.encode_ms.get());
+        }
         if cfg.log_every_s > 0.0 && last_log.elapsed().as_secs_f32() >= cfg.log_every_s {
             let done = i as usize;
             println!("  t={:>6.0}s  {:>6.1} fps", start.elapsed().as_secs_f32(), (done - logged) as f32 / last_log.elapsed().as_secs_f32());
@@ -1546,6 +1572,16 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     let wall = start.elapsed().as_secs_f64();
     for ms in r.take_gpu_times() {
         gpu.push(ms);
+    }
+    if let Content::Three(s) = &r.content {
+        // one line CI greps: per-frame CPU cost split (render() wall = JS frame + upload + prepare + encode)
+        println!(
+            "three frame cost: render() CPU {:.2} ms avg (JS {:.2}, native prepare {:.3}, encode {:.3}), GPU {:.2} ms avg, {} draws, programs: {}",
+            cpu.avg(), js.avg(), native.0.avg(), native.1.avg(), gpu.avg(), r.last_draws, if s.view.v3 { "three" } else { "native" }
+        );
+        if let Some(st) = s.program_stats() {
+            println!("{st}");
+        }
     }
     if let Some(path) = &cfg.shot {
         match r.screenshot(path) {

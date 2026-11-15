@@ -1,6 +1,6 @@
 #version 450
 #define varying in
-layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; };
+layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; }; layout(std140) uniform FrFrame { mat4 projectionMatrix; mat4 viewMatrix; vec3 cameraPosition; };
 layout(location = 0) out highp vec4 pc_fragColor;
 #define gl_FragColor pc_fragColor
 #define gl_FragDepthEXT gl_FragDepth
@@ -46,8 +46,8 @@ layout(location = 0) out highp vec4 pc_fragColor;
 #define USE_COLOR
 #define USE_SHADOWMAP
 #define SHADOWMAP_TYPE_PCF
-uniform mat4 viewMatrix;
-uniform vec3 cameraPosition;
+
+
 uniform bool isOrthographic;
 #define OPAQUE
 vec4 LinearTransferOETF( in vec4 value ) {
@@ -1109,7 +1109,7 @@ float computeSpecularOcclusion( const in float dotNV, const in float ambientOccl
 	uniform vec2 transmissionSamplerSize;
 	uniform sampler2D transmissionSamplerMap;
 
-	uniform mat4 projectionMatrix;
+
 	varying vec3 vWorldPosition;
 	float w0( float a ) {
 		return ( 1.0 / 6.0 ) * ( a * ( a * ( - a + 3.0 ) - 3.0 ) + 1.0 );

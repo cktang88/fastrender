@@ -28,6 +28,24 @@ jobs:
           for f in xlat-out/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /tmp/x.air || exit 1; echo "ok $f"; done
       - name: probe
         run: ./target/release/fastrender probe
+      # three.js's own programs (programs: 'three', protocol v3). Step names say what passed: the jobs API shows
+      # each step's conclusion without needing the logs.
+      - name: xlat programs compile (every three-city program, Apple metal compiler)
+        if: always()
+        run: |
+          (cd js && node --import ./test/three-alias.mjs test/dump-programs.mjs ../city-programs)
+          ./target/release/fastrender xlat-dump city-programs city-xlat
+          for f in city-xlat/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /tmp/x.air || exit 1; echo "ok $f"; done
+      - name: three-programs frame renders (selftest, Metal API validation)
+        if: always()
+        env:
+          MTL_DEBUG_LAYER: "1"
+          FASTRENDER_LOG_PROGRAMS: "1"
+        run: |
+          set -o pipefail
+          ./target/release/fastrender selftest --three js/dist/three-city.js --upscale bilinear --scale 1 --size 640x400 | tee three-programs-selftest.txt
+          grep -q "three-programs selftest: PASS" three-programs-selftest.txt
+          grep "3 frame: output" three-programs-selftest.txt | grep -v "mean rgba = 0 0 0 0"
       - name: selftest
         run: |
           ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000
@@ -71,10 +89,38 @@ jobs:
           ./target/release/fastrender bench --three js/dist/three-city.js --upscale metalfx --scale 0.5 --size 1280x800 --frames 60 --warmup 5 --shot shot-three-city.png
           ./target/release/fastrender bench --three js/dist/three-city.js --upscale bilinear --scale 1 --size 1280x800 --frames 60 --warmup 5 --shot shot-three-city-native.png
           ./target/release/fastrender bench --script js/examples/boxes.js --props 20000 --path forward --upscale metalfx --scale 0.5 --size 1280x800 --frames 60 --warmup 5 --shot shot-script.png
-      - name: golden image (native vs browser three.js reference, same scene/time/size)
+      # golden images: native vs the browser three.js r187 reference (same scene/time/size). Both lines print one
+      # JSON line and go into the step summary; the last step fails when three's own programs miss the target.
+      - name: golden native path (hand-written fs_three, programs native)
+        if: always()
         run: |
-          ./target/release/fastrender bench --three js/dist/three-city.js --time 1 --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 2 --shot golden-native-t1.png
-          node js/golden/diff.mjs js/golden/ref-t1.png golden-native-t1.png golden-diff-t1.png
+          set -o pipefail
+          ./target/release/fastrender bench --three js/dist/three-city.js --programs native --time 1 --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 2 --shot golden-native-t1.png
+          node js/golden/diff.mjs js/golden/ref-t1.png golden-native-t1.png golden-diff-native-t1.png | tee golden-native.json
+          echo "golden native path (fs_three): $(cat golden-native.json)" >> "$GITHUB_STEP_SUMMARY"
+      - name: golden three-programs (three.js's own shaders)
+        if: always()
+        run: |
+          set -o pipefail
+          ./target/release/fastrender bench --three js/dist/three-city.js --programs three --time 1 --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 2 --shot golden-three-t1.png | tee golden-three-bench.txt
+          node js/golden/diff.mjs js/golden/ref-t1.png golden-three-t1.png golden-diff-three-t1.png | tee golden-three.json
+          echo "golden three-programs: $(cat golden-three.json)" >> "$GITHUB_STEP_SUMMARY"
+          grep "three frame cost\|three programs:" golden-three-bench.txt >> "$GITHUB_STEP_SUMMARY" || true
+      - name: golden three-programs MAE<4
+        if: always()
+        run: node -e "const r=JSON.parse(require('fs').readFileSync('golden-three.json','utf8'));console.log('MAE',r.mae);process.exit(r.mae<4?0:1)"
+      - name: golden three-programs MAE<2.2
+        if: always()
+        run: node -e "const r=JSON.parse(require('fs').readFileSync('golden-three.json','utf8'));console.log('MAE',r.mae);process.exit(r.mae<2.2?0:1)"
+      - name: golden three-programs MAE<1.5
+        if: always()
+        run: node -e "const r=JSON.parse(require('fs').readFileSync('golden-three.json','utf8'));console.log('MAE',r.mae);process.exit(r.mae<1.5?0:1)"
+      - name: golden three-programs MAE<1.0
+        if: always()
+        run: node -e "const r=JSON.parse(require('fs').readFileSync('golden-three.json','utf8'));console.log('MAE',r.mae);process.exit(r.mae<1.0?0:1)"
+      - name: golden three-programs MAE<0.5
+        if: always()
+        run: node -e "const r=JSON.parse(require('fs').readFileSync('golden-three.json','utf8'));console.log('MAE',r.mae);process.exit(r.mae<0.5?0:1)"
       - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
         run: |
           ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000 --rounds 1

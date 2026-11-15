@@ -127,12 +127,27 @@ export class FastRenderer {
 
   // ------------------------------------------------------------------ resources
 
-  /** geometry -> id; uploads position/normal/uv/color/index when any attribute version changed */
+  /**
+   * geometry -> id; uploads position/normal/uv/color/index when any attribute version changed. With three's own
+   * programs (v3) every other attribute three would bind goes along BY NAME (meta.attributes, arrays after the index):
+   * uv1.., tangent, skinIndex, skinWeight, ... as dense f32 of their itemSize; the native side binds them to the
+   * locations the translated program reflected.
+   */
   _geometry(g) {
     const id = this._id(g);
     const a = g.attributes;
     if (!a.position) return 0;
-    const key = `${a.position.version}|${a.normal?.version}|${a.uv?.version}|${a.color?.version}|${g.index?.version}|${g.index ? 1 : 0}`;
+    let key = `${a.position.version}|${a.normal?.version}|${a.uv?.version}|${a.color?.version}|${g.index?.version}|${g.index ? 1 : 0}`;
+    let extra = null;
+    if (this._tp) {
+      for (const name in a) {
+        if (name === 'position' || name === 'normal' || name === 'uv' || name === 'color') continue;
+        const at = a[name];
+        if (!at || !at.count || at.itemSize > 4) { this._unsupported(`attribute ${name}`); continue; }
+        (extra || (extra = [])).push(name);
+        key += `|${name}:${at.version}:${at.itemSize}`;
+      }
+    }
     if (this._versions.get(id) !== key) {
       if (!a.normal) { g.computeVertexNormals(); }
       if (!g.boundingSphere) g.computeBoundingSphere();
@@ -145,7 +160,12 @@ export class FastRenderer {
         index: g.index ? (g.index.array instanceof Uint32Array || a.position.count > 65535 ? toU32(g.index.array) : toU16(g.index.array)) : null,
       };
       const meta = { vertices: a.position.count, indexed: !!g.index, colorSize: streams.color ? (a.color.itemSize >= 4 ? 4 : 3) : 0, sphere: [s.center.x, s.center.y, s.center.z, s.radius] };
-      this.host.upload(KIND.GEOMETRY, id, meta, streams.position, streams.normal, streams.uv, streams.color, streams.index);
+      const arrays = [streams.position, streams.normal, streams.uv, streams.color, streams.index];
+      if (extra) {
+        meta.attributes = extra.map((name) => ({ name, itemSize: a[name].itemSize }));
+        for (const name of extra) arrays.push(dense(a[name], a[name].itemSize));
+      }
+      this.host.upload(KIND.GEOMETRY, id, meta, ...arrays);
       this._versions.set(id, key);
       this.info.memory.geometries++;
     }
@@ -163,6 +183,8 @@ export class FastRenderer {
     else if (img && this.host.imagePixels) { const r = this.host.imagePixels(img); if (r) ({ data: px, width: w, height: h } = r); }
     if (!px) { this._unsupported('texture source without pixels'); return 0; }
     const meta = { width: w, height: h, srgb: t.colorSpace === 'srgb', repeat: [t.repeat.x, t.repeat.y], offset: [t.offset.x, t.offset.y], wrap: [t.wrapS, t.wrapT], flipY: !!t.flipY, mipmaps: t.generateMipmaps !== false, magFilter: t.magFilter, minFilter: t.minFilter, anisotropy: t.anisotropy || 1, format: t.format, type: t.type, depth: (img && img.depth) || 1 };
+    // v3: three's shaders sample the texture as WebGL stores it (UNPACK_FLIP_Y flips rows at upload); v2 flips in its shader
+    if (this._tp && t.flipY) meta.flipRows = true;
     this.host.upload(KIND.TEXTURE, id, meta, px instanceof Uint8Array || px instanceof Uint8ClampedArray ? px : new Uint8Array(px.buffer, px.byteOffset, px.byteLength));
     this._versions.set(id, t.version);
     this.info.memory.textures++;
@@ -208,16 +230,18 @@ export class FastRenderer {
   /** v3: (material, object) -> three's program + uniform-block instance; uploads the instance once */
   _materialInstance(m, o) {
     const inst = this._tp.instance(m, o);
+    if (!inst.program.packer) { this._unsupported(`program without layout (${inst.program.name})`); return 0; }
     if (inst.frame !== this._frameNo) {
       inst.frame = this._frameNo;
       this._used.push(inst);
       // pipeline state is read from the material every draw by WebGLRenderer, so re-check it every frame
-      const st = `${m.side}|${m.transparent}|${m.blending}|${m.blendSrc}|${m.blendDst}|${m.blendEquation}|${m.premultipliedAlpha}|${m.depthTest}|${m.depthWrite}|${m.depthFunc}|${m.colorWrite}|${m.alphaToCoverage}|${m.polygonOffset}|${m.polygonOffsetFactor}|${m.polygonOffsetUnits}|${m.wireframe}`;
+      const st = `${m.side}|${m.shadowSide}|${m.blendSrcAlpha}|${m.blendDstAlpha}|${m.blendEquationAlpha}|${m.transparent}|${m.blending}|${m.blendSrc}|${m.blendDst}|${m.blendEquation}|${m.premultipliedAlpha}|${m.depthTest}|${m.depthWrite}|${m.depthFunc}|${m.colorWrite}|${m.alphaToCoverage}|${m.polygonOffset}|${m.polygonOffsetFactor}|${m.polygonOffsetUnits}|${m.wireframe}`;
       if (inst.state !== st || inst.uploadedProgram !== inst.program) {
         inst.state = st; inst.uploadedProgram = inst.program;
         this.host.upload(KIND.MATERIAL, inst.id, {
-          programKey: inst.program.key, name: m.name, type: m.type,
-          side: m.side, transparent: m.transparent, opacity: m.opacity, blending: m.blending, blendSrc: m.blendSrc, blendDst: m.blendDst, blendEquation: m.blendEquation,
+          program: inst.program.id, name: m.name, type: m.type,
+          side: m.side, shadowSide: m.shadowSide ?? null, transparent: m.transparent, opacity: m.opacity, blending: m.blending, blendSrc: m.blendSrc, blendDst: m.blendDst, blendEquation: m.blendEquation,
+          blendSrcAlpha: m.blendSrcAlpha ?? null, blendDstAlpha: m.blendDstAlpha ?? null, blendEquationAlpha: m.blendEquationAlpha ?? null,
           premultipliedAlpha: m.premultipliedAlpha, depthTest: m.depthTest, depthWrite: m.depthWrite, depthFunc: m.depthFunc, colorWrite: m.colorWrite,
           alphaToCoverage: m.alphaToCoverage, polygonOffset: m.polygonOffset ? [m.polygonOffsetFactor, m.polygonOffsetUnits] : null, wireframe: m.wireframe,
         });
@@ -243,6 +267,8 @@ export class FastRenderer {
   // ------------------------------------------------------------------ frame
 
   render(scene, camera) {
+    // three's hooks, in WebGLRenderer's order: scene.onBeforeRender, then per draw object/material.onBeforeRender
+    if (scene.onBeforeRender) scene.onBeforeRender(this, scene, camera, null);
     if (scene.matrixWorldAutoUpdate !== false) scene.updateMatrixWorld();
     if (camera.parent === null && camera.matrixWorldAutoUpdate !== false) camera.updateMatrixWorld();
     const u = this.u32, f = this.f32;
@@ -286,6 +312,7 @@ export class FastRenderer {
       this._tp.beginFrame(scene, camera, lc);
       this._used.length = 0;
     }
+    this._scene = scene; this._camera = camera;
     for (let i = 0; i < meshes.length; i++) this._collect(meshes[i], draws);
     // lights, 16 words each: kind, castShadow, colour*intensity (3), position (3), direction (3),
     // distance, decay, then hemisphere ground colour (3) or spot angle, penumbra, 0
@@ -381,6 +408,9 @@ export class FastRenderer {
     for (const grp of groups) {
       const m = mats[grp.materialIndex ?? 0];
       if (!m || !m.visible) continue;
+      // WebGLRenderer.renderObject calls these right before the draw (games use them to set per-draw uniforms)
+      o.onBeforeRender(this, this._scene, this._camera, g, m, grp);
+      if (m.onBeforeRender) m.onBeforeRender(this, this._scene, this._camera, g, o, grp);
       let flags = 0;
       if (o.castShadow) flags |= F.CAST;
       if (o.receiveShadow) flags |= F.RECEIVE;
@@ -390,8 +420,10 @@ export class FastRenderer {
       if (m.flatShading) flags |= F.FLAT;
       if (o.frustumCulled === false) flags |= F.NO_CULL;
       if (inst) flags |= F.INSTANCED;
+      const material = this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT));
+      if (!material) continue; // v3: the host could not translate this program
       out.push({
-        geometry, material: this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT)), flags, instances: inst,
+        geometry, material, flags, instances: inst,
         start: grp.start, count: Math.min(grp.count, indexCount - grp.start), instanceCount: inst ? o.count : 1,
         renderOrder: o.renderOrder, matrix: o.matrixWorld.elements,
       });

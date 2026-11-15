@@ -72,6 +72,9 @@ pub struct Config {
     pub shot: Option<String>,
     /// render every frame at this time (golden images): camera and animation frozen
     pub fixed_t: Option<f32>,
+    /// three.js scenes: "three" (three's own programs, translated to MSL; the default) or "native" (the
+    /// hand-written `fs_three`, protocol v2). Passed to the bundle as `__fr.params.programs`.
+    pub programs: String,
 }
 
 impl Default for Config {
@@ -101,6 +104,7 @@ impl Default for Config {
             rounds: 3,
             shot: None,
             fixed_t: None,
+            programs: "three".into(),
         }
     }
 }
@@ -156,6 +160,7 @@ impl Config {
                 "rounds" => self.rounds = (num(v)? as u32).max(1),
                 "shot" => self.shot = Some(v.clone()),
                 "time" => self.fixed_t = Some(num(v)? as f32),
+                "programs" => self.programs = match v.as_str() { "three" | "native" => v.clone(), _ => return Err(format!("bad --programs {v} (three|native)")) },
                 _ => return Err(format!("unknown option --{k}")),
             }
             i += 2;

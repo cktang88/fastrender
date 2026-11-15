@@ -41,11 +41,11 @@
 #define SHADOWMAP_TYPE_PCF
 
 
-layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; };
-uniform mat4 projectionMatrix;
-uniform mat4 viewMatrix;
 
-uniform vec3 cameraPosition;
+
+
+
+layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; }; layout(std140) uniform FrFrame { mat4 projectionMatrix; mat4 viewMatrix; vec3 cameraPosition; };
 uniform bool isOrthographic;
 #ifdef USE_INSTANCING
 	attribute mat4 instanceMatrix;
