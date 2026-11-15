@@ -1,0 +1,98 @@
+From 1f4e3080dd1c5fb26c908207691794321fb327b4 Mon Sep 17 00:00:00 2001
+From: Kwuang Tang <arctangent20@yahoo.com>
+Date: Sun, 15 Nov 2026 05:34:53 +0000
+Subject: [PATCH] Air mode: default graphics tier from the GPU; cached interior
+ cube shadow; dynres on low
+
+- Base Apple Silicon (Chrome: 'Apple M2'; Safari: 'Apple GPU') now boots in
+  quality=low (no GTAO/bloom, DPR 1, 2 cascades at 1024); Pro/Max/Ultra boot
+  in high; everything else keeps ultra. ?quality= still wins.
+- Interior shadow-casting point light: cube shadow re-rendered when it moves
+  room and every 30 frames (for streamed-in furniture) instead of every frame
+  (6 scene passes per frame indoors).
+- Dynamic resolution now also runs on the low tier.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BpmvtRPd6KcQVro9zRPwoL
+---
+ src/interior.ts |  8 ++++++++
+ src/main.ts     | 23 +++++++++++++++++++++--
+ 2 files changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/src/interior.ts b/src/interior.ts
+index 6a8a8c6..637ef03 100644
+--- a/src/interior.ts
++++ b/src/interior.ts
+@@ -197,6 +197,7 @@ export class InteriorLevel implements Level {
+   private rng: Rng;
+   private lights: { light: THREE.PointLight; room: Room }[] = [];
+   private shadowLight: THREE.PointLight | null = null;
++  private shadowTick = 0;
+   /** one cell per room: its own group and geometry batch, so unseen rooms can be skipped */
+   cells: Cell[] = [];
+   /** the entry (exit) door in level coordinates: centre of the doorway on the inner wall face; yaw faces into the building */
+@@ -279,6 +280,9 @@ export class InteriorLevel implements Level {
+     const here = this.lights.find((l) => p.x >= l.room.x0 && p.x <= l.room.x1 && p.z >= l.room.z0 && p.z <= l.room.z1) ?? this.lights[0];
+     if (!here) return;
+     for (const l of this.lights) l.light.intensity = l === here ? 0 : l.light.userData.base;
++    // re-render when the light moves room, and every 30 frames so furniture that streams in later
++    // (lazy furniture, remote models) still gets shadowed: 6 passes per 30 frames instead of per frame
++    if (!this.shadowLight.position.equals(here.light.position) || ++this.shadowTick % 30 === 0) this.shadowLight.shadow.needsUpdate = true;
+     this.shadowLight.position.copy(here.light.position);
+     this.shadowLight.intensity = here.light.userData.base;
+     this.shadowLight.distance = here.light.distance;
+@@ -497,6 +501,10 @@ export class InteriorLevel implements Level {
+       sl.shadow.bias = -0.002;
+       sl.shadow.radius = 4;
+       sl.shadow.camera.near = 0.1;
++      // rooms are static: render the 6-face cube shadow only when the light moves to another room,
++      // not every frame (it was 6 extra scene passes per frame indoors)
++      sl.shadow.autoUpdate = false;
++      sl.shadow.needsUpdate = true;
+       this.group.add(sl);
+       this.shadowLight = sl;
+       this.update(0, this.spawn.pos, 0);
+diff --git a/src/main.ts b/src/main.ts
+index bd8e224..fff50bc 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -80,7 +80,26 @@ const params0 = new URLSearchParams(location.search);
+ // decoder with facade/PBR textures: in the city their parse otherwise finished a minute after the download
+ if (!params0.has('lab')) void preloadFleet();
+ // ---- end vehicles
+-let quality: Quality = (params0.get('quality') as Quality) || 'ultra';
++/**
++ * Default graphics tier from the GPU. Base Apple Silicon (M1-M5 without Pro/Max/Ultra: MacBook Air-class,
++ * 8-10 GPU cores, ~100 GB/s shared bandwidth) can't afford GTAO + bloom + 4K shadows at Retina sizes,
++ * which made the city feel frozen there. Chrome reports "ANGLE Metal Renderer: Apple M2"; Safari only
++ * "Apple GPU" (no model), which we treat as base. ?quality= always wins. See docs/research/performance.md.
++ */
++function defaultQuality(): Quality {
++  try {
++    const gl = document.createElement('canvas').getContext('webgl2');
++    const ext = gl?.getExtension('WEBGL_debug_renderer_info');
++    const name = String((ext && gl?.getParameter(ext.UNMASKED_RENDERER_WEBGL)) || gl?.getParameter(gl.RENDERER) || '');
++    gl?.getExtension('WEBGL_lose_context')?.loseContext();
++    if (/Apple M\d+ (Pro|Max|Ultra)/i.test(name)) return 'high';
++    if (/Apple (M\d+|GPU)/i.test(name)) return 'low';
++  } catch {
++    /* no WebGL info: keep the desktop default */
++  }
++  return 'ultra';
++}
++let quality: Quality = (params0.get('quality') as Quality) || defaultQuality();
+ const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+ // Each composer buffer owns its depth: sharing lets later MSAA resolves overwrite scene depth.
+ rt.depthTexture = new THREE.DepthTexture(1, 1);
+@@ -788,7 +807,7 @@ let lab: { controls: OrbitControls; level: LabLevel } | null = null;
+ let dynT = 0, dynN = 0, dynSum = 0;
+ const DYN = !params0.has('nodyn');
+ function dynamicResolution(raw: number) {
+-  if (!DYN || quality === 'low') return;
++  if (!DYN) return;
+   dynSum += raw;
+   dynN++;
+   dynT += raw;
+-- 
+2.43.0
+
