@@ -42,10 +42,12 @@ side, so runs are offline and reproducible.
 
 ## three version
 
-The game pins r170. **With our r187 it does not boot**: `THREE.CubeUVReflectionMapping` is no longer exported
+The game pins r170. **Unpatched, it does not boot on our r187**: `THREE.CubeUVReflectionMapping` is no longer exported
 (lighting.ts sets it on its env render target) and the r187 `CSM` addon dropped `getExtendedBreaks()` (crashes the
-lighting rig's cascade setup). Both are game-vs-three API breaks, not pipeline issues; all numbers below use the
-`three-r170` package alias, which FastRenderer + three-programs support (same as the three-city tests).
+lighting rig's cascade setup). Both are game-vs-three API breaks, not pipeline issues. `patches/3d-world-objects-0002`
+ports the game to r187 (patches/README.md); **since 15 Nov the CI step, the golden and the scripts' defaults use the
+patched game on our default three (r187)**. The numbers in "The frame" below were measured on r170 (`--three
+three-r170`, still supported by every script for the unpatched game).
 
 ## The frame (spawn view, NYC street, after the level streamed in)
 
@@ -80,14 +82,15 @@ Counts are per frame from `renderer.info.unsupported` (node run, same view); the
 
 | # | Gap | Count / frame | Frame impact | Fix |
 |---|---|---:|---|---|
-| 1 | **Material names with `#` break translation.** three emits `#define SHADER_NAME <material.name>`; this game names materials like `painted_metal #414234`. WebGL accepts it, glslang rejects it (`'#' can be preceded only by spaces`). 6 of 71 programs fail → those materials are skipped | **766 draws (27 %)** | huge: whole buildings / props missing | drop or sanitise the `SHADER_NAME` line in `normalizeGlsl` (js/three-programs.js) / `src/xlat.rs`. `--fix-shader-name` in the node run emulates it (all numbers above use it) |
-| 2 | **Environment map (`scene.environment`, PMREM)**: programs are built without IBL; the game lights every PBR material with a PMREM'd RoomEnvironment (+ an HDRI sky when online) | all Standard/Physical draws (~2,700) | large: ambient/specular term of every lit surface; reflective glass towers go flat | prefiltered cube (or the CubeUV atlas three already builds) + split-sum IBL natively; PMREM itself is a render-to-target pass today (counted, skipped) |
+| 1 | **Fixed (15 Nov)**: normalize rule 5b (docs/notes/xlat.md). **Material names with `#` break translation.** three emits `#define SHADER_NAME <material.name>`; this game names materials like `painted_metal #414234`. WebGL accepts it, glslang rejects it (`'#' can be preceded only by spaces`). 6 of 71 programs fail → those materials are skipped | **766 draws (27 %)** | huge: whole buildings / props missing | drop or sanitise the `SHADER_NAME` line in `normalizeGlsl` (js/three-programs.js) / `src/xlat.rs`. `--fix-shader-name` in the node run emulates it (all numbers above use it) |
+| 2 | **Fixed (15 Nov, render-target work: three's own PMREMGenerator natively; r170 run: MAE 79.2 → 39.1)**. **Environment map (`scene.environment`, PMREM)**: programs are built without IBL; the game lights every PBR material with a PMREM'd RoomEnvironment (+ an HDRI sky when online) | all Standard/Physical draws (~2,700) | large: ambient/specular term of every lit surface; reflective glass towers go flat | prefiltered cube (or the CubeUV atlas three already builds) + split-sum IBL natively; PMREM itself is a render-to-target pass today (counted, skipped) |
 | 3 | **Canvas-painted textures** (JSC only): 106 canvases (shop signs, awnings, facade/fixture tiles, glyphs) have no pixels without a 2D canvas | 315 texture bindings (JSC) | large in JSC; none in node (napi canvas) or Electron | Electron host; or a native 2D canvas (CoreGraphics) behind `__fr` |
-| 4 | **Cascaded shadows (CSM addon)**: several directional shadow lights; v3 renders only the first directional map, the others bind a lit dummy; the game's per-cascade layer hook (`shadowMap.render` wrapper) never runs | every receiving draw | medium: far shadows missing / wrong cascade | render each SHADOWS entry (docs/PIPELINE.md "Not covered") |
+| 4 | **Fixed**: every SHADOWS entry gets its map (r187: depth textures, the parity work; r170: RGBA-packed maps rendered natively since 15 Nov), and three's update rules are honoured (SHADOW_KEEP: the far cascade re-renders every 4th frame, padding shadow lights never; CI: "2 maps, 1 passes"). Layer masks per cascade: still not applied. **Cascaded shadows (CSM addon)**: several directional shadow lights; v3 rendered only the first directional map, the others bound a lit dummy; the game's per-cascade layer hook (`shadowMap.render` wrapper) never runs | every receiving draw | medium: far shadows missing / wrong cascade | render each SHADOWS entry (docs/PIPELINE.md "Not covered") |
 | 5 | **Render-to-target passes skipped**: `render to render target (fullscreen/ortho pass)` 1.2/frame, `(object pass)` 0.5, `(scene pass)` 0.1 + PMREM at boot; weather occlusion depth map, window-view captures, lighting env RT | ~2 passes | small at noon/clear (weather occlusion unused, window views are for interiors); large indoors / in rain | native render targets (the post-processing work in PIPELINE.md); `DepthTexture` uniforms (`wxOcc`, bound by every weather-patched material: the 248 "depth texture" bindings) |
-| 5b | **Per-instance attributes** (`InstancedBufferAttribute` on InstancedMesh geometry): 105 meshes: the instanced building windows (`aSize`, `aImp`, `aInfo`, `aRoom`) and the VAT crowd (`i_anim`, `i_top`, `i_skin`, ...). v3 sent them as vertex streams and the native upload rejected the whole geometry (count mismatch); now skipped and counted (`instanced attribute <name>`, per upload), so those programs read 0 | 105 meshes (every window of every building + pedestrians) | large: windows collapse to their anchor, people lose their animation/colours | a per-instance vertex step for named attributes natively (as `instanceMatrix` already has) + send them with the INSTANCES upload |
+| 5b | **Fixed (15 Nov)**: per-instance vertex streams by name (docs/notes/three-programs.md). **Per-instance attributes** (`InstancedBufferAttribute` on InstancedMesh geometry): 105 meshes: the instanced building windows (`aSize`, `aImp`, `aInfo`, `aRoom`) and the VAT crowd (`i_anim`, `i_top`, `i_skin`, ...). v3 sent them as vertex streams and the native upload rejected the whole geometry (count mismatch); now skipped and counted (`instanced attribute <name>`, per upload), so those programs read 0 | 105 meshes (every window of every building + pedestrians) | large: windows collapse to their anchor, people lose their animation/colours | a per-instance vertex step for named attributes natively (as `instanceMatrix` already has) + send them with the INSTANCES upload |
 | 6 | **Sprites** (`THREE.Sprite`) not drawn | 30 | small (far pedestrians / labels) | instanced billboards with three's sprite program |
-| 7 | **Transmission** (MeshPhysicalMaterial glass): the transmission program fails translation: `sampler` is a parameter name in three's `textureBicubic(sampler2D sampler, ...)`, a reserved word in Vulkan GLSL; also needs the transmission pass | 2 | small here (revolving door glass) | rename `sampler` identifiers in `normalizeGlsl`; transmission pass later |
+| 7 | Translation **fixed (15 Nov, rule 5c: Vulkan-only keywords renamed)**; the transmission pass is still missing. **Transmission** (MeshPhysicalMaterial glass): the transmission program failed translation: `sampler` is a parameter name in three's `textureBicubic(sampler2D sampler, ...)`, a reserved word in Vulkan GLSL; also needs the transmission pass | 2 | small here (revolving door glass) | rename `sampler` identifiers in `normalizeGlsl`; transmission pass later |
+| 7b | **BatchedMesh** (HLOD far chunks, street trees): three multi-draws it (gl_DrawID + an integer `batchingIdTexture`); drawn as one geometry it crashed Metal API validation (RGBA8 bound to a `usampler2D`) | ~18 / frame | far chunks and trees | **Fixed (15 Nov)**: one draw per visible instance with the plain program; integer samplers bind integer textures. Batch instance colours still counted |
 | 8 | Lines | 0.1 | none | |
 | 9 | Remote assets (Poly Haven PBR sets + HDRI, Hugging Face originals) | 33 requests | refused by design in all runs (the golden too) | real network in the Electron host |
 
@@ -102,33 +105,45 @@ Crash fixes made in `js/fastrender-three.js` (both small and separate):
 
 ## Golden
 
-`js/golden/world-objects-ref.png`: 1280×800, frame 14 after boot (1 boot + 10 settle + 3), spawn view
-(player 49.8, 0, 9, yaw −0.12), three r170 WebGLRenderer, SwiftShader. SwiftShader needs ~25–50 s per frame of this
-scene once its queue is full, so the reference uses few frames and reads pixels back in the draw's task
-(`__worldCapture`, no `preserveDrawingBuffer`). The native side runs the same frame count (`--warmup 11 --frames 3`).
-**MAE: not measured yet.** The CI job CAN clone the game repo (run 43698589636), builds the JSC bundle and boots the
-game natively (the `[boot]` log matches node: level built, first frame with 1,298 calls), then **crashes in the native
-side**: `EXC_BAD_ACCESS` in `mac_three::ThreeScene::prepare` (a 32-byte store, `stp q1, q2, [x8]`: an FrFrame /
-FrObject write past the slot ring), also with `FASTRENDER_V3_MAX_DRAWS=1`, so it is not the main pass; the shadow
-pass writes `take(RING_ALIGN)` frames per shadow face with no `ring_cap` check, and this scene has CSM cascades plus
-31 lights. Before that fix (src/mac_three.rs, owned elsewhere) a first run hit a GPU timeout. The step prints the
-lldb backtrace as an annotation. Expected differences before any MAE
-is meaningful: gaps 1–4 above (missing materials if the `#` fix isn't in, no IBL, single shadow cascade) and the
-canvas textures in JSC.
+`js/golden/world-objects-ref.png`: 1280×800, the patched game (r187) since 15 Nov (the r170 reference was
+regenerated), spawn view (player 49.8, 0, 9, yaw −0.12), three's WebGLRenderer in headless Chromium / SwiftShader,
+3,186 calls, 145 programs. SwiftShader needs ~25–50 s per frame of this scene once its queue is full, so the reference
+uses few frames and reads pixels back in the draw's task (`__worldCapture`, no `preserveDrawingBuffer`). The native
+side runs `--warmup 11 --frames 3`.
+
+### Native on macOS CI (15 Nov 2026)
+
+What it took, in run order (all CI runs on the macos-26 paravirtual GPU, Metal API validation on):
+
+| run | state | MAE (0–255) |
+|---|---|---:|
+| 43698589636 | `EXC_BAD_ACCESS` in `ThreeScene::prepare`: growing the object-record buffer replaced the whole frame slot, dropping the ring `update()` had sized and filled for a fresh 64 KB one (src/ring.rs now owns the ring layout and bounds-checks every write) | – |
+| 43700554360 | past prepare; API validation stops on an RGBA8 neutral bound to `batchingIdTexture` (`usampler2D`) | – |
+| 43701730479 | **first native frame of the real game** (r170, BatchedMesh skipped, no IBL) | 79.2 |
+| 43701837272 | + BatchedMesh as per-instance draws | 79.2 |
+| 43702851774 | + PMREM / IBL (render-target work) | **39.1** |
+| (r187, see LOG) | patched game on r187, golden regenerated | see docs/LOG.md |
+
+All 64 (r170) / 84 (r187) programs of the spawn view translate with src/xlat.rs and compile with Apple's `metal`
+(CI step "every program translates"). What remains visible in the r170 IBL image: glass / window panels and car
+bodies black (the game's window materials sample render targets that are never rendered: `render target texture never
+bound` ~100 bindings/frame; `depth texture outside a render target` ~95: the weather occlusion map), no people
+(Sprites, and the VAT crowd), tree leaves, softer shadows in the browser.
+
+Per-frame cost on the CI host (JavaScriptCore + Metal, paravirtual GPU; not an Air), frames 61–90 after boot (level
+streamed in), r170 + IBL (run 43702851774): **render() CPU 95.0 ms (JS 68.8, native prepare 1.04, encode 2.77),
+GPU 64.6 ms**, 1,991 draws sent, 1,175 drawn after culling, 113 material instances, ring 1.35 MB/frame. Without IBL
+(run 43702800720): CPU 71.8 (JS 36.2, prepare 0.55, encode 1.58), GPU 56.6 ms. The golden frames (12–14) cost
+1.6–2.4 s of JS each: the level is still streaming in (GLTF/meshopt, image decode) and 49 programs compile under API
+validation (Metal 15–25 s total).
 
 ## Next steps (in order)
 
-0. Native crash: bound the ring writes in `prepare_shadows_v3` / size `shadow_area` for every SHADOWS face (CSM +
-   point lights), then read the golden MAE from the CI step.
-1. Translator: drop `#define SHADER_NAME` (or sanitise it) and rename `sampler` identifiers in `normalizeGlsl` /
-   `src/xlat.rs`: +766 draws, the single biggest correctness gap, a few lines.
-2. IBL: bind three's PMREM CubeUV texture (render PMREM natively once at load, or upload RoomEnvironment's prefiltered
-   cube) so `envMap` programs work: fixes the look of every PBR surface.
-2b. Per-instance attributes (InstancedBufferAttribute) natively: the windows and the crowd.
-3. Shadows for all SHADOWS entries (CSM cascades), and call the game's `shadowMap.render` hook semantics (layer masks).
-4. Render targets (weather occlusion depth, window views) → the post-processing milestone; then the composer for
-   `quality=high`.
-5. Per-draw JS: 6 µs/draw × 2,800 draws is the CPU budget an Air can't spare at 60 Hz; cache per-instance uniform
-   packing when inputs are unchanged and skip `updateMatrixWorld` for static subtrees (`matrixWorldAutoUpdate=false`
-   on baked city blocks is a game-side win too: 25k objects walked every frame).
-6. Electron host for this game (2D canvas, DOM HUD, input, audio, workers, network) once the spike lands.
+1. Render targets the game samples (window materials, weather occlusion depth): the black glass is now the largest
+   error term.
+2. Sprites + the VAT crowd; BatchedMesh instance colours (or true multi-draw: integer texture uploads).
+3. CSM per-cascade layer masks (the game's `shadowMap.render` wrapper), soft shadows' match.
+4. JS cost in JavaScriptCore: 36–69 ms/frame after streaming vs 16 ms in node (V8) for the same frame: profile
+   (`updateMatrixWorld` over 25k objects, per-draw uniform packing), then the game-side wins
+   (`matrixWorldAutoUpdate=false` on static blocks).
+5. Electron host for this game (2D canvas, DOM HUD, input, audio, workers, network) once the spike lands.

@@ -32,6 +32,10 @@ fastrender native (Rust + Metal): registry → cull/sort → shadow (the game's 
 | 7. Bundling | game → one script | esbuild IIFE (`js/build.mjs`); `three` stays real | CI builds the example |
 | 8. Air tuning | quality tiers, MetalFX, dynamic resolution | renderer-level knobs exist (scale, MetalFX, cached shadows, dynres) | bench matrix on real hardware (pending) |
 
+**A real game runs natively** (Nov 2026): cktang88/3d-world-objects (unchanged `src/main.ts`, + patches/ for r187)
+boots in JavaScriptCore and renders through three's own programs on macOS CI, diffed against its browser golden
+every push (docs/notes/real-game-3d-world-objects.md: MAE, per-frame costs, what is still missing).
+
 ## Not covered yet (counted at runtime in `renderer.info.unsupported`)
 
 | Feature | Plan |
@@ -40,7 +44,9 @@ fastrender native (Rust + Metal): registry → cull/sort → shadow (the game's 
 | Sprites, Points, Lines | Instanced billboards / point quads / line strips (three's own programs once the primitive types are bound) |
 | Transmission pass, non-colour backgrounds | the transmission render target is the remaining render-target feature; background textures need three's background mesh |
 | Compressed textures without a host decoder | Native upload of ASTC/BC/ETC/EAC mip chains is done (`CompressedTexture`); `FastRenderer.extensions` does not advertise them yet, so KTX2Loader transcodes to RGBA; cube/array compressed textures are counted |
-| Sun (cascaded) shadows, spot light maps, render-target shadow camera layers | SHADOWS kind 4 binds a lit map; `spotLightMap` not bound |
+| WebGPU `SunLight` maps, spot light maps, per-cascade shadow camera layers | SHADOWS kind 4 binds a lit map; `spotLightMap` not bound. (CSM cascades are ordinary directional maps and render, r187 depth maps and r170 RGBA-packed maps alike; three's shadow autoUpdate/needsUpdate rules are honoured: SHADOW_KEEP) |
+| BatchedMesh instance colours, integer textures | BatchedMesh draws per instance with the plain program; integer samplers bind a zero integer texture |
+| r170 point-light / VSM shadow maps | bound lit (r187 renders them all) |
 | Async program compile | `host.program` is synchronous (~15 ms cold translate + Metal compile per new program, cached on disk after); precompile at load |
 | DOM UI, input, audio | Free with the Electron host |
 

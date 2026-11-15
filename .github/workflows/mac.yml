@@ -268,12 +268,13 @@ jobs:
         env:
           MTL_DEBUG_LAYER: "1"  # Metal API validation (the paravirtual GPU: no shader validation)
         run: |
-          if ! git clone --depth 1 https://github.com/cktang88/3d-world-objects ../3d-world-objects > wo-clone.txt 2>&1; then
-            echo "game repo not readable from this job: skipped"; bash .github/annotate.sh warning "world-objects: skipped (clone failed)" wo-clone.txt 5; exit 0
+          # the game at the commit patches/3d-world-objects-000{1,2} were made on (upstream has moved on: they do not
+          # apply to its HEAD), then the patches: air mode + three r187. Pinned, so the golden stays comparable.
+          WO_BASE=073aa9eae0ba86cecb16970162593281714214e3
+          if ! { git init -q ../3d-world-objects && git -C ../3d-world-objects fetch -q --depth 1 https://github.com/cktang88/3d-world-objects "$WO_BASE" && git -C ../3d-world-objects checkout -q FETCH_HEAD; } > wo-clone.txt 2>&1; then
+            echo "game repo not readable from this job: skipped"; bash .github/annotate.sh warning "world-objects: skipped (fetch failed)" wo-clone.txt 5; exit 0
           fi
-          # the game's patches (patches/README.md): 0001 may already be upstream (then it reverse-applies: skipped)
           for p in patches/3d-world-objects-000*.patch; do
-            if git -C ../3d-world-objects apply --reverse --check "$PWD/$p" 2> /dev/null; then echo "already in the game: $p"; continue; fi
             git -C ../3d-world-objects -c user.name=ci -c user.email=ci@localhost am -q "$PWD/$p" || { echo "::error title=world-objects::$p does not apply"; exit 1; }
           done
           git -C ../3d-world-objects log --oneline -3
