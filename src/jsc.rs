@@ -233,6 +233,7 @@ impl ScriptHost {
             JSObjectSetProperty(ctx, fr, JsStr::new("_release").0, rel as JSValueRef, 0, null_mut());
             let prog = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("program").0, js_program);
             JSObjectSetProperty(ctx, fr, JsStr::new("program").0, prog as JSValueRef, 0, null_mut());
+            crate::image::install(ctx as *const c_void, fr); // __fr.readFile / __fr.decodeImage (src/image.rs)
             let params = JSValueMakeFromJSONString(ctx, JsStr::new(params_json).0);
             if !params.is_null() {
                 JSObjectSetProperty(ctx, fr, JsStr::new("params").0, params, 0, null_mut());

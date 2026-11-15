@@ -221,7 +221,7 @@ export class FastRenderer {
     if (t.isCompressedTexture && this._tp) return this._uploaded(id, t, uploadCompressedTexture(this, t, id)); // ASTC/BC/ETC mip chains (KTX2Loader)
     const img = t.image;
     let px = null, w = 0, h = 0;
-    if (img && img.data && img.width && img.height) { px = img.data; w = img.width; h = img.height; }
+    if (img && ArrayBuffer.isView(img.data) && img.width && img.height) { px = img.data; w = img.width; h = img.height; } // (a canvas's .data may be a method)
     else if (img && this.host.imagePixels) { const r = this.host.imagePixels(img); if (r) ({ data: px, width: w, height: h } = r); }
     if (!px) { this._unsupported('texture source without pixels'); return 0; }
     const meta = { width: w, height: h, srgb: t.colorSpace === 'srgb', repeat: [t.repeat.x, t.repeat.y], offset: [t.offset.x, t.offset.y], wrap: [t.wrapS, t.wrapT], flipY: !!t.flipY, mipmaps: t.generateMipmaps !== false, magFilter: t.magFilter, minFilter: t.minFilter, anisotropy: t.anisotropy || 1, format: t.format, type: t.type, depth: (img && img.depth) || 1, dim: textureDim(t) };
@@ -276,7 +276,15 @@ export class FastRenderer {
 
   /** v3: (material, object) -> three's program + uniform-block instance; uploads the instance once */
   _materialInstance(m, o) {
-    const inst = this._tp.instance(m, o);
+    // a program the host could not translate (host.program -> null) throws while binding: skip that material
+    // (counted) until it changes, instead of the whole frame
+    if (this._failed && this._failed.get(m) === m.version) { this._unsupported('program failed to translate'); return 0; }
+    let inst;
+    try { inst = this._tp.instance(m, o); } catch (e) {
+      (this._failed || (this._failed = new WeakMap())).set(m, m.version);
+      this._unsupported('program failed to translate');
+      return 0;
+    }
     if (!inst.program.packer) { this._unsupported(`program without layout (${inst.program.name})`); return 0; }
     if (inst.frame !== this._frameNo) {
       inst.frame = this._frameNo;

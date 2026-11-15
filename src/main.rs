@@ -3,6 +3,7 @@ mod voxel;
 mod script;
 mod three;
 mod xlat;
+mod image; // __fr.readFile / __fr.decodeImage for real web games (JavaScriptCore host)
 #[cfg(target_os = "macos")]
 mod jsc;
 #[cfg(target_os = "macos")]
