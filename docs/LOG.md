@@ -2,6 +2,42 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: frame loop (WP5 + PC1): QoS, counter fence / shared event, per-pass GPU ms, display link, framebufferOnly, thermal policy. Not yet measured: CI queue
+
+Design and details: docs/notes/frame-loop.md. What changed:
+
+- **QoS**: the rendering thread is `USER_INTERACTIVE` (`Renderer::new`, the addon's render threads), the Electron ring
+  reader `USER_INITIATED`, the addon's translator warm-up `UTILITY` (`src/qos.rs`, no new dependency).
+- **Pipelining audit**: nothing on the per-frame path waited for the GPU except the frames-in-flight semaphore (2 in
+  the window and Electron, 3 in the bench), which is by design. That semaphore is now a monotonic counter fence;
+  `--fence event` lets the GPU advance it through an `MTLSharedEvent` (the Metal 4 shape), default unchanged. The one
+  real stall found: the window polled in a busy loop for 150 ms during a resize; it now sleeps. The Electron `shot`
+  no longer reads a drawable back (the shot frame renders offscreen).
+- **Per-pass GPU ms** (`--gpu-passes 1`, key G, `{"gpu-passes": 1}` in Electron): one command buffer per pass group
+  (targets, shadow, main, upscale), reported in the bench output (`gpu passes ...`), the window title and the
+  Electron log. The seam maps onto `MTLCounterSampleBuffer` and `MTL4CounterHeap`.
+- **`framebufferOnly`** drawables unless a MetalFX scaler writes the output (window and Electron).
+- **Pacing**: `CAMetalDisplayLink` in the window (macOS 14+, vsync on), falling back to the `nextDrawable` loop.
+- **Thermal / Low Power Mode**: serious = scale ceiling 0.75 + 30 fps cap, critical = 0.5 + 30 fps, Low Power Mode =
+  ceiling 0.75; feeds `DynRes` or holds a fixed scale down. `--thermal 0` opts out; the bench never applies it.
+- **Game Mode keys**: embedded Info.plist in the binary, electron-builder config and `npm run game-mode` for Electron.
+
+Checked here (Linux): `cargo test --release` 53 pass (policy, DynRes limits, statistics, option parsing, QoS classes),
+the addon's `cargo test` 5 pass, both crates type-check for `aarch64-apple-darwin`.
+
+**Not measured yet.** None of the Metal code has run: every macOS runner job queued since 13:27 UTC was still waiting
+when this was written (runs 43724680917 and 43726462412 carry this change). The numbers land as the annotations
+"frame loop 1/2" and "2/2" of the step `frame loop - ...` (`.github/frame-loop.sh`, also `frame-loop.txt` in the
+results artifact): frames in flight, slot and drawable waits, per-pass GPU ms for the city, three-city, IBL + bloom
+and 3d-world-objects (frames 61-90), both fences, the windowed pacing modes and the forced thermal states. The step
+fails if the split or event-fenced frame differs from the plain one. The display link, the shared event and the
+`framebufferOnly` switch are the parts most likely to need a fix once it runs.
+
+For the real game on an Air (which pass dominates):
+`FASTRENDER_ASSETS=../3d-world-objects/public fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 2940x1912 --frames 300 --warmup 60 --gpu-passes 1`
+and the same with `--upscale metalfx --scale 0.5`: if `main` falls by about the pixel ratio the frame is fill-bound
+and the scale is the lever; if `shadow` or `targets` stay put, they are the next thing to cut.
+
 ## 2026-11-15: WP2, encoder hot path: id tables, per-material bind lists, last-bound filter, sort by pipeline
 
 Perf audit N1-N5 and N8 (`docs/research/perf-audit-2026-11.md`), design in `docs/notes/bind-lists.md`.
