@@ -171,7 +171,8 @@ export class FastRenderer {
       alphaTest: m.alphaTest || 0,
       flags,
     };
-    if (m.onBeforeCompile && m.onBeforeCompile.toString() !== 'onBeforeCompile(){}' && !/^\s*\(?\)?\s*=>\s*\{\s*\}\s*$/.test(String(m.onBeforeCompile))) this._unsupported('onBeforeCompile (needs shader translation)');
+    // a game's own onBeforeCompile is an own property; three's no-op default lives on the prototype
+    if (Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile')) this._unsupported('onBeforeCompile (needs shader translation)');
     if (m.isShaderMaterial) this._unsupported('ShaderMaterial (needs shader translation)');
     const key = JSON.stringify(desc);
     let id = this._materials.get(key);

@@ -26,12 +26,13 @@ use objc2_metal_fx::*;
 
 use crate::core::*;
 use crate::jsc::ScriptHost;
+use crate::mac_three::ThreeScene;
 use crate::script;
 use crate::voxel;
 
-type Device = ProtocolObject<dyn MTLDevice>;
-type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
-type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
+pub(crate) type Device = ProtocolObject<dyn MTLDevice>;
+pub(crate) type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+pub(crate) type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 type Tex = ProtocolObject<dyn MTLTexture>;
 type RenderPipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
 type DepthState = Retained<ProtocolObject<dyn MTLDepthStencilState>>;
@@ -45,7 +46,7 @@ pub const FRAME_SLOTS: usize = 3;
 const SHADOW_SIZE: usize = 2048;
 const SHADOW_HALF: f32 = 150.0;
 const PROP_CULL_M: f32 = 300.0;
-const OUT_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
+pub(crate) const OUT_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 const SHADER_SRC: &str = include_str!("../shaders/fastrender.metal");
 const SUN: Vec3 = Vec3::new(0.5, 0.6, 0.35);
 const FOG: [f32; 3] = [0.62, 0.68, 0.76];
@@ -75,10 +76,21 @@ struct Env {
     sun_intensity: f32,
     fog: [f32; 3],
     fog_density: f32,
+    /// three.js fog: near|density, far, mode (0 = the built-in exp fog), 0
+    fog2: [f32; 4],
+    /// final clear colour of the forward pass (display-referred)
+    clear: [f64; 3],
 }
 
 impl Default for Env {
-    fn default() -> Self { Env { sun: SUN.normalize(), sun_intensity: 1.8, fog: FOG, fog_density: FOG_DENSITY } }
+    fn default() -> Self {
+        Env { sun: SUN.normalize(), sun_intensity: 1.8, fog: FOG, fog_density: FOG_DENSITY, fog2: [0.0; 4], clear: [tonemap(FOG[0]), tonemap(FOG[1]), tonemap(FOG[2])] }
+    }
+}
+
+fn linear_to_srgb(c: f32) -> f64 {
+    let c = c.clamp(0.0, 1.0);
+    (if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }) as f64
 }
 
 // ------------------------------------------------------------------ device capabilities
@@ -134,6 +146,7 @@ struct Pipelines {
     depth_less: DepthState,
     depth_ge: DepthState,
     depth_off: DepthState,
+    depth_test_only: DepthState,
 }
 
 /// colour attachment spec: (format, write enabled, additive blend)
@@ -210,13 +223,14 @@ impl Pipelines {
             depth_less: depth_state(MTLCompareFunction::Less, true),
             depth_ge: depth_state(MTLCompareFunction::GreaterEqual, false),
             depth_off: depth_state(MTLCompareFunction::Always, false),
+            depth_test_only: depth_state(MTLCompareFunction::LessEqual, false),
         })
     }
 }
 
 // ------------------------------------------------------------------ resources
 
-fn buffer_with<T: Copy>(dev: &Device, data: &[T]) -> Buffer {
+pub(crate) fn buffer_with<T: Copy>(dev: &Device, data: &[T]) -> Buffer {
     let len = std::mem::size_of_val(data).max(16);
     let b = dev.newBufferWithLength_options(len, MTLResourceOptions::StorageModeShared).expect("buffer");
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, b.contents().as_ptr() as *mut u8, std::mem::size_of_val(data)) };
@@ -283,11 +297,18 @@ enum Content {
     Voxel { verts: Buffer, indices: Buffer, origins: Buffer, chunks: Vec<voxel::ChunkMesh>, world: voxel::World, mesh_ms: f64 },
     /// JS game script; instances, lights, camera, sun and fog come from its command stream each frame
     Script { host: Box<ScriptHost>, n: usize, cam: Cam, env: Env, lights: Vec<Light>, last_t: f32, error: Option<String> },
+    /// a real three.js game (protocol v2) with its own registry, pipelines and passes
+    Three(Box<ThreeScene>),
 }
 
 impl Content {
     fn build(dev: &Device, cfg: &Config) -> Result<(Content, Vec<Light>), String> {
         Ok(match cfg.scene {
+            SceneKind::Three => {
+                let src = std::fs::read_to_string("shaders/fastrender.metal").unwrap_or_else(|_| SHADER_SRC.to_string());
+                let params = format!("{{\"boxes\": {}, \"lights\": {}}}", cfg.props, cfg.lights);
+                (Content::Three(Box::new(ThreeScene::new(dev, &src, &cfg.script, &params)?)), Vec::new())
+            }
             SceneKind::Script => {
                 let shim_path = std::path::Path::new(&cfg.script).parent().and_then(|p| p.parent()).map(|p| p.join("three-shim.js"));
                 let shim = shim_path
@@ -333,10 +354,11 @@ impl Content {
         })
     }
 
-    fn kind(&self) -> usize { match self { Content::City { .. } => CITY, Content::Voxel { .. } => VOXEL, Content::Script { .. } => SCRIPT } }
+    /// index into the per-content pipeline arrays (Three has its own pipelines)
+    fn kind(&self) -> usize { match self { Content::City { .. } => CITY, Content::Voxel { .. } => VOXEL, Content::Script { .. } | Content::Three(_) => SCRIPT } }
 
     /// content that moves every frame needs its shadow re-rendered every frame
-    fn dynamic(&self) -> bool { matches!(self, Content::Script { .. }) }
+    fn dynamic(&self) -> bool { matches!(self, Content::Script { .. } | Content::Three(_)) }
 
     /// Per-frame update (scripts run here). Copies scripted instances into `inst`.
     fn update(&mut self, t: f32, inst: Option<&Buffer>) {
@@ -380,15 +402,41 @@ impl Content {
             Content::City { .. } => { let (e, d) = camera_at(t); Cam::std(e, d) }
             Content::Voxel { world, .. } => { let (e, d) = voxel::camera_at(world, t); Cam::std(e, d) }
             Content::Script { cam, .. } => *cam,
+            Content::Three(s) => Cam::std(s.view.cam_pos, Vec3::NEG_Z),
         }
     }
 
-    fn env(&self) -> Env { match self { Content::Script { env, .. } => *env, _ => Env::default() } }
+    fn env(&self) -> Env {
+        match self {
+            Content::Script { env, .. } => *env,
+            Content::Three(s) => {
+                let v = &s.view;
+                let mut e = Env { sun: v.sun.and_then(|d| d.try_normalize()).unwrap_or(SUN.normalize()), ..Env::default() };
+                let bg = v.background;
+                e.clear = [linear_to_srgb(bg[0]), linear_to_srgb(bg[1]), linear_to_srgb(bg[2])];
+                match v.fog {
+                    Some(f) => {
+                        e.fog = f.color;
+                        e.fog2 = if f.exp2 { [f.a, 0.0, 2.0, 0.0] } else { [f.a, f.b, 1.0, 0.0] };
+                    }
+                    None => e.fog2 = [0.0, 0.0, 3.0, 0.0], // mode 3: no fog
+                }
+                e
+            }
+            _ => Env::default(),
+        }
+    }
 
     /// lights that change per frame (scripts); None = the static lights
     fn frame_lights(&self) -> Option<&[Light]> { match self { Content::Script { lights, .. } => Some(lights), _ => None } }
 
-    pub fn script_ms(&self) -> Option<f64> { match self { Content::Script { host, .. } => Some(host.last_js_ms), _ => None } }
+    pub fn script_ms(&self) -> Option<f64> {
+        match self {
+            Content::Script { host, .. } => Some(host.last_js_ms),
+            Content::Three(s) => Some(s.js_ms()),
+            _ => None,
+        }
+    }
 
     fn visible_capacity(&self) -> usize { match self { Content::City { n, .. } => *n, _ => 1 } }
 
@@ -457,6 +505,7 @@ impl Content {
                     }
                     draws
                 }
+                Content::Three(_) => 0, // drawn by ThreeScene::encode_main / encode_shadow
                 Content::Script { n, .. } => {
                     if *n == 0 { return 0; }
                     enc.setVertexBuffer_offset_atIndex(Some(&cube.v), 0, 0);
@@ -641,6 +690,9 @@ impl Renderer {
 
     /// Adjust a requested config to what the device can do, or refuse.
     fn effective(mut cfg: Config, caps: Caps) -> Result<Config, String> {
+        if cfg.scene == SceneKind::Three {
+            cfg.path = RenderPath::Forward; // three.js materials are forward-shaded (deferred: later)
+        }
         if !caps.apple_gpu {
             if cfg.path == RenderPath::Deferred {
                 return Err("skipped: single-pass deferred needs an Apple-family GPU (tile reads)".into());
@@ -731,6 +783,11 @@ impl Renderer {
             Ok(p) => {
                 self.wait_idle();
                 self.pipes = p;
+                if let Content::Three(s) = &mut self.content {
+                    if let Err(e) = s.reload_shaders(&self.dev, &src) {
+                        return Some(format!("three shaders failed, keeping old: {e}"));
+                    }
+                }
                 "shaders reloaded".into()
             }
             Err(e) => format!("shader reload failed, keeping old: {e}"),
@@ -745,6 +802,9 @@ impl Renderer {
 
     fn view_proj(&self, t: f32) -> (Mat4, Vec3) {
         let (cw, ch) = self.content_size();
+        if let Content::Three(s) = &self.content {
+            return s.view_proj(cw as f32 / ch as f32);
+        }
         let c = self.content.camera(t);
         let up = if c.dir.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
         let view = glam::camera::rh::view::look_to_mat4(c.eye, c.dir, up);
@@ -767,6 +827,7 @@ impl Renderer {
             frustum: frustum_planes(vp).map(|p| p.to_array()),
             counts: [n as u32, self.n_lights as u32, 0, 0],
             viewport: [cw as f32, ch as f32, self.targets.alloc.0 as f32, self.targets.alloc.1 as f32],
+            fog2: e.fog2,
         };
         let reset = MTLDrawIndexedPrimitivesIndirectArguments { indexCount: 36, instanceCount: 0, indexStart: 0, baseVertex: 0, baseInstance: 0 };
         let f = &self.frames[slot];
@@ -811,15 +872,24 @@ impl Renderer {
         self.sem.wait();
         let slot = (self.frame % FRAME_SLOTS as u64) as usize;
         // scripts run here, once the slot's buffers are free to overwrite
+        if let Content::Three(s) = &mut self.content {
+            s.update(&self.dev, &self.queue, t);
+        }
         self.content.update(t, self.frames[slot].script_inst.as_ref());
         self.env = self.content.env();
-        self.n_lights = self.content.frame_lights().map(|l| l.len()).unwrap_or(self.static_lights.len());
+        self.n_lights = match &self.content {
+            Content::Three(s) => s.light_count(),
+            c => c.frame_lights().map(|l| l.len()).unwrap_or(self.static_lights.len()),
+        };
         let (vp, eye) = self.view_proj(t);
         let shadow = self.shadow_due(eye);
         self.write_uniforms(slot, t, &vp, eye);
         let cb = self.queue.commandBuffer().expect("command buffer");
         let planes = frustum_planes(&vp);
         let shadow_planes = frustum_planes(&self.shadow_vp);
+        if let Content::Three(s) = &mut self.content {
+            self.last_draws = s.prepare(&self.dev, slot, &planes, eye);
+        }
         if self.cfg.gpu_cull {
             let f = &self.frames[slot];
             self.content.encode_cull(&cb, &self.pipes, (&f.visible, &f.args), &planes, eye, PROP_CULL_M);
@@ -877,6 +947,11 @@ impl Renderer {
         enc.setDepthBias_slopeScale_clamp(1.0, 2.0, 0.01);
         enc.setCullMode(MTLCullMode::Back);
         enc.setFrontFacingWinding(MTLWinding::CounterClockwise);
+        if let Content::Three(s) = &self.content {
+            s.encode_shadow(&enc, slot, &f.uniforms, shadow_planes);
+            enc.endEncoding();
+            return;
+        }
         let list = if self.cfg.gpu_cull { Some((&f.shadow_visible, &f.shadow_args)) } else { None };
         self.content.encode_draw(&enc, &self.cube, f, list, shadow_planes);
         enc.endEncoding();
@@ -917,8 +992,8 @@ impl Renderer {
                 a.setTexture(Some(color));
                 a.setLoadAction(MTLLoadAction::Clear);
                 // same sky as the deferred path: fog through the shader's tonemap curve
-                let fog = self.env.fog;
-                a.setClearColor(MTLClearColor { red: tonemap(fog[0]), green: tonemap(fog[1]), blue: tonemap(fog[2]), alpha: 1.0 });
+                let c = self.env.clear;
+                a.setClearColor(MTLClearColor { red: c[0], green: c[1], blue: c[2], alpha: 1.0 });
                 a.setStoreAction(MTLStoreAction::Store);
             }
         }
@@ -928,6 +1003,11 @@ impl Renderer {
         enc.setCullMode(MTLCullMode::Back);
         enc.setFrontFacingWinding(MTLWinding::CounterClockwise);
         enc.setDepthStencilState(Some(&self.pipes.depth_less));
+        if let Content::Three(s) = &self.content {
+            s.encode_main(&enc, slot, &f.uniforms, &self.shadow_map, &self.pipes.depth_less, &self.pipes.depth_test_only);
+            enc.endEncoding();
+            return;
+        }
         let k = self.content.kind();
         enc.setRenderPipelineState(if deferred { self.pipes.gbuffer[k].as_ref().unwrap() } else { &self.pipes.forward[k] });
         unsafe {

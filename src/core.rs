@@ -20,6 +20,8 @@ pub enum SceneKind {
     Voxel,
     /// a JS game script (three.js-shaped API, js/three-shim.js) running in JavaScriptCore
     Script,
+    /// a real three.js game bundle using js/fastrender-three.js (protocol v2), in JavaScriptCore
+    Three,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +97,7 @@ impl Config {
     pub fn label(&self) -> String {
         format!(
             "{} {} {} scale={:.2} up={} shadow={} lights={} cull={} props={}",
-            match self.scene { SceneKind::City => "city", SceneKind::Voxel => "voxel", SceneKind::Script => "script" },
+            match self.scene { SceneKind::City => "city", SceneKind::Voxel => "voxel", SceneKind::Script => "script", SceneKind::Three => "three" },
             match self.path { RenderPath::Forward => "forward", RenderPath::Deferred => "deferred" },
             if self.memoryless { "memoryless" } else { "stored" },
             self.scale,
@@ -117,6 +119,7 @@ impl Config {
             match k {
                 "scene" => self.scene = match v.as_str() { "city" => SceneKind::City, "voxel" => SceneKind::Voxel, "script" => SceneKind::Script, _ => return Err(format!("bad --scene {v}")) },
                 "script" => { self.script = v.clone(); self.scene = SceneKind::Script; }
+                "three" => { self.script = v.clone(); self.scene = SceneKind::Three; }
                 "path" => self.path = match v.as_str() { "forward" => RenderPath::Forward, "deferred" => RenderPath::Deferred, _ => return Err(format!("bad --path {v}")) },
                 "memoryless" => self.memoryless = num(v)? != 0.0,
                 "scale" => self.scale = (num(v)? as f32).clamp(0.25, 1.0),
@@ -181,6 +184,8 @@ pub struct FrameUniforms {
     pub counts: [u32; 4],
     /// xy = content size in pixels, zw = allocated target size
     pub viewport: [f32; 4],
+    /// fog for three.js scenes: near (or density), far, mode (0 exp [city/voxel], 1 linear, 2 exp2), 0
+    pub fog2: [f32; 4],
 }
 
 pub fn pack_rgba(r: f32, g: f32, b: f32) -> f32 {
@@ -422,6 +427,7 @@ mod tests {
         assert!(a.instances.len() > 1000 + BLOCKS as usize * BLOCKS as usize * 4);
         assert_eq!(std::mem::size_of::<Instance>(), 32);
         assert_eq!(std::mem::size_of::<FrameUniforms>() % 16, 0);
+        assert_eq!(std::mem::size_of::<FrameUniforms>(), 3 * 64 + 3 * 16 + 6 * 16 + 16 + 16 + 16);
     }
 
     #[test]

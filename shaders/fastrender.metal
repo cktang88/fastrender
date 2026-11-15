@@ -16,6 +16,7 @@ struct Frame {
     float4 frustum[6];
     uint4 counts;        // x instances, y lights
     float4 viewport;     // xy content px, zw target px
+    float4 fog2;         // three.js fog: near|density, far, mode (0 exp, 1 linear, 2 exp2)
 };
 struct DrawArgs { uint index_count; atomic_uint instance_count; uint index_start; int base_vertex; uint base_instance; };
 
@@ -318,4 +319,170 @@ fragment half4 fs_blit(FsqOut in [[stage_in]],
     // stale texels outside the content rectangle never bleed in
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     return src.sample(s, min(in.uv * scale.xy, scale.xy - scale.zw));
+}
+
+// ------------------------------------------------------------------ three.js scenes (protocol v2)
+// A real three.js scene graph, walked by js/fastrender-three.js. Geometry keeps three's streams
+// (position, normal, uv, colour); materials are a table; lights use three.js r155+ units.
+
+struct ThreeObj { float4 r0; float4 r1; float4 r2; uint material; uint flags; uint color_size; uint streams; }; // streams: 1 uv, 2 instance colours
+struct ThreeMat { float4 color; float4 emissive_rough; float4 params; float4 map_xform; uint4 misc; };
+// params: metalness, model (1 basic, 2 lambert, 3 standard, 4 phong), alphaTest, has_map; misc.x: flipY
+struct ThreeLight { uint kind; uint cast; packed_float3 color; packed_float3 pos; packed_float3 dir; float distance; float decay; packed_float3 extra; };
+
+constant uint T_INSTANCED = 32u;
+constant uint T_VCOLOR = 64u;
+constant uint T_RECEIVE = 2u;
+
+struct TOut {
+    float4 pos [[position]];
+    float3 wpos;
+    float3 nrm;
+    float2 uv;
+    half4 vcol;
+    float view_depth;
+    uint mat [[flat]];
+    uint flags [[flat]];
+};
+
+static float3 rows_mul(float4 r0, float4 r1, float4 r2, float4 p) { return float3(dot(r0, p), dot(r1, p), dot(r2, p)); }
+
+// normal transform by the cofactor matrix (= det * inverse-transpose): right for any affine map,
+// including shear from non-uniformly scaled parents; sign(det) keeps mirrored objects facing out
+static float3 rows_normal(float4 r0, float4 r1, float4 r2, float3 n) {
+    float3 c0 = float3(r0.x, r1.x, r2.x), c1 = float3(r0.y, r1.y, r2.y), c2 = float3(r0.z, r1.z, r2.z);
+    float3 cn = cross(c1, c2) * n.x + cross(c2, c0) * n.y + cross(c0, c1) * n.z;
+    return dot(c0, cross(c1, c2)) < 0.0 ? -cn : cn;
+}
+
+static float3 three_world(ThreeObj o, device const float4* inst, uint iid, float3 p, thread float3& n) {
+    float4 p4 = float4(p, 1.0);
+    if (o.flags & T_INSTANCED) {
+        float4 i0 = inst[iid * 3], i1 = inst[iid * 3 + 1], i2 = inst[iid * 3 + 2];
+        p4 = float4(rows_mul(i0, i1, i2, p4), 1.0);
+        n = rows_normal(i0, i1, i2, n);
+    }
+    n = rows_normal(o.r0, o.r1, o.r2, n);
+    return rows_mul(o.r0, o.r1, o.r2, p4);
+}
+
+vertex TOut vs_three(uint vid [[vertex_id]], uint iid [[instance_id]],
+                     device const packed_float3* pos [[buffer(0)]],
+                     device const packed_float3* nrm [[buffer(1)]],
+                     device const float2* uv [[buffer(2)]],
+                     constant Frame& f [[buffer(3)]],
+                     device const float* col [[buffer(4)]],
+                     constant ThreeObj& o [[buffer(5)]],
+                     device const float4* inst [[buffer(6)]],
+                     device const packed_float3* icol [[buffer(7)]]) {
+    float3 n = float3(nrm[vid]);
+    float3 w = three_world(o, inst, iid, float3(pos[vid]), n);
+    TOut out;
+    out.pos = f.view_proj * float4(w, 1.0);
+    out.wpos = w;
+    out.nrm = n;
+    out.uv = (o.streams & 1u) ? uv[vid] : float2(0.0);
+    half4 c = half4(1.0h);
+    if (o.flags & T_VCOLOR) {
+        uint k = o.color_size;
+        c = half4(half(col[vid * k]), half(col[vid * k + 1]), half(col[vid * k + 2]), k > 3 ? half(col[vid * k + 3]) : 1.0h);
+    }
+    if ((o.flags & T_INSTANCED) && (o.streams & 2u)) c.rgb *= half3(float3(icol[iid]));
+    out.vcol = c;
+    out.view_depth = out.pos.w;
+    out.mat = o.material;
+    out.flags = o.flags;
+    return out;
+}
+
+vertex ShadowOut vs_three_shadow(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                 device const packed_float3* pos [[buffer(0)]],
+                                 constant Frame& f [[buffer(3)]],
+                                 constant ThreeObj& o [[buffer(5)]],
+                                 device const float4* inst [[buffer(6)]]) {
+    float3 n = float3(0.0, 1.0, 0.0);
+    ShadowOut out;
+    out.pos = f.shadow_vp * float4(three_world(o, inst, iid, float3(pos[vid]), n), 1.0);
+    return out;
+}
+
+static float pow2(float x) { return x * x; }
+
+// GGX specular (three.js BRDF_GGX: Schlick Fresnel, height-correlated Smith visibility, GGX D)
+static float3 brdf_ggx(float3 L, float3 V, float3 N, float3 spec, float rough) {
+    float a = max(rough * rough, 0.0025);
+    float3 H = normalize(L + V);
+    float dNL = saturate(dot(N, L)), dNV = saturate(dot(N, V)) + 1e-4, dNH = saturate(dot(N, H)), dVH = saturate(dot(V, H));
+    float3 F = spec + (1.0 - spec) * pow(1.0 - dVH, 5.0);
+    float a2 = a * a;
+    float gv = dNL * sqrt(a2 + (1.0 - a2) * dNV * dNV), gl = dNV * sqrt(a2 + (1.0 - a2) * dNL * dNL);
+    float Vis = 0.5 / max(gv + gl, 1e-6);
+    float D = a2 / (M_PI_F * pow2(dNH * dNH * (a2 - 1.0) + 1.0));
+    return F * (Vis * D);
+}
+
+fragment half4 fs_three(TOut in [[stage_in]], bool front [[front_facing]],
+                        constant Frame& f [[buffer(0)]],
+                        constant ThreeLight* lights [[buffer(1)]],
+                        device const ThreeMat* mats [[buffer(2)]],
+                        depth2d<float> sm [[texture(0)]],
+                        texture2d<half> map [[texture(1)]]) {
+    ThreeMat m = mats[in.mat];
+    float4 base = m.color;
+    if (m.params.w > 0.5) {
+        float2 uv = in.uv * m.map_xform.xy + m.map_xform.zw;
+        if (m.misc.x != 0u) uv.y = 1.0 - uv.y;
+        constexpr sampler s(coord::normalized, filter::linear, mip_filter::linear, address::repeat, max_anisotropy(4));
+        base *= float4(map.sample(s, uv));
+    }
+    base *= float4(in.vcol);
+    if (m.params.z > 0.0 && base.a < m.params.z) discard_fragment();
+    float3 color;
+    uint model = uint(m.params.y);
+    if (model == 1u) {
+        color = base.rgb; // MeshBasicMaterial: unlit
+    } else {
+        float3 N = normalize(in.nrm) * (front ? 1.0 : -1.0);
+        float3 V = normalize(f.cam_pos.xyz - in.wpos);
+        float metal = model == 3u ? m.params.x : 0.0;
+        float rough = m.emissive_rough.w;
+        float3 diffuse = base.rgb * (1.0 - metal);
+        float3 spec = mix(float3(0.04), base.rgb, metal);
+        bool specular = model != 2u;
+        float3 direct = 0.0, irr = 0.0;
+        for (uint i = 0; i < f.counts.y; i++) {
+            ThreeLight l = lights[i];
+            float3 lc = float3(l.color);
+            if (l.kind == 1u) { irr += lc; continue; }
+            if (l.kind == 2u) { irr += mix(float3(l.extra), lc, N.y * 0.5 + 0.5); continue; }
+            float3 L;
+            float att = 1.0;
+            if (l.kind == 3u) {
+                L = -float3(l.dir);
+                if (l.cast != 0u && (in.flags & T_RECEIVE)) att = float(sun_shadow(in.wpos, sm, f));
+            } else {
+                float3 d = float3(l.pos) - in.wpos;
+                float dist = length(d);
+                L = d / max(dist, 1e-4);
+                att = 1.0 / max(pow(dist, l.decay), 0.01);
+                if (l.distance > 0.0) att *= pow2(saturate(1.0 - pow2(pow2(dist / l.distance))));
+                if (l.kind == 5u) {
+                    float cosA = cos(l.extra[0]), cosP = cos(l.extra[0] * (1.0 - l.extra[1]));
+                    att *= smoothstep(cosA, cosP, dot(-L, float3(l.dir)));
+                }
+            }
+            float nl = saturate(dot(N, L));
+            if (nl <= 0.0 || att <= 0.0) continue;
+            float3 rad = lc * att * nl;
+            direct += rad * diffuse / M_PI_F;
+            if (specular) direct += rad * brdf_ggx(L, V, N, spec, rough);
+        }
+        color = direct + irr * diffuse / M_PI_F;
+    }
+    color += m.emissive_rough.xyz;
+    // fog (three.js: depth = view-space distance along the camera axis)
+    uint fm = uint(f.fog2.z);
+    if (fm == 1u) color = mix(color, f.fog.rgb, smoothstep(f.fog2.x, f.fog2.y, in.view_depth));
+    else if (fm == 2u) color = mix(color, f.fog.rgb, 1.0 - exp(-pow2(f.fog2.x * in.view_depth)));
+    return half4(tonemap(half3(max(color, 0.0))), half(base.a));
 }

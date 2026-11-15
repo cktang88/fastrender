@@ -1,0 +1,541 @@
+//! Native backend for real three.js scenes (protocol v2, docs/PROTOCOL.md): the resource registry
+//! (geometry, textures, materials, instance buffers keyed by the ids `js/fastrender-three.js`
+//! assigns), per-frame culling and sorting of the draw list, and the encoders for the shadow and
+//! main passes. The JS runs in JavaScriptCore here (`jsc.rs`); an Electron host would feed the same
+//! uploads and stream (docs/HOST.md).
+
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::ptr::NonNull;
+
+use glam::{Mat4, Vec3, Vec4};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSString;
+use objc2_metal::*;
+
+use crate::core::sphere_visible;
+use crate::jsc::ScriptHost;
+use crate::mac::{buffer_with, Buffer, Device, Texture, FRAME_SLOTS, OUT_FORMAT};
+use crate::three::{self, flag, light, kind, Array, Draw, GeometryMeta, InstancesMeta, MaterialMeta, Resource, TextureMeta, ThreeLight};
+
+type RenderPipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
+type RenderEnc = ProtocolObject<dyn MTLRenderCommandEncoder>;
+
+const MAX_LIGHTS: usize = 256;
+const OBJ_BYTES: usize = 64;
+
+/// matches `ThreeObj` in the shader
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ThreeObj {
+    rows: [[f32; 4]; 3],
+    material: u32,
+    flags: u32,
+    color_size: u32,
+    streams: u32,
+}
+
+/// matches `ThreeMat` in the shader (80 bytes)
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ThreeMat {
+    color: [f32; 4],
+    emissive_rough: [f32; 4],
+    params: [f32; 4],
+    map_xform: [f32; 4],
+    misc: [u32; 4],
+}
+
+struct Geo {
+    pos: Buffer,
+    nrm: Buffer,
+    uv: Option<Buffer>,
+    col: Option<Buffer>,
+    color_size: u32,
+    index: Option<(Buffer, MTLIndexType)>,
+    sphere: [f32; 4],
+}
+
+struct Mat {
+    row: u32,
+    meta: MaterialMeta,
+}
+
+struct Inst {
+    rows: Buffer,
+    colors: Option<Buffer>,
+}
+
+struct Pipes {
+    opaque: RenderPipeline,
+    blend: RenderPipeline,
+    shadow: RenderPipeline,
+}
+
+/// Per-frame-slot buffers: object records for every visible draw, and the lights.
+struct Slot {
+    objects: Buffer,
+    cap: usize,
+    lights: Buffer,
+}
+
+/// Camera and environment of the last frame, as three.js set them.
+pub struct ThreeView {
+    pub view: Mat4,
+    pub proj: Mat4,
+    pub cam_pos: Vec3,
+    pub background: [f32; 4],
+    pub fog: Option<three::Fog>,
+    /// direction towards the shadow-casting directional light (if any)
+    pub sun: Option<Vec3>,
+}
+
+pub struct ThreeScene {
+    host: Box<ScriptHost>,
+    pipes: Pipes,
+    geos: HashMap<u32, Geo>,
+    texs: HashMap<u32, Texture>,
+    mats: HashMap<u32, Mat>,
+    mat_rows: Vec<ThreeMat>,
+    mat_buf: Buffer,
+    mat_dirty: bool,
+    insts: HashMap<u32, Inst>,
+    dummy: Buffer,
+    white: Texture,
+    slots: Vec<Slot>,
+    draws: Vec<Draw>,
+    lights: Vec<ThreeLight>,
+    /// visible draws this frame: (draw index, object slot)
+    visible: Vec<(usize, usize)>,
+    pub view: ThreeView,
+    pub error: Option<String>,
+    pub unsupported_resources: usize,
+    last_t: f32,
+}
+
+fn pipes(dev: &Device, src: &str) -> Result<Pipes, String> {
+    let lib = dev
+        .newLibraryWithSource_options_error(&NSString::from_str(src), Some(&MTLCompileOptions::new()))
+        .map_err(|e| format!("shader compile: {}", e.localizedDescription()))?;
+    let func = |n: &str| lib.newFunctionWithName(&NSString::from_str(n)).ok_or_else(|| format!("missing {n}"));
+    let make = |vs: &str, fs: Option<&str>, blend: bool| -> Result<RenderPipeline, String> {
+        let d = MTLRenderPipelineDescriptor::new();
+        d.setVertexFunction(Some(&*func(vs)?));
+        if let Some(fs) = fs {
+            d.setFragmentFunction(Some(&*func(fs)?));
+            let a = unsafe { d.colorAttachments().objectAtIndexedSubscript(0) };
+            a.setPixelFormat(OUT_FORMAT);
+            if blend {
+                a.setBlendingEnabled(true);
+                a.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                a.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                a.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                a.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            }
+        }
+        d.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
+        dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| format!("pipeline {vs}: {}", e.localizedDescription()))
+    };
+    Ok(Pipes { opaque: make("vs_three", Some("fs_three"), false)?, blend: make("vs_three", Some("fs_three"), true)?, shadow: make("vs_three_shadow", None, false)? })
+}
+
+fn slot(dev: &Device, cap: usize) -> Slot {
+    Slot {
+        objects: dev.newBufferWithLength_options(cap * OBJ_BYTES, MTLResourceOptions::StorageModeShared).expect("objects"),
+        cap,
+        lights: dev.newBufferWithLength_options(MAX_LIGHTS * std::mem::size_of::<ThreeLight>(), MTLResourceOptions::StorageModeShared).expect("lights"),
+    }
+}
+
+fn f32s(a: &Option<Array>) -> Option<&[f32]> { if let Some(Array::F32(v)) = a { Some(v) } else { None } }
+
+impl ThreeScene {
+    pub fn new(dev: &Device, shader_src: &str, bundle_path: &str, params_json: &str) -> Result<Self, String> {
+        let game = std::fs::read_to_string(bundle_path).map_err(|e| format!("bundle {bundle_path}: {e}"))?;
+        // the shared command buffer is native memory here (JavaScriptCore can expose it without a copy)
+        let host = ScriptHost::new("", &game, bundle_path, params_json, 4 << 20)?;
+        let white = {
+            let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::RGBA8Unorm, 1, 1, false) };
+            d.setUsage(MTLTextureUsage::ShaderRead);
+            let t = dev.newTextureWithDescriptor(&d).expect("white");
+            let px = [255u8; 4];
+            unsafe {
+                t.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                    MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: 1, height: 1, depth: 1 } },
+                    0,
+                    NonNull::new(px.as_ptr() as *mut c_void).unwrap(),
+                    4,
+                )
+            };
+            t
+        };
+        Ok(ThreeScene {
+            host: Box::new(host),
+            pipes: pipes(dev, shader_src)?,
+            geos: HashMap::new(),
+            texs: HashMap::new(),
+            mats: HashMap::new(),
+            mat_rows: Vec::new(),
+            mat_buf: buffer_with(dev, &[ThreeMat::default()]),
+            mat_dirty: false,
+            insts: HashMap::new(),
+            dummy: buffer_with(dev, &[0f32; 64]),
+            white,
+            slots: (0..FRAME_SLOTS).map(|_| slot(dev, 1024)).collect(),
+            draws: Vec::new(),
+            lights: Vec::new(),
+            visible: Vec::new(),
+            view: ThreeView { view: Mat4::IDENTITY, proj: Mat4::IDENTITY, cam_pos: Vec3::ZERO, background: [0.0, 0.0, 0.0, 1.0], fog: None, sun: None },
+            error: None,
+            unsupported_resources: 0,
+            last_t: 0.0,
+        })
+    }
+
+    pub fn reload_shaders(&mut self, dev: &Device, src: &str) -> Result<(), String> {
+        self.pipes = pipes(dev, src)?;
+        Ok(())
+    }
+
+    pub fn js_ms(&self) -> f64 { self.host.last_js_ms }
+
+    pub fn light_count(&self) -> usize { self.lights.len().min(MAX_LIGHTS) }
+
+    /// Run the game's frame(), apply its resource uploads, take its camera, lights and draw list.
+    pub fn update(&mut self, dev: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>, t: f32) {
+        let dt = (t - self.last_t).max(0.0);
+        self.last_t = t;
+        let result = self.host.frame(t as f64, dt as f64).and_then(|words| {
+            let f = three::decode(words)?;
+            self.view.view = Mat4::from_cols_array(&f.view);
+            self.view.proj = Mat4::from_cols_array(&f.proj);
+            self.view.cam_pos = Vec3::from(f.cam_pos);
+            self.view.background = f.background;
+            self.view.fog = f.fog;
+            self.lights.clear();
+            self.lights.extend_from_slice(&f.lights[..f.lights.len().min(MAX_LIGHTS)]);
+            self.draws.clear();
+            self.draws.extend_from_slice(f.draws);
+            Ok(())
+        });
+        // uploads are applied even when the frame failed: they describe resources, not the frame
+        let res = self.host.take_resources();
+        if !res.is_empty() {
+            self.apply(dev, queue, res);
+        }
+        self.view.sun = self.lights.iter().find(|l| l.kind == light::DIRECTIONAL && l.cast_shadow != 0).map(|l| -Vec3::from(l.dir));
+        match result {
+            Ok(()) => self.error = None,
+            Err(e) => {
+                if self.error.as_deref() != Some(&e) {
+                    eprintln!("three: {e}");
+                }
+                self.error = Some(e); // keep the last good draw list
+            }
+        }
+    }
+
+    fn apply(&mut self, dev: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>, res: Vec<Resource>) {
+        let mut mip_cb: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = None;
+        for r in res {
+            match r {
+                Resource::Release { kind: k, id } => {
+                    match k {
+                        kind::GEOMETRY => { self.geos.remove(&id); }
+                        kind::TEXTURE => { self.texs.remove(&id); }
+                        kind::INSTANCES => { self.insts.remove(&id); }
+                        _ => {}
+                    }
+                }
+                Resource::Upload { kind: k, id, meta, arrays } => {
+                    let ok = match k {
+                        kind::GEOMETRY => self.upload_geometry(dev, id, &meta, &arrays),
+                        kind::TEXTURE => self.upload_texture(dev, queue, id, &meta, &arrays, &mut mip_cb),
+                        kind::MATERIAL => self.upload_material(id, &meta),
+                        kind::INSTANCES => self.upload_instances(dev, id, &meta, &arrays),
+                        _ => Err(format!("unknown resource kind {k}")),
+                    };
+                    if let Err(e) = ok {
+                        self.unsupported_resources += 1;
+                        eprintln!("three upload {k}/{id}: {e}");
+                    }
+                }
+            }
+        }
+        if let Some(cb) = mip_cb {
+            cb.commit();
+        }
+        if self.mat_dirty {
+            // a fresh buffer: frames in flight keep (retain) the previous one
+            self.mat_buf = buffer_with(dev, &self.mat_rows);
+            self.mat_dirty = false;
+        }
+    }
+
+    fn upload_geometry(&mut self, dev: &Device, id: u32, meta: &str, a: &[Option<Array>]) -> Result<(), String> {
+        let m: GeometryMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
+        let pos = f32s(a.first().unwrap_or(&None)).ok_or("no positions")?;
+        let nrm = f32s(a.get(1).unwrap_or(&None)).ok_or("no normals")?;
+        if pos.len() < m.vertices * 3 || nrm.len() < m.vertices * 3 {
+            return Err("short position/normal stream".into());
+        }
+        let index = match a.get(4).unwrap_or(&None) {
+            Some(Array::U16(v)) => Some((buffer_with(dev, v), MTLIndexType::UInt16)),
+            Some(Array::U32(v)) => Some((buffer_with(dev, v), MTLIndexType::UInt32)),
+            _ => None,
+        };
+        self.geos.insert(
+            id,
+            Geo {
+                pos: buffer_with(dev, pos),
+                nrm: buffer_with(dev, nrm),
+                uv: f32s(a.get(2).unwrap_or(&None)).map(|v| buffer_with(dev, v)),
+                col: f32s(a.get(3).unwrap_or(&None)).map(|v| buffer_with(dev, v)),
+                color_size: m.color_size,
+                index,
+                sphere: m.sphere,
+            },
+        );
+        Ok(())
+    }
+
+    fn upload_texture(&mut self, dev: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>, id: u32, meta: &str, a: &[Option<Array>], cb: &mut Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>) -> Result<(), String> {
+        let m: TextureMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
+        let px = match a.first().unwrap_or(&None) {
+            Some(Array::U8(v)) => v,
+            _ => return Err("texture pixels must be RGBA8".into()),
+        };
+        if px.len() < m.width * m.height * 4 {
+            return Err(format!("texture {}x{} needs {} bytes, got {}", m.width, m.height, m.width * m.height * 4, px.len()));
+        }
+        let fmt = if m.srgb { MTLPixelFormat::RGBA8Unorm_sRGB } else { MTLPixelFormat::RGBA8Unorm };
+        let mips = m.mipmaps && m.width > 1 && m.height > 1;
+        let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(fmt, m.width, m.height, mips) };
+        d.setUsage(MTLTextureUsage::ShaderRead);
+        let t = dev.newTextureWithDescriptor(&d).ok_or("texture alloc")?;
+        unsafe {
+            t.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: m.width, height: m.height, depth: 1 } },
+                0,
+                NonNull::new(px.as_ptr() as *mut c_void).unwrap(),
+                m.width * 4,
+            );
+        }
+        if mips {
+            let c = cb.get_or_insert_with(|| queue.commandBuffer().expect("cb"));
+            let b = c.blitCommandEncoder().ok_or("blit")?;
+            b.generateMipmapsForTexture(&t);
+            b.endEncoding();
+        }
+        self.texs.insert(id, t);
+        // materials referencing this texture carry its transform; refresh them
+        for mat in self.mats.values() {
+            if mat.meta.map == id {
+                let row = &mut self.mat_rows[mat.row as usize];
+                row.map_xform = [m.repeat[0], m.repeat[1], m.offset[0], m.offset[1]];
+                row.misc[0] = m.flip_y as u32;
+                self.mat_dirty = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn upload_material(&mut self, id: u32, meta: &str) -> Result<(), String> {
+        let m: MaterialMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
+        let row = ThreeMat {
+            color: [m.color[0], m.color[1], m.color[2], m.opacity],
+            emissive_rough: [m.emissive[0], m.emissive[1], m.emissive[2], m.roughness.clamp(0.03, 1.0)],
+            // unknown models (ShaderMaterial etc., counted on the JS side) fall back to standard
+            params: [m.metalness, (if m.model == 0 { 3 } else { m.model }) as f32, m.alpha_test, (m.map != 0) as u32 as f32],
+            map_xform: [1.0, 1.0, 0.0, 0.0],
+            misc: [0, m.flags, 0, 0],
+        };
+        let idx = match self.mats.get(&id) {
+            Some(existing) => existing.row,
+            None => {
+                self.mat_rows.push(row);
+                (self.mat_rows.len() - 1) as u32
+            }
+        };
+        self.mat_rows[idx as usize] = row;
+        self.mats.insert(id, Mat { row: idx, meta: m });
+        self.mat_dirty = true;
+        Ok(())
+    }
+
+    fn upload_instances(&mut self, dev: &Device, id: u32, meta: &str, a: &[Option<Array>]) -> Result<(), String> {
+        let m: InstancesMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
+        let rows = f32s(a.first().unwrap_or(&None)).ok_or("no instance rows")?;
+        if rows.len() < m.count * 12 {
+            return Err("short instance rows".into());
+        }
+        self.insts.insert(id, Inst { rows: buffer_with(dev, &rows[..m.count * 12]), colors: f32s(a.get(1).unwrap_or(&None)).map(|v| buffer_with(dev, v)) });
+        Ok(())
+    }
+
+    /// three's projection with the window's aspect (the game may not know it) and Metal's z range.
+    pub fn view_proj(&self, aspect: f32) -> (Mat4, Vec3) {
+        let mut p = self.view.proj;
+        if p.w_axis.w == 0.0 && aspect > 0.0 {
+            p.x_axis.x = p.y_axis.y / aspect; // perspective: keep the vertical fov
+        }
+        (three::gl_to_metal(&p) * self.view.view, self.view.cam_pos)
+    }
+
+    /// Cull, sort and write object records + lights for `slot`. Returns the number of draws.
+    pub fn prepare(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], cam: Vec3) -> usize {
+        self.visible.clear();
+        let mut opaque: Vec<(u64, usize)> = Vec::new();
+        let mut transparent: Vec<(f32, usize)> = Vec::new();
+        for (i, d) in self.draws.iter().enumerate() {
+            let Some(g) = self.geos.get(&d.geometry) else { continue };
+            if !self.mats.contains_key(&d.material) || d.count == 0 {
+                continue;
+            }
+            let r = &d.rows;
+            let c = Vec3::new(
+                r[0][0] * g.sphere[0] + r[0][1] * g.sphere[1] + r[0][2] * g.sphere[2] + r[0][3],
+                r[1][0] * g.sphere[0] + r[1][1] * g.sphere[1] + r[1][2] * g.sphere[2] + r[1][3],
+                r[2][0] * g.sphere[0] + r[2][1] * g.sphere[1] + r[2][2] * g.sphere[2] + r[2][3],
+            );
+            let scale = (0..3).map(|k| Vec3::new(r[0][k], r[1][k], r[2][k]).length()).fold(0.0, f32::max);
+            // instanced meshes: the geometry sphere says nothing about where instances are
+            let cullable = d.flags & (flag::NO_CULL | flag::INSTANCED) == 0;
+            if cullable && !sphere_visible(planes, c, g.sphere[3] * scale) {
+                continue;
+            }
+            if d.flags & flag::TRANSPARENT != 0 {
+                transparent.push((c.distance_squared(cam), i));
+            } else {
+                opaque.push((((d.material as u64) << 32) | d.geometry as u64, i));
+            }
+        }
+        opaque.sort_unstable_by_key(|o| o.0);
+        transparent.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let n = opaque.len() + transparent.len();
+        if self.slots[slot_i].cap < n {
+            self.slots[slot_i] = slot(dev, n.next_power_of_two());
+        }
+        let s = &self.slots[slot_i];
+        let objs = s.objects.contents().as_ptr() as *mut ThreeObj;
+        for (k, i) in opaque.iter().map(|o| o.1).chain(transparent.iter().map(|t| t.1)).enumerate() {
+            let d = &self.draws[i];
+            let g = &self.geos[&d.geometry];
+            let inst_colors = d.flags & flag::INSTANCED != 0 && self.insts.get(&d.instances).is_some_and(|x| x.colors.is_some());
+            let o = ThreeObj {
+                rows: d.rows,
+                material: self.mats[&d.material].row,
+                flags: d.flags,
+                color_size: g.color_size,
+                streams: g.uv.is_some() as u32 | (inst_colors as u32) << 1,
+            };
+            unsafe { objs.add(k).write(o) };
+            self.visible.push((i, k));
+        }
+        let nl = self.light_count();
+        unsafe { std::ptr::copy_nonoverlapping(self.lights.as_ptr(), s.lights.contents().as_ptr() as *mut ThreeLight, nl) };
+        n
+    }
+
+    pub fn lights_buffer(&self, slot_i: usize) -> &Buffer { &self.slots[slot_i].lights }
+
+    fn bind_geometry(&self, enc: &RenderEnc, d: &Draw, g: &Geo) {
+        unsafe {
+            enc.setVertexBuffer_offset_atIndex(Some(&g.pos), 0, 0);
+            enc.setVertexBuffer_offset_atIndex(Some(&g.nrm), 0, 1);
+            enc.setVertexBuffer_offset_atIndex(Some(g.uv.as_ref().unwrap_or(&self.dummy)), 0, 2);
+            enc.setVertexBuffer_offset_atIndex(Some(g.col.as_ref().unwrap_or(&self.dummy)), 0, 4);
+            let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
+            enc.setVertexBuffer_offset_atIndex(Some(inst.map(|i| &i.rows).unwrap_or(&self.dummy)), 0, 6);
+            enc.setVertexBuffer_offset_atIndex(Some(inst.and_then(|i| i.colors.as_ref()).unwrap_or(&self.dummy)), 0, 7);
+        }
+    }
+
+    fn draw(&self, enc: &RenderEnc, d: &Draw, g: &Geo) {
+        let n = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances).map(|_| d.instance_count as usize).unwrap_or(0) } else { 1 };
+        if n == 0 {
+            return;
+        }
+        unsafe {
+            match &g.index {
+                Some((ib, ty)) => {
+                    let stride = if *ty == MTLIndexType::UInt16 { 2 } else { 4 };
+                    enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(MTLPrimitiveType::Triangle, d.count as usize, *ty, ib, d.start as usize * stride, n);
+                }
+                None => enc.drawPrimitives_vertexStart_vertexCount_instanceCount(MTLPrimitiveType::Triangle, d.start as usize, d.count as usize, n),
+            }
+        }
+    }
+
+    fn winding(d: &Draw) -> MTLWinding {
+        let r = &d.rows;
+        let c0 = Vec3::new(r[0][0], r[1][0], r[2][0]);
+        let c1 = Vec3::new(r[0][1], r[1][1], r[2][1]);
+        let c2 = Vec3::new(r[0][2], r[1][2], r[2][2]);
+        // a mirrored transform turns counter-clockwise faces clockwise (three.js does the same flip)
+        if c0.dot(c1.cross(c2)) < 0.0 { MTLWinding::Clockwise } else { MTLWinding::CounterClockwise }
+    }
+
+    pub fn encode_main(&self, enc: &RenderEnc, slot_i: usize, uniforms: &Buffer, shadow_map: &Texture, depth_less: &ProtocolObject<dyn MTLDepthStencilState>, depth_test_only: &ProtocolObject<dyn MTLDepthStencilState>) -> usize {
+        let s = &self.slots[slot_i];
+        unsafe {
+            enc.setVertexBuffer_offset_atIndex(Some(uniforms), 0, 3);
+            enc.setFragmentBuffer_offset_atIndex(Some(uniforms), 0, 0);
+            enc.setFragmentBuffer_offset_atIndex(Some(&s.lights), 0, 1);
+            enc.setFragmentBuffer_offset_atIndex(Some(&self.mat_buf), 0, 2);
+            enc.setFragmentTexture_atIndex(Some(shadow_map), 0);
+            enc.setVertexBuffer_offset_atIndex(Some(&s.objects), 0, 5);
+        }
+        let mut transparent_started = false;
+        enc.setRenderPipelineState(&self.pipes.opaque);
+        enc.setDepthStencilState(Some(depth_less));
+        let mut last_geo = u32::MAX;
+        for &(i, k) in &self.visible {
+            let d = &self.draws[i];
+            let g = &self.geos[&d.geometry];
+            if d.flags & flag::TRANSPARENT != 0 && !transparent_started {
+                transparent_started = true;
+                enc.setRenderPipelineState(&self.pipes.blend);
+                enc.setDepthStencilState(Some(depth_test_only));
+            }
+            enc.setCullMode(if d.flags & flag::DOUBLE != 0 { MTLCullMode::None } else if d.flags & flag::BACK != 0 { MTLCullMode::Front } else { MTLCullMode::Back });
+            enc.setFrontFacingWinding(Self::winding(d));
+            if d.geometry != last_geo || d.flags & flag::INSTANCED != 0 {
+                self.bind_geometry(enc, d, g);
+                last_geo = d.geometry;
+            }
+            unsafe {
+                enc.setVertexBufferOffset_atIndex(k * OBJ_BYTES, 5);
+                let m = &self.mats[&d.material];
+                let map = if m.meta.map != 0 { self.texs.get(&m.meta.map) } else { None };
+                enc.setFragmentTexture_atIndex(Some(map.unwrap_or(&self.white)), 1);
+            }
+            self.draw(enc, d, g);
+        }
+        self.visible.len()
+    }
+
+    pub fn encode_shadow(&self, enc: &RenderEnc, slot_i: usize, uniforms: &Buffer, shadow_planes: &[Vec4; 6]) {
+        let s = &self.slots[slot_i];
+        enc.setRenderPipelineState(&self.pipes.shadow);
+        unsafe {
+            enc.setVertexBuffer_offset_atIndex(Some(uniforms), 0, 3);
+            enc.setVertexBuffer_offset_atIndex(Some(&s.objects), 0, 5);
+        }
+        // shadow casters among this frame's visible draws (the object records are already written);
+        // off-screen casters are missed: fine for a sun shadow box centred on the camera
+        for &(i, k) in &self.visible {
+            let d = &self.draws[i];
+            if d.flags & flag::CAST == 0 || d.flags & flag::TRANSPARENT != 0 {
+                continue;
+            }
+            let g = &self.geos[&d.geometry];
+            let _ = shadow_planes;
+            enc.setFrontFacingWinding(Self::winding(d));
+            self.bind_geometry(enc, d, g);
+            unsafe { enc.setVertexBufferOffset_atIndex(k * OBJ_BYTES, 5) };
+            self.draw(enc, d, g);
+        }
+    }
+}

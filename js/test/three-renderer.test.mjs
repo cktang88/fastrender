@@ -168,6 +168,12 @@ scene.add(sprite);
 scene.add(new THREE.Mesh(box, new THREE.ShaderMaterial({ vertexShader: 'void main(){}', fragmentShader: 'void main(){}' })));
 renderer.render(scene, camera);
 assert.ok(renderer.info.unsupported.Sprite >= 1 && renderer.info.unsupported['ShaderMaterial (needs shader translation)'] >= 1);
+assert.equal(renderer.info.unsupported['onBeforeCompile (needs shader translation)'], undefined, 'three default onBeforeCompile is not flagged');
+const patched = new THREE.MeshStandardMaterial();
+patched.onBeforeCompile = (shader) => { shader.fragmentShader += ''; };
+scene.add(new THREE.Mesh(box, patched));
+renderer.render(scene, camera);
+assert.ok(renderer.info.unsupported['onBeforeCompile (needs shader translation)'] >= 1, 'a game onBeforeCompile is flagged');
 
 // ------------------------------------------------------------------ cost: 5000 meshes, per frame
 const big = new THREE.Scene();

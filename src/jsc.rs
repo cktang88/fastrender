@@ -11,6 +11,8 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr::{null, null_mut};
 use std::time::Instant;
 
+use crate::three::{Array, Resource};
+
 type JSContextRef = *const c_void;
 type JSGlobalContextRef = *mut c_void;
 type JSStringRef = *mut c_void;
@@ -43,6 +45,10 @@ unsafe extern "C" {
     fn JSValueMakeFromJSONString(ctx: JSContextRef, s: JSStringRef) -> JSValueRef;
     fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exc: *mut JSValueRef) -> JSStringRef;
     fn JSValueProtect(ctx: JSContextRef, v: JSValueRef);
+    fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exc: *mut JSValueRef) -> f64;
+    fn JSValueGetTypedArrayType(ctx: JSContextRef, v: JSValueRef, exc: *mut JSValueRef) -> u32;
+    fn JSObjectGetTypedArrayBytesPtr(ctx: JSContextRef, obj: JSObjectRef, exc: *mut JSValueRef) -> *mut c_void;
+    fn JSObjectGetTypedArrayByteLength(ctx: JSContextRef, obj: JSObjectRef, exc: *mut JSValueRef) -> usize;
     fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef);
 }
 
@@ -94,6 +100,69 @@ unsafe extern "C" fn js_log(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectR
 
 unsafe extern "C" fn no_dealloc(_bytes: *mut c_void, _ctx: *mut c_void) {}
 
+thread_local! {
+    /// resource uploads/releases from `__fr._upload` / `__fr._release`, drained by the renderer
+    static RESOURCES: std::cell::RefCell<Vec<Resource>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// JSTypedArrayType values (JavaScriptCore/JSValueRef.h)
+const TA_UINT8: u32 = 3;
+const TA_UINT8_CLAMPED: u32 = 4;
+const TA_UINT16: u32 = 5;
+const TA_UINT32: u32 = 6;
+const TA_FLOAT32: u32 = 7;
+
+/// copy a typed array argument out of JS memory (None for null/undefined/non-typed-arrays)
+unsafe fn typed_array(ctx: JSContextRef, v: JSValueRef) -> Option<Array> {
+    if v.is_null() || !JSValueIsObject(ctx, v) {
+        return None;
+    }
+    let ty = JSValueGetTypedArrayType(ctx, v, null_mut());
+    let obj = v as JSObjectRef;
+    let ptr = JSObjectGetTypedArrayBytesPtr(ctx, obj, null_mut()); // points at the view's first element
+    let len = JSObjectGetTypedArrayByteLength(ctx, obj, null_mut());
+    if ptr.is_null() && len > 0 {
+        return None;
+    }
+    macro_rules! copy {
+        ($t:ty, $variant:ident) => {
+            Some(Array::$variant(std::slice::from_raw_parts(ptr as *const $t, len / std::mem::size_of::<$t>()).to_vec()))
+        };
+    }
+    match ty {
+        TA_FLOAT32 => copy!(f32, F32),
+        TA_UINT16 => copy!(u16, U16),
+        TA_UINT32 => copy!(u32, U32),
+        TA_UINT8 | TA_UINT8_CLAMPED => copy!(u8, U8),
+        _ => None,
+    }
+}
+
+/// __fr._upload(kind, id, metaJson, ...typedArrays)
+unsafe extern "C" fn js_upload(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectRef, argc: usize, argv: *const JSValueRef, _exc: *mut JSValueRef) -> JSValueRef {
+    if argc >= 3 {
+        let kind = JSValueToNumber(ctx, *argv, null_mut()) as u32;
+        let id = JSValueToNumber(ctx, *argv.add(1), null_mut()) as u32;
+        let meta = to_rust_string(ctx, *argv.add(2));
+        let arrays = (3..argc).map(|i| typed_array(ctx, *argv.add(i))).collect();
+        RESOURCES.with(|r| r.borrow_mut().push(Resource::Upload { kind, id, meta, arrays }));
+    }
+    JSValueMakeUndefined(ctx)
+}
+
+/// __fr._release(kind, id)
+unsafe extern "C" fn js_release(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectRef, argc: usize, argv: *const JSValueRef, _exc: *mut JSValueRef) -> JSValueRef {
+    if argc >= 2 {
+        let kind = JSValueToNumber(ctx, *argv, null_mut()) as u32;
+        let id = JSValueToNumber(ctx, *argv.add(1), null_mut()) as u32;
+        RESOURCES.with(|r| r.borrow_mut().push(Resource::Release { kind, id }));
+    }
+    JSValueMakeUndefined(ctx)
+}
+
+/// JS side of the resource channel (protocol v2): meta goes over as JSON
+const PRELUDE: &str = "__fr.upload = function (k, id, meta) { var a = [k, id, JSON.stringify(meta)]; for (var i = 3; i < arguments.length; i++) a.push(arguments[i]); return __fr._upload.apply(null, a); };\n__fr.release = function (k, id) { __fr._release(k, id); };\nif (typeof globalThis.performance === 'undefined') globalThis.performance = { now: function () { return Date.now(); } };";
+
 pub struct ScriptHost {
     ctx: JSGlobalContextRef,
     frame_fn: JSObjectRef,
@@ -120,6 +189,10 @@ impl ScriptHost {
             JSObjectSetProperty(ctx, fr, JsStr::new("cmd").0, ab as JSValueRef, 0, null_mut());
             let log = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("log").0, js_log);
             JSObjectSetProperty(ctx, fr, JsStr::new("log").0, log as JSValueRef, 0, null_mut());
+            let up = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("_upload").0, js_upload);
+            JSObjectSetProperty(ctx, fr, JsStr::new("_upload").0, up as JSValueRef, 0, null_mut());
+            let rel = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("_release").0, js_release);
+            JSObjectSetProperty(ctx, fr, JsStr::new("_release").0, rel as JSValueRef, 0, null_mut());
             let params = JSValueMakeFromJSONString(ctx, JsStr::new(params_json).0);
             if !params.is_null() {
                 JSObjectSetProperty(ctx, fr, JsStr::new("params").0, params, 0, null_mut());
@@ -129,7 +202,10 @@ impl ScriptHost {
             let console = JSObjectMake(ctx, null_mut(), null_mut());
             JSObjectSetProperty(ctx, console, JsStr::new("log").0, log as JSValueRef, 0, null_mut());
             JSObjectSetProperty(ctx, global, JsStr::new("console").0, console as JSValueRef, 0, null_mut());
-            host.eval(shim, "three-shim.js")?;
+            host.eval(PRELUDE, "prelude.js")?;
+            if !shim.is_empty() {
+                host.eval(shim, "three-shim.js")?;
+            }
             host.eval(game, game_name)?;
             let f = JSObjectGetProperty(ctx, global, JsStr::new("frame").0, null_mut());
             if f.is_null() || !JSValueIsObject(ctx, f) || !JSObjectIsFunction(ctx, f as JSObjectRef) {
@@ -151,6 +227,9 @@ impl ScriptHost {
         }
         Ok(())
     }
+
+    /// Resource uploads/releases the script made since the last call (protocol v2).
+    pub fn take_resources(&self) -> Vec<Resource> { RESOURCES.with(|r| std::mem::take(&mut *r.borrow_mut())) }
 
     /// Run one frame of the script; returns the command words it wrote.
     pub fn frame(&mut self, t: f64, dt: f64) -> Result<&[u32], String> {

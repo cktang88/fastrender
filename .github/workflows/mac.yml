@@ -10,10 +10,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sw_vers; sysctl -n machdep.cpu.brand_string
-      - name: unit tests (portable core) + JS shim test
+      - name: unit tests (portable core) + JS tests (real three.js)
         run: |
           cargo test --release
-          node js/test/shim.test.mjs
+          (cd js && npm ci --silent && npm test)
+          node js/build.mjs js/examples/three-city.entry.mjs js/dist/three-city.js
       - name: build
         run: cargo build --release
       - name: offline shader compile (Apple metal compiler)
@@ -36,6 +37,8 @@ jobs:
           ./target/release/fastrender bench --path deferred --size 1280x800 --frames 40 --warmup 5 --shot shot-deferred.png || true
           ./target/release/fastrender bench --scene voxel --path forward --upscale metalfx --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --lights 16 --shot shot-voxel-metalfx.png
           ./target/release/fastrender bench --scene voxel --path forward --upscale bilinear --scale 1 --size 1280x800 --frames 40 --warmup 5 --shot shot-voxel-native.png
+          ./target/release/fastrender bench --three js/dist/three-city.js --upscale metalfx --scale 0.5 --size 1280x800 --frames 60 --warmup 5 --shot shot-three-city.png
+          ./target/release/fastrender bench --three js/dist/three-city.js --upscale bilinear --scale 1 --size 1280x800 --frames 60 --warmup 5 --shot shot-three-city-native.png
           ./target/release/fastrender bench --script js/examples/boxes.js --props 20000 --path forward --upscale metalfx --scale 0.5 --size 1280x800 --frames 60 --warmup 5 --shot shot-script.png
       - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
         run: |

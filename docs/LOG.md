@@ -2,6 +2,28 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: per-object JS cost is the CPU bottleneck at high counts, not the language
+
+- **CI (JavaScriptCore, paravirtual M-class CPU):** `bench --script js/examples/boxes.js --props 20000` spent
+  **95 ms/frame in JS**.
+- **Node, same script, after warm-up:**
+
+  | Boxes | Node, ms/frame |
+  |---|---|
+  | 500 | 1.0 |
+  | 5,000 | 7.0 |
+  | 20,000 | 28.8 |
+
+  That's about 1.4 µs per box. JSC on the CI VM runs about 3× slower again.
+- **Where the time goes:** per-object work. The demo's animation loop calls `rotation.set` and `sin` on every box, and the old
+  shim recomposes every matrix with 6 trig calls. `FastRenderer` over real three.js only copies the matrices three already
+  computed: 5000 meshes take 2.55 ms/frame in Node, including three's own `updateMatrixWorld`.
+- **Conclusion (the user's point):**
+  - Moving per-object JS into Rust would not change much.
+  - The wins are less per-object work in JS (static objects with `matrixAutoUpdate = false`, InstancedMesh), and
+    moving animation onto the GPU: per-instance parameters, with the motion computed in the vertex shader.
+  - The native renderer's job is to make each draw nearly free, and to make GPU time small (TBDR, MetalFX).
+
 ## 2026-11-15: review round 1 applied; native voxel meshing; JS bridge
 
 - **Review 1** (independent agent, full code read) found one critical and four high issues. All are fixed (see the commit
