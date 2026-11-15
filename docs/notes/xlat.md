@@ -36,7 +36,8 @@ derives from) cannot be configured out through these crates. LTO might trim some
 ## API
 
 - `normalize_glsl(src) -> String`: line-based and idempotent. `translate` applies it itself, so raw or pre-normalised
-  input gives the same result and the same cache key. The JS `normalizeGlsl` must match it byte for byte.
+  input gives the same result (but not the same cache key: see the cache below). The JS `normalizeGlsl` must match it
+  byte for byte.
   `tests/fixtures/xlat/normalize/*.in.glsl → *.out.glsl` is the shared contract (three real programs plus `edge-cases`).
   The rules:
   1. A line whose trimmed text starts with `#version` becomes `#version 450`.
@@ -87,16 +88,61 @@ derives from) cannot be configured out through these crates. LTO might trim some
   glass pane of the city came out black: 55 % of the real game's golden error).
 - `translate(vertex, fragment) -> Result<Program, String>`. `Program { vertex_msl, fragment_msl, vertex_entry: "fr_vertex", fragment_entry: "fr_fragment", layout }`.
   Errors are glslang/SPIRV-Cross logs prefixed with `vertex:`, `fragment:`, `link:` or `SPIRV-Cross:`.
-- `Cache::{open_default, new(dir), translate(v, f) -> (Program, hit), key, get, put, default_dir}`.
-  - Cache key: 128-bit FNV-1a of `TRANSLATOR_VERSION` and both normalised sources.
-  - One `<key>.json` file per program, holding the MSL and layout, written atomically (tmp file + rename).
-  - A corrupt or stale entry counts as a miss.
-  - Directory: `$FASTRENDER_SHADER_CACHE`, else `~/Library/Caches/fastrender/shaders` (macOS), else
-    `$XDG_CACHE_HOME/fastrender/shaders` or `~/.cache/fastrender/shaders`.
-- `warm_up()`: pays glslang's one-time process and symbol-table setup (about 125 ms). Run it on a background thread at launch.
+- `Cache::{open_default, new(dir), detached(dir), lookup(v, f) -> (Arc<Cached>, hit), translate(v, f) -> (Program, hit),
+  preload, flush, len, key, default_dir}`; see "Cache" below.
+- `preload()`: reads last runs' programs of the default cache directory into memory. Blocking, idempotent.
+- `warm_up()`: `preload()`, then glslang's one-time process and symbol-table setup (about 125-155 ms). Run it on a
+  background thread at launch. **This is the hosts' hook**: both already do it (`ScriptHost::warm_up_translator` in
+  `src/jsc.rs`, `init` in the Electron addon), so both get the preload without a change. A host that wants the
+  preload earlier or on its own thread calls `xlat::preload()`.
+- `host_program(cache, key, v, f) -> (layout JSON, Program)`: what `host.program` runs. On a hit it is a hash of the
+  sources, a map lookup and two clones (the layout JSON is kept ready).
 - `fastrender xlat-dump <dir> <out>`: translates every `NAME.vert.glsl` + `NAME.frag.glsl` in `<dir>`. It writes
   `NAME.{vert,frag}.metal` and `NAME.layout.json` and prints cold and warm timings. CI (`mac.yml`) compiles each
   `.metal` with `xcrun -sdk macosx metal -std=metal3.0`.
+
+## Cache
+
+A hit used to cost 1.1-2.5 ms per lit program, 86 % of it `normalize_glsl` run only to compute the key
+(docs/research/perf-audit-2026-11.md, C1/C2). Now:
+
+- **Key**: `hash3` of `TRANSLATOR_VERSION`, `MSL_OPTIONS` and both sources **exactly as the host passed them**. Only a
+  miss normalises. So raw and pre-normalised sources of one program are two entries (same output); each host is
+  consistent from run to run, so that costs nothing. `hash3` is a wyhash-style multiply-fold (16 bytes per step, three
+  independent 64-bit lanes in one pass, about 5 GB/s here; no new dependency). Two lanes are the 128-bit key (the file
+  name), the third is a check stored in the entry together with both source lengths: an entry answers only if all
+  three match, so a key collision is a miss, never a wrong program. The hash names files, so it is pinned by a golden
+  value (`hash3_is_stable`).
+- **In memory**: one store per directory per process (`Cache::new` on the same directory shares it; `Cache` is `Sync`).
+  A hit never touches the disk.
+- **On disk**: `<key>.json` per program (`format` 2, translator version, lengths, check, MSL, layout) and one `index`:
+  a header line and `<key> <run>` rows, the run that last used each key. A run's number is the newest in the index + 1.
+  The index is a preload hint and the garbage collector's liveness record only: a key it does not list is still found
+  by probing its file, so a lost, stale or corrupt index costs time, never correctness. All writes are atomic (unique
+  tmp file + rename). Index writes are deferred to a short-lived thread 0.5 s after the first unwritten change (one
+  write per launch burst, never on the JS thread: a rename costs 3.5 ms on this container's filesystem);
+  `Cache::flush` forces one.
+- **Preload**: `Cache::preload` reads the index, then the entries used in the last 4 runs in parallel (rayon), then
+  tidies. A lookup that arrives during the preload waits for it; without a preload the first lookup does the read.
+- **Robustness**: a missing, truncated, garbage, other-format or other-translator-version entry is a miss and is
+  rewritten. A failed write is reported once per program and is not an error.
+- **Garbage collection** (in `preload`, off-thread): rows unused for 64 runs leave the index; `<32 hex>.json` files
+  that no row lists are deleted once 30 days old (older formats, other translator versions, abandoned games), `.tmp`
+  files after an hour. Other files in the directory are never touched.
+- Directory: `$FASTRENDER_SHADER_CACHE`, else `~/Library/Caches/fastrender/shaders` (macOS), else
+  `$XDG_CACHE_HOME/fastrender/shaders` or `~/.cache/fastrender/shaders`.
+
+Measured (release, this 4-core x86 container, the real game's 93 programs, 11 MB of GLSL, `fastrender xlat-dump`, which
+prints the last two rows itself):
+
+| Warm launch, all 93 programs | before | after |
+|---|---:|---:|
+| JS thread, `host.program` x 93 | 190-212 ms | **6-8 ms** (preloaded) |
+| the same without a preload or an index (every entry probed on disk) | | 17-21 ms |
+| background thread: preload of 93 entries | | 12-17 ms |
+
+`TRANSLATOR_VERSION` is unchanged (the output is byte-identical); entries of the old format are simply never asked for
+again and are collected after 30 days.
 
 ## Binding convention
 
@@ -154,9 +200,9 @@ Release build, this container (Intel Xeon 2.3 GHz, x86_64); an M-series Mac shou
 |---|---|
 | one-time glslang init in a process (`warm_up`) | ~125 |
 | MeshPhysicalMaterial (instanced, clearcoat+sheen, normal/roughness maps, 2 dir + point + spot shadowed lights, hemi, fog): cold translate | **~19–20** |
-| same program, cache hit (read + parse JSON of ~100 KB MSL) | **~0.85** |
-| MeshStandardMaterial + onBeforeCompile | ~16 cold, 0.8 warm |
-| Lambert / Basic / depth / distance / small ShaderMaterials | 3–13 cold, 0.05–0.5 warm |
+| same program, cache hit (hash of the raw sources + memory lookup + clone) | **~0.06** |
+| MeshStandardMaterial + onBeforeCompile | ~16 cold, 0.07 warm |
+| Lambert / Basic / depth / distance / small ShaderMaterials | 3–13 cold, 0.01–0.05 warm |
 
 These numbers do not include Metal's own `newLibraryWithSource` compile of the MSL, which the cache does not help. A
 later step can add `MTLBinaryArchive` for that.
@@ -173,8 +219,10 @@ later step can add `MTLBinaryArchive` for that.
 - `translate_all_fixture_programs`, `layout_probe_std140_cases`, `physical_program`: layout invariants (no overlap,
   alignment, strides, unique names, size), MSL offsets agree with the reflection, textures and samplers are bound at
   their index, attributes at their location, `FrObject` is fixed, entry names, and the JSON shape.
-- `cache_hit`: miss then hit, raw and normalised input share an entry, different source means a miss, a corrupt entry is
-  repaired.
+- `cache_hit`: miss then hit, `host_program`, stores shared per directory, a new process finds entries through the
+  index or (index lost / corrupt) by probing, corrupt / truncated / stale entries and a wrong check are misses and
+  repaired. `cache_index_runs`: run numbering, the preload window, the deferred index write, garbage collection.
+  `cache_concurrent`: preload racing lookups. `hash3_is_stable`: golden value, lane independence, framing.
 - CI (macos-26): `fastrender xlat-dump tests/fixtures/xlat/programs xlat-out`, then `xcrun metal -std=metal3.0 -c` on
   every emitted `.metal`.
 

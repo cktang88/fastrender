@@ -1043,9 +1043,16 @@ fn fixed_sampler(name: &str, shadow: bool, vsm: bool) -> Option<ConstexprSampler
     Some(s)
 }
 
-/// The first translation in a process also pays glslang's one-time setup (process init + built-in symbol tables,
-/// ~120 ms in release). Call this on a background thread at startup to take it off the first program's path.
+/// Launch warm-up, for a background thread: [`preload`]s last runs' cached programs (a few ms), then pays glslang's
+/// one-time setup (process init + built-in symbol tables, ~120 ms in release) so the first new program does not.
 pub fn warm_up() {
+    // Unit tests must not read or tidy the user's real cache directory.
+    #[cfg(not(test))]
+    preload();
+    init_translator();
+}
+
+fn init_translator() {
     let _ = translate("#version 450\nvoid main() { gl_Position = vec4(0.0); }\n", "#version 450\nlayout(location = 0) out vec4 c;\nvoid main() { c = vec4(1.0); }\n");
 }
 
@@ -1146,30 +1153,267 @@ fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String>
 
 // ---------------------------------------------------------------------------------------------------------------
 // Cache
+//
+// A hit must cost far less than `normalize_glsl` (1-2 ms for a lit program), so the key is a hash of the sources
+// exactly as the host passed them, and the lookup is an in-memory map. On disk: one `<key>.json` per program plus
+// `index`, the list of keys with the run that last used each. The index is only a preload hint (which entries to read
+// off-thread at launch) and the garbage collector's liveness record: a key missing from it is still found by probing
+// its file, so a lost or corrupt index costs time, never correctness.
 
-/// 128-bit FNV-1a (two 64-bit lanes with different offsets), stable across Rust versions and platforms.
-fn hash_hex(parts: &[&str]) -> String {
-    let mut a: u64 = 0xcbf29ce484222325;
-    let mut b: u64 = 0x84222325cbf29ce4;
-    for p in parts {
-        for &byte in p.as_bytes().iter().chain(std::iter::once(&0xffu8)) {
-            a = (a ^ byte as u64).wrapping_mul(0x100000001b3);
-            b = (b ^ byte as u64).wrapping_mul(0x100000001b3).rotate_left(5);
+/// Version of the on-disk entry and index formats (not of the translation: that is [`TRANSLATOR_VERSION`]).
+const CACHE_FORMAT: u32 = 2;
+const INDEX_HEADER: &str = "fastrender-xlat-index 2";
+/// Entries used in the last this-many runs are preloaded (so alternating between a few games stays warm).
+const PRELOAD_RUNS: u64 = 4;
+/// Entries not used for this many runs leave the index; their files are deleted once they are also `GC_AGE` old.
+const KEEP_RUNS: u64 = 64;
+const GC_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+/// Index changes are written this long after the first unwritten one.
+const INDEX_FLUSH_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Three independent 64-bit hashes of `parts` in one pass (wyhash-style 64x64->128 multiply-fold, 16 bytes per
+/// step, each part framed by its length). Not cryptographic. Stable across platforms and Rust versions (the result
+/// names files on disk): words are read little-endian.
+fn hash3(parts: &[&[u8]]) -> [u64; 3] {
+    const K: [u64; 3] = [0xa0761d6478bd642f, 0xe7037ed1a0b428db, 0x8ebc6af09c88c6e3];
+    const S: [u64; 3] = [0x589965cc75374cc3, 0x1d8e4e27c47d124f, 0xeb44accab455d165];
+    #[inline(always)]
+    fn mum(a: u64, b: u64) -> u64 {
+        let m = (a as u128).wrapping_mul(b as u128);
+        (m as u64) ^ ((m >> 64) as u64)
+    }
+    #[inline(always)]
+    fn step(s: &mut [u64; 3], c: &[u8]) {
+        let a = u64::from_le_bytes(c[..8].try_into().unwrap());
+        let b = u64::from_le_bytes(c[8..16].try_into().unwrap());
+        for i in 0..3 {
+            s[i] = mum(a ^ K[i], b ^ s[i]);
         }
     }
-    format!("{a:016x}{b:016x}")
+    let mut s = S;
+    for p in parts {
+        for i in 0..3 {
+            s[i] = mum(s[i] ^ p.len() as u64, K[i] ^ S[(i + 1) % 3]);
+        }
+        let mut chunks = p.chunks_exact(16);
+        for c in &mut chunks {
+            step(&mut s, c);
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut tail = [0u8; 16];
+            tail[..rest.len()].copy_from_slice(rest);
+            step(&mut s, &tail);
+        }
+    }
+    for i in 0..3 {
+        s[i] = mum(s[i] ^ K[(i + 1) % 3], S[i] ^ parts.len() as u64);
+    }
+    s
 }
 
-/// On-disk cache of translated programs: `<dir>/<hash>.json` (MSL + layout), keyed by the normalised sources and
-/// [`TRANSLATOR_VERSION`].
-pub struct Cache {
-    pub dir: PathBuf,
+/// The 128-bit cache key and an independent 64-bit check for one program: [`TRANSLATOR_VERSION`], [`MSL_OPTIONS`]
+/// and both sources as given (raw).
+fn source_key(vertex: &str, fragment: &str) -> (u128, u64) {
+    let [a, b, c] = hash3(&[TRANSLATOR_VERSION.as_bytes(), MSL_OPTIONS.as_bytes(), vertex.as_bytes(), fragment.as_bytes()]);
+    ((a as u128) << 64 | b as u128, c)
+}
+
+/// A translated program as the cache keeps it in memory.
+pub struct Cached {
+    pub program: Program,
+    /// `program.layout` as the JSON string `host.program` returns to JS.
+    pub layout_json: String,
+    // Guard against a key collision: an entry answers only the sources it was made from.
+    vertex_len: u64,
+    fragment_len: u64,
+    check: u64,
+}
+
+impl Cached {
+    fn new(program: Program, vertex_len: u64, fragment_len: u64, check: u64) -> Option<Cached> {
+        let layout_json = serde_json::to_string(&program.layout).ok()?;
+        Some(Cached { program, layout_json, vertex_len, fragment_len, check })
+    }
+
+    fn answers(&self, vertex: &str, fragment: &str, check: u64) -> bool {
+        self.vertex_len == vertex.len() as u64 && self.fragment_len == fragment.len() as u64 && self.check == check
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 struct CacheEntry {
+    format: u32,
     version: String,
+    vertex_len: u64,
+    fragment_len: u64,
+    check: u64,
     program: Program,
+}
+
+fn key_hex(key: u128) -> String {
+    format!("{key:032x}")
+}
+
+fn entry_path(dir: &Path, key: u128) -> PathBuf {
+    dir.join(format!("{}.json", key_hex(key)))
+}
+
+/// Reads one entry file. Anything unexpected (missing, truncated, another format or translator version) is `None`.
+fn read_entry(dir: &Path, key: u128) -> Option<Cached> {
+    let bytes = std::fs::read(entry_path(dir, key)).ok()?;
+    let e: CacheEntry = serde_json::from_slice(&bytes).ok()?;
+    if e.format != CACHE_FORMAT || e.version != TRANSLATOR_VERSION {
+        return None;
+    }
+    Cached::new(e.program, e.vertex_len, e.fragment_len, e.check)
+}
+
+/// Writes `bytes` to `path` atomically (unique temporary file in the same directory, then rename).
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}-{n}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+#[derive(Default)]
+struct State {
+    /// The index was read and last runs' entries are in `entries`.
+    loaded: bool,
+    /// This run's number: one more than the newest run in the index.
+    run: u64,
+    entries: std::collections::HashMap<u128, std::sync::Arc<Cached>>,
+    /// key -> the run that last used it (the index file).
+    used: std::collections::HashMap<u128, u64>,
+    dirty: bool,
+    flush_scheduled: bool,
+}
+
+/// The in-memory side of one cache directory, shared by every [`Cache`] opened on it in this process.
+struct Store {
+    dir: PathBuf,
+    state: std::sync::Mutex<State>,
+}
+
+static STORES: std::sync::Mutex<Vec<std::sync::Arc<Store>>> = std::sync::Mutex::new(Vec::new());
+
+impl Store {
+    fn new(dir: PathBuf) -> std::sync::Arc<Store> {
+        std::sync::Arc::new(Store { dir, state: Default::default() })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Reads the index and the entries of the last [`PRELOAD_RUNS`] runs (in parallel), once.
+    fn load(&self, st: &mut State) {
+        if st.loaded {
+            return;
+        }
+        st.loaded = true;
+        let text = std::fs::read_to_string(self.dir.join("index")).unwrap_or_default();
+        let mut lines = text.lines();
+        if lines.next() == Some(INDEX_HEADER) {
+            for l in lines {
+                let Some((k, r)) = l.split_once(' ') else { continue };
+                if let (32, Ok(k), Ok(r)) = (k.len(), u128::from_str_radix(k, 16), r.parse::<u64>()) {
+                    st.used.insert(k, r);
+                }
+            }
+        }
+        let last = st.used.values().copied().max().unwrap_or(0);
+        st.run = last.saturating_add(1);
+        let before = st.used.len();
+        st.used.retain(|_, r| r.saturating_add(KEEP_RUNS) > last);
+        st.dirty |= st.used.len() != before;
+        use rayon::prelude::*;
+        let keys: Vec<u128> = st.used.iter().filter(|(_, r)| r.saturating_add(PRELOAD_RUNS) > last).map(|(k, _)| *k).collect();
+        let loaded: Vec<(u128, Cached)> = keys.par_iter().filter_map(|k| Some((*k, read_entry(&self.dir, *k)?))).collect();
+        st.entries.extend(loaded.into_iter().map(|(k, c)| (k, std::sync::Arc::new(c))));
+    }
+
+    /// The index file's text, if it has unwritten changes. Write it with [`Store::write_index`] after unlocking.
+    fn index_text(st: &mut State) -> Option<String> {
+        if !std::mem::take(&mut st.dirty) {
+            return None;
+        }
+        let mut rows: Vec<(u128, u64)> = st.used.iter().map(|(k, r)| (*k, *r)).collect();
+        rows.sort_unstable();
+        let mut text = String::with_capacity(32 + rows.len() * 44);
+        text.push_str(INDEX_HEADER);
+        text.push('\n');
+        for (k, r) in rows {
+            text.push_str(&format!("{k:032x} {r}\n"));
+        }
+        Some(text)
+    }
+
+    /// Best effort: without the index the next launch probes each entry file instead of preloading.
+    fn write_index(&self, text: Option<String>) {
+        if let Some(text) = text {
+            let _ = std::fs::create_dir_all(&self.dir).and_then(|_| write_atomic(&self.dir.join("index"), text.as_bytes()));
+        }
+    }
+
+    /// Records that this run used `key`. The index is written a little later, by a short-lived thread: one write
+    /// covers a whole launch burst, and the JS thread never pays for it (an atomic write costs milliseconds on some
+    /// filesystems). A process that exits first only loses preload hints.
+    fn touch(self: &std::sync::Arc<Store>, st: &mut State, key: u128) {
+        if st.used.insert(key, st.run) != Some(st.run) {
+            st.dirty = true;
+        }
+        if st.dirty && !st.flush_scheduled {
+            let store = self.clone();
+            st.flush_scheduled = std::thread::Builder::new()
+                .name("xlat-index".into())
+                .spawn(move || {
+                    std::thread::sleep(INDEX_FLUSH_DELAY);
+                    let text = {
+                        let mut st = store.lock();
+                        st.flush_scheduled = false;
+                        Store::index_text(&mut st)
+                    };
+                    store.write_index(text);
+                })
+                .is_ok();
+        }
+    }
+
+    /// Deletes entry files that no index row keeps alive and that are older than [`GC_AGE`] (other translator
+    /// versions, older cache formats, games no longer played), and temporary files a crash left behind.
+    fn collect_garbage(&self) {
+        let live: std::collections::HashSet<u128> = self.lock().used.keys().copied().collect();
+        let Ok(dir) = std::fs::read_dir(&self.dir) else { return };
+        for f in dir.flatten() {
+            let name = f.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let entry = name.strip_suffix(".json").filter(|k| k.len() == 32).and_then(|k| u128::from_str_radix(k, 16).ok());
+            let min_age = match entry {
+                Some(k) if !live.contains(&k) => GC_AGE,
+                None if name.ends_with(".tmp") => std::time::Duration::from_secs(3600),
+                _ => continue,
+            };
+            let age = f.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+            if age.is_some_and(|a| a > min_age) {
+                let _ = std::fs::remove_file(f.path());
+            }
+        }
+    }
+}
+
+/// Cache of translated programs: in memory, backed by `<dir>/<key>.json` (MSL + layout) and `<dir>/index`. Keyed by
+/// the sources as given, [`TRANSLATOR_VERSION`] and [`MSL_OPTIONS`]. Cheap to create: every `Cache` on one directory
+/// shares one in-memory store, so what [`preload`] read on a background thread answers a `Cache` opened later.
+pub struct Cache {
+    pub dir: PathBuf,
+    store: std::sync::Arc<Store>,
 }
 
 impl Cache {
@@ -1190,48 +1434,110 @@ impl Cache {
     }
 
     pub fn new(dir: impl Into<PathBuf>) -> Cache {
-        Cache { dir: dir.into() }
+        let dir = dir.into();
+        let mut stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
+        let store = match stores.iter().find(|s| s.dir == dir) {
+            Some(s) => s.clone(),
+            None => {
+                stores.push(Store::new(dir.clone()));
+                stores.last().unwrap().clone()
+            }
+        };
+        Cache { dir, store }
+    }
+
+    /// A cache on `dir` with its own empty in-memory store: what a new process sees (tests, `xlat-dump` timings).
+    pub fn detached(dir: impl Into<PathBuf>) -> Cache {
+        let dir = dir.into();
+        Cache { store: Store::new(dir.clone()), dir }
     }
 
     pub fn open_default() -> Cache {
         Cache::new(Self::default_dir())
     }
 
-    pub fn key(vertex_normalized: &str, fragment_normalized: &str) -> String {
-        hash_hex(&[TRANSLATOR_VERSION, MSL_OPTIONS, vertex_normalized, fragment_normalized])
+    /// Reads the index and the entries of the last few runs into memory, then tidies the directory. Blocking: call
+    /// it from a background thread at launch ([`preload`], [`warm_up`]). Lookups that arrive meanwhile wait for the
+    /// read instead of repeating it; without a preload the first lookup does the read itself.
+    pub fn preload(&self) {
+        self.store.load(&mut self.store.lock());
+        self.store.collect_garbage();
     }
 
-    fn path(&self, key: &str) -> PathBuf {
-        self.dir.join(format!("{key}.json"))
+    /// Number of programs in memory.
+    pub fn len(&self) -> usize {
+        self.store.lock().entries.len()
     }
 
-    pub fn get(&self, key: &str) -> Option<Program> {
-        let bytes = std::fs::read(self.path(key)).ok()?;
-        let e: CacheEntry = serde_json::from_slice(&bytes).ok()?;
-        (e.version == TRANSLATOR_VERSION).then_some(e.program)
+    /// Writes the index now if it has unwritten changes (they are otherwise written within half a second).
+    pub fn flush(&self) {
+        let text = Store::index_text(&mut self.store.lock());
+        self.store.write_index(text);
     }
 
-    pub fn put(&self, key: &str, program: &Program) -> std::io::Result<()> {
+    /// The cache key of a program (hex; its entry is `<dir>/<key>.json`). Of the sources as given: raw and
+    /// pre-normalised sources of one program are two entries.
+    pub fn key(vertex: &str, fragment: &str) -> String {
+        key_hex(source_key(vertex, fragment).0)
+    }
+
+    fn put(&self, key: u128, c: &Cached) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
-        let e = CacheEntry { version: TRANSLATOR_VERSION.into(), program: program.clone() };
-        let tmp = self.dir.join(format!("{key}.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_vec(&e).map_err(std::io::Error::other)?)?;
-        std::fs::rename(&tmp, self.path(key))
+        let e = CacheEntry {
+            format: CACHE_FORMAT,
+            version: TRANSLATOR_VERSION.into(),
+            vertex_len: c.vertex_len,
+            fragment_len: c.fragment_len,
+            check: c.check,
+            program: c.program.clone(),
+        };
+        write_atomic(&entry_path(&self.dir, key), &serde_json::to_vec(&e).map_err(std::io::Error::other)?)
     }
 
-    /// Returns the program and whether it came from the cache. A failed cache write is not an error.
-    pub fn translate(&self, vertex: &str, fragment: &str) -> Result<(Program, bool), String> {
-        let (vn, fn_) = (normalize_glsl(vertex), normalize_glsl(fragment));
-        let key = Self::key(&vn, &fn_);
-        if let Some(p) = self.get(&key) {
-            return Ok((p, true));
+    /// The program for these sources and whether it came from the cache (memory or disk). Only a miss normalises
+    /// and translates. A failed cache write is not an error.
+    pub fn lookup(&self, vertex: &str, fragment: &str) -> Result<(std::sync::Arc<Cached>, bool), String> {
+        let (key, check) = source_key(vertex, fragment);
+        {
+            let mut st = self.store.lock();
+            self.store.load(&mut st);
+            if let Some(c) = st.entries.get(&key).filter(|c| c.answers(vertex, fragment, check)).cloned() {
+                self.store.touch(&mut st, key);
+                return Ok((c, true));
+            }
         }
-        let p = translate_normalized(&vn, &fn_)?;
-        if let Err(e) = self.put(&key, &p) {
-            eprintln!("xlat: shader cache write failed in {}: {e}", self.dir.display());
-        }
-        Ok((p, false))
+        // Not in memory: an entry the index did not list (older run, lost index, another process just wrote it).
+        let on_disk = read_entry(&self.dir, key).filter(|c| c.answers(vertex, fragment, check));
+        let hit = on_disk.is_some();
+        let c = match on_disk {
+            Some(c) => c,
+            None => {
+                let p = translate(vertex, fragment)?;
+                let c = Cached::new(p, vertex.len() as u64, fragment.len() as u64, check).ok_or("layout is not serialisable")?;
+                if let Err(e) = self.put(key, &c) {
+                    eprintln!("xlat: shader cache write failed in {}: {e}", self.dir.display());
+                }
+                c
+            }
+        };
+        let c = std::sync::Arc::new(c);
+        let mut st = self.store.lock();
+        st.entries.insert(key, c.clone());
+        self.store.touch(&mut st, key);
+        Ok((c, hit))
     }
+
+    /// [`Cache::lookup`], returning an owned program.
+    pub fn translate(&self, vertex: &str, fragment: &str) -> Result<(Program, bool), String> {
+        self.lookup(vertex, fragment).map(|(c, hit)| (c.program.clone(), hit))
+    }
+}
+
+/// Loads last runs' programs from the default cache directory into memory (see [`Cache::preload`]). Blocking and
+/// idempotent; hosts run it on a background thread at launch so `host.program` for a known game is a memory lookup.
+/// [`warm_up`] already includes it.
+pub fn preload() {
+    Cache::open_default().preload();
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1242,12 +1548,11 @@ impl Cache {
 /// Translates one program for `host.program`. Returns the layout as the JSON string JS receives and the program
 /// (MSL + layout) for the renderer. `key` is three's program cache key; it only labels errors.
 pub fn host_program(cache: &Cache, key: &str, vertex: &str, fragment: &str) -> Result<(String, Program), String> {
-    let (p, _hit) = cache.translate(vertex, fragment).map_err(|e| {
+    let (c, _hit) = cache.lookup(vertex, fragment).map_err(|e| {
         let name = key.split(',').next().unwrap_or(key);
         format!("program {name}: {e}")
     })?;
-    let json = serde_json::to_string(&p.layout).map_err(|e| e.to_string())?;
-    Ok((json, p))
+    Ok((c.layout_json.clone(), c.program.clone()))
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1264,7 +1569,7 @@ pub fn dump(input: &Path, out: &Path) -> Result<(), String> {
     let cache = Cache::new(out.join("cache"));
     let _ = std::fs::remove_dir_all(&cache.dir);
     let t = std::time::Instant::now();
-    warm_up();
+    init_translator();
     println!("one-time glslang init (warm_up): {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
     let mut failed = 0;
     for name in &names {
@@ -1300,6 +1605,28 @@ pub fn dump(input: &Path, out: &Path) -> Result<(), String> {
         }
     }
     println!("{}/{} programs translated", names.len() - failed, names.len());
+    // A warm launch as a new process sees it: preload (the hosts' background thread), then every program once
+    // through `host_program` (what the JS thread pays). Then the same without a preload and without an index.
+    let sources: Vec<(String, String)> = names
+        .iter()
+        .filter_map(|n| Some((std::fs::read_to_string(input.join(format!("{n}.vert.glsl"))).ok()?, std::fs::read_to_string(input.join(format!("{n}.frag.glsl"))).ok()?)))
+        .collect();
+    let launch = |fresh: &Cache| {
+        let t = std::time::Instant::now();
+        // what `host_program` does, keeping the hit flag
+        let hits = sources.iter().filter(|(v, f)| fresh.lookup(v, f).is_ok_and(|(c, hit)| hit && !c.layout_json.clone().is_empty() && c.program.clone().layout.size > 0)).count();
+        (hits, t.elapsed().as_secs_f64() * 1e3)
+    };
+    cache.flush();
+    let fresh = Cache::detached(&cache.dir);
+    let t = std::time::Instant::now();
+    fresh.preload();
+    let pre = t.elapsed().as_secs_f64() * 1e3;
+    let (hits, calls) = launch(&fresh);
+    println!("warm launch: preload of {} entries {pre:.2} ms (background thread) + {} host.program calls {calls:.2} ms ({hits} hits)", fresh.len(), sources.len());
+    let _ = std::fs::remove_file(cache.dir.join("index"));
+    let (hits, calls) = launch(&Cache::detached(&cache.dir));
+    println!("warm launch without preload or index: {} host.program calls {calls:.2} ms ({hits} hits)", sources.len());
     if failed > 0 { Err(format!("{failed} programs failed")) } else { Ok(()) }
 }
 
@@ -1841,10 +2168,15 @@ mod tests {
         assert!(e.starts_with("vertex:") && e.contains("nope"), "{e}");
     }
 
+    fn temp_cache_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fastrender-xlat-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     #[test]
     fn cache_hit() {
-        let dir = std::env::temp_dir().join(format!("fastrender-xlat-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = temp_cache_dir("hit");
         let cache = Cache::new(&dir);
         let all = programs();
         let (_, v, f) = all.iter().find(|p| p.0 == "physical-instanced").unwrap();
@@ -1858,17 +2190,174 @@ mod tests {
         eprintln!("physical: cold {:.2} ms, warm (cache) {:.3} ms", cold.as_secs_f64() * 1e3, warm.as_secs_f64() * 1e3);
         assert!(hit2);
         assert_eq!(p1, p2);
-        // raw and normalised sources share the entry
-        assert!(cache.translate(&normalize_glsl(v), &normalize_glsl(f)).unwrap().1);
-        // different source -> different key
+        assert_eq!(p1, translate(v, f).unwrap());
+        // host_program answers from the same entry, with the layout as JSON
+        let (json, p3) = host_program(&cache, "k", v, f).unwrap();
+        assert_eq!(p3, p1);
+        assert_eq!(serde_json::from_str::<Layout>(&json).unwrap(), p1.layout);
+        // a second Cache on the directory shares the in-memory store
+        assert_eq!(Cache::new(&dir).len(), 1);
+        // the key is of the sources as given: pre-normalised sources are their own entry with the same output
+        let (pn, hit) = cache.translate(&normalize_glsl(v), &normalize_glsl(f)).unwrap();
+        assert!(!hit);
+        assert_eq!(pn, p1);
+        // different source -> different key; swapping the stages or moving a byte between them too
         assert!(!cache.translate(&format!("{v}\n// x"), f).unwrap().1);
-        // a corrupt entry is a miss, then repaired
-        let key = Cache::key(&normalize_glsl(v), &normalize_glsl(f));
-        std::fs::write(dir.join(format!("{key}.json")), b"{garbage").unwrap();
-        assert!(!cache.translate(v, f).unwrap().1);
-        assert!(cache.translate(v, f).unwrap().1);
+        assert_ne!(Cache::key(v, f), Cache::key(f, v));
+        assert_ne!(Cache::key("ab", "c"), Cache::key("a", "bc"));
+        assert_ne!(Cache::key("", "a"), Cache::key("a", ""));
+        // a new process (its own store) finds the entry on disk: preloaded through the index ...
+        let key = Cache::key(v, f);
+        cache.flush();
+        let fresh = Cache::detached(&dir);
+        fresh.preload();
+        assert_eq!(fresh.len(), 3);
+        assert!(fresh.translate(v, f).unwrap().1);
+        // ... or, with the index lost or corrupt, by probing the entry file (and the index is rebuilt)
+        for bad in [None, Some("garbage\n\u{0}\u{1}"), Some("fastrender-xlat-index 2\nzz 1\n\nffff 1\n")] {
+            match bad {
+                Some(text) => std::fs::write(dir.join("index"), text).unwrap(),
+                None => std::fs::remove_file(dir.join("index")).unwrap(),
+            }
+            let fresh = Cache::detached(&dir);
+            fresh.preload();
+            assert_eq!(fresh.len(), 0);
+            let (p, hit) = fresh.translate(v, f).unwrap();
+            assert!(hit && p == p1);
+            fresh.flush();
+            assert!(std::fs::read_to_string(dir.join("index")).unwrap().contains(&key));
+        }
+        // a corrupt, truncated or stale entry is a miss, then repaired
+        let path = dir.join(format!("{key}.json"));
+        let good = std::fs::read(&path).unwrap();
+        let stale_version = String::from_utf8(good.clone()).unwrap().replacen(TRANSLATOR_VERSION, "xlat-0", 1);
+        let stale_format = String::from_utf8(good.clone()).unwrap().replacen("\"format\":2", "\"format\":1", 1);
+        assert_ne!(stale_format.as_bytes(), &good[..]);
+        for bad in [&b"{garbage"[..], &good[..good.len() / 2], b"", stale_version.as_bytes(), stale_format.as_bytes()] {
+            std::fs::write(&path, bad).unwrap();
+            let fresh = Cache::detached(&dir);
+            let (p, hit) = fresh.translate(v, f).unwrap();
+            assert!(!hit && p == p1);
+            assert!(Cache::detached(&dir).translate(v, f).unwrap().1);
+        }
+        // an entry made from other sources (a key collision) does not answer: same key file, wrong check
+        let wrong = String::from_utf8(good.clone()).unwrap().replacen("\"check\":", "\"check\":1", 1);
+        std::fs::write(&path, wrong).unwrap();
+        assert!(!Cache::detached(&dir).translate(v, f).unwrap().1);
+        // no temporary files are left behind
+        assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_str().unwrap().ends_with(".tmp")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn cache_index_runs() {
+        let dir = temp_cache_dir("runs");
+        let (va, vb, f) = ("#version 300 es\nvoid main() { gl_Position = vec4(0.0); }\n", "#version 300 es\nvoid main() { gl_Position = vec4(1.0); }\n", "#version 300 es\nprecision highp float;\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n");
+        let run_of = |key: &str| -> Option<u64> {
+            let text = std::fs::read_to_string(dir.join("index")).unwrap();
+            assert_eq!(text.lines().next(), Some(INDEX_HEADER));
+            text.lines().find_map(|l| l.strip_prefix(key)?.trim().parse().ok())
+        };
+        let (ka, kb) = (Cache::key(va, f), Cache::key(vb, f));
+        // run 1 translates both
+        let c = Cache::detached(&dir);
+        assert!(!c.translate(va, f).unwrap().1 && !c.translate(vb, f).unwrap().1);
+        c.flush();
+        assert_eq!((run_of(&ka), run_of(&kb)), (Some(1), Some(1)));
+        // later runs use only A: its row follows the run (index writes are deferred; flush forces one), and B
+        // stops being preloaded once it is PRELOAD_RUNS behind, but is still found on disk
+        for run in 2..=PRELOAD_RUNS + 2 {
+            let c = Cache::detached(&dir);
+            c.preload();
+            assert_eq!(c.len(), if run <= PRELOAD_RUNS + 1 { 2 } else { 1 }, "run {run}");
+            assert!(c.translate(va, f).unwrap().1);
+            c.flush();
+            assert_eq!((run_of(&ka), run_of(&kb)), (Some(run), Some(1)));
+        }
+        let c = Cache::detached(&dir);
+        c.preload();
+        assert_eq!(c.len(), 1);
+        assert!(c.translate(vb, f).unwrap().1);
+        c.flush();
+        assert_eq!(run_of(&kb), Some(PRELOAD_RUNS + 3));
+        // the deferred write happens by itself
+        let c = Cache::detached(&dir);
+        assert!(c.translate(va, f).unwrap().1);
+        std::thread::sleep(INDEX_FLUSH_DELAY * 3);
+        assert_eq!(run_of(&ka), Some(PRELOAD_RUNS + 4));
+        // rows KEEP_RUNS behind leave the index; garbage collection deletes only old, unlisted entries and old tmp files
+        std::fs::write(dir.join("index"), format!("{INDEX_HEADER}\n{ka} 1\n{kb} {}\n", KEEP_RUNS + 1)).unwrap();
+        let orphan = dir.join(format!("{:032x}.json", 7));
+        let old_tmp = dir.join("index.1-1.tmp");
+        let other = dir.join("notes.json");
+        for p in [&orphan, &old_tmp, &other, &dir.join(format!("{ka}.json"))] {
+            if !p.exists() {
+                std::fs::write(p, b"x").unwrap();
+            }
+            std::fs::File::options().write(true).open(p).unwrap().set_modified(std::time::SystemTime::now() - GC_AGE * 2).unwrap();
+        }
+        let young = dir.join(format!("{:032x}.json", 8));
+        std::fs::write(&young, b"x").unwrap();
+        let c = Cache::detached(&dir);
+        c.preload();
+        assert_eq!(c.len(), 1);
+        assert!(!orphan.exists() && !old_tmp.exists() && !dir.join(format!("{ka}.json")).exists());
+        assert!(young.exists() && other.exists() && dir.join(format!("{kb}.json")).exists());
+        assert!(c.translate(vb, f).unwrap().1);
+        c.flush();
+        assert_eq!((run_of(&ka), run_of(&kb)), (None, Some(KEEP_RUNS + 2)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cache_concurrent() {
+        // preload on one thread while others look up: one consistent answer, no torn files
+        let dir = temp_cache_dir("mt");
+        let all = programs();
+        let first = Cache::detached(&dir);
+        for (_, v, f) in all.iter().take(4) {
+            first.translate(v, f).unwrap();
+        }
+        first.flush();
+        let c = Cache::new(&dir);
+        std::thread::scope(|s| {
+            s.spawn(|| Cache::new(&dir).preload());
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for (name, v, f) in all.iter().take(6) {
+                        let (p, _) = c.translate(v, f).unwrap();
+                        assert_eq!(p.layout, translate(v, f).unwrap().layout, "{name}");
+                    }
+                });
+            }
+        });
+        assert_eq!(c.len(), 6);
+        c.flush();
+        let fresh = Cache::detached(&dir);
+        fresh.preload();
+        assert_eq!(fresh.len(), 6);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hash3_is_stable() {
+        // The hash names files on disk: it must not change between platforms or builds.
+        assert_eq!(hash3(&[]), hash3(&[]));
+        let h = hash3(&[b"", b"abc", b"0123456789abcdef", b"0123456789abcdefg"]);
+        assert_eq!(h, HASH3_GOLDEN, "{h:#x?}");
+        // lanes are independent, and every byte and part boundary counts
+        assert!(h[0] != h[1] && h[1] != h[2] && h[0] != h[2]);
+        let base = hash3(&[&[0u8; 40]]);
+        for i in 0..40 {
+            let mut m = [0u8; 40];
+            m[i] = 1;
+            let x = hash3(&[&m]);
+            assert!((0..3).all(|l| x[l] != base[l]), "byte {i}");
+        }
+        assert_ne!(hash3(&[b"a", b""]), hash3(&[b"", b"a"]));
+        assert_ne!(hash3(&[b"a\0"]), hash3(&[b"a"]));
+    }
+    const HASH3_GOLDEN: [u64; 3] = [0xcd51e82dd30621d1, 0x8bd5a4f04041e82f, 0xd952760265026d3d];
 
     #[test]
     fn cache_dir() {
