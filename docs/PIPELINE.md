@@ -82,25 +82,53 @@ bottleneck is CPU-side JS, not the shader language.
 
 ## Planned, on hold: optional M3+ tier
 
-Held until the user says to go ahead. This tier comes from inspecting Pocketcat (AmelieHeinrich/Pocketcat, Metal 4,
-M3+ only). The full technique list, with verdicts, is in `docs/research/pocketcat-techniques.md`.
+Held until the user says to go ahead. The list comes from inspecting Pocketcat; full details, with prerequisites,
+effort and visual gain, are in `docs/research/pocketcat-techniques.md` §4.
 
-Every item is opt-in on `supportsFamily(Apple9)` (M3 and later) with hardware ray tracing or mesh-shader indirect
-command buffer support. The M1/M2 path (including the user's M2 Air) stays the default and the fallback.
+All items are opt-in and need macOS 26+ and the Metal 4 backend, because they change the image relative to browser
+three.js. M1/M2, including the user's M2 Air, keep the default path.
 
-- [ ] **Ray-traced sun shadows.** Replace or augment shadow maps when the GPU has hardware RT. The acceleration
-  structures are built from three's geometry (a BLAS per geometry, the TLAS from the draw list).
-- [ ] **Ray-traced ambient occlusion.**
-- [ ] **Ray-traced reflections.** For PBR materials with low roughness; replaces or augments the PMREM env lookup.
-- [ ] **Ray-traced global illumination.** One bounce, denoised.
-- [ ] **MetalFX denoised upscaler** (`MTLFXTemporalDenoisedScaler`): denoise and upscale the RT signals in one pass.
-- [ ] **GPU-driven TLAS build.**
-- [ ] **GPU-driven visibility buffer with mesh shaders and meshlet culling/LOD.** Driven by an indirect mesh-shader
-  command buffer. Only worth it if profiling shows draw or vertex cost dominates; three.js games are usually
-  CPU-bound in JS.
-- [ ] **Reference path tracer.** A debug/ground-truth mode for comparing raster against RT, not for gameplay.
+| ID | Item | Gate | Effort | Note |
+|---|---|---|---|---|
+| C1 | Ray-traced directional shadows | Apple9 (M3+) | L | **most valuable** |
+| C2 | Ray-traced ambient occlusion | Apple9, after C1 | M | |
+| C3 | Ray-traced reflections | Apple9; translator MRT injection | XL | |
+| C4 | Ray-traced one-bounce GI | Apple9; translator MRT injection | XL | |
+| C5 | MetalFX denoised upscaler | Apple9; only with RT | M | |
+| C6 | Path-traced photo mode | Apple9 | XL | ground-truth / debug |
+| C7 | Mesh-shader meshlet pipeline with mesh ICBs | Apple9 | XL | probably never worth it for three.js games |
+| C8 | MetalFX neural temporal upscaler | macOS 27, M5 Pro/Max | XS | same API; lower the dynres floor where the device reports one |
+| C9 | Shader ML effects | treat as Apple10+ | L | |
+| C10 | Sampler LOD bias for the temporal mip bias | Apple10 | XS | M2 does the bias in the shader instead |
 
-Constraints carried over from the main pipeline:
-- Three's materials stay the source of truth. RT effects feed into three's lighting through the existing translated
-  programs (e.g. as an AO/shadow/reflection texture input), not through a separate material model.
-- Every item gets a golden image and an Air-vs-M3 benchmark before it is enabled by default.
+Constraints:
+- three's materials stay the source of truth. RT signals feed the translated programs as inputs.
+- Each item needs a golden image and an Air-vs-M3 benchmark before it is enabled anywhere by default.
+
+## Planned (applies on M2): from the Pocketcat inspection
+
+These are in the optimization queue after the current work packages; details are in
+`docs/research/pocketcat-techniques.md`.
+
+- [ ] **PC4: texture memory and bandwidth.** Advertise ASTC/ETC2 so KTX2 stays compressed. Upload textures as
+  Private via blit, read-only. Use Apple8+ lossy compression behind a golden-gated flag. This is the largest lever
+  on an 8 GB machine.
+- [ ] **PC1: per-pass GPU timestamps** (`MTL4CounterHeap`). Makes GPU cost on the Air measurable.
+- [ ] **PC2: object motion vectors from the main pass.** Needs the previous model matrix in FrObject and an extra
+  varying and attachment from xlat, with depth reprojection as the fallback. Prerequisite for frame interpolation.
+- [ ] **PC3: MetalFX frame interpolation** (`MTL4FXFrameInterpolator`; the M2 supports it).
+  - Off by default.
+  - `auto` mode: lock the game to 30 fps and present 60, only when the frame is JS-bound and at least 30 fps.
+  - The Electron DOM HUD stays un-interpolated for free.
+  - Step FI-0 measures the cost on the Air and stops unless it is well under 8 ms.
+  - Its textures must be in a residency set, or it silently writes nothing.
+- [ ] **PC5: shared-event frame fence and batched residency commits** (inside the Metal 4 port).
+- [ ] **PC6: debug overlay of pass inputs:** depth, motion, shadow maps, MetalFX input.
+- [ ] **PC7: small conventions.** Jitter phases = ceil(8·scale²); pass-opening consumer barriers.
+
+**Neural rendering verdict:**
+- **MetalFX temporal at 50% render scale is our neural-class win, and we have it.**
+- **No neural texture compression.** It needs per-material training, gains about 2x vs ASTC's 4–8x, and costs an
+  MLP per fragment.
+- **No Shader ML or ML encoder on M2.** Nothing there pays for the GPU time.
+- **Effort goes into MetalFX input quality instead:** motion vectors, a reactive mask, mip bias.

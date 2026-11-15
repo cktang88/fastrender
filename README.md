@@ -17,10 +17,12 @@ for the stages and their status, [docs/PROTOCOL.md](docs/PROTOCOL.md) for the JS
 > Porting the *shaders* to TSL alone would not make any renderer faster, because shader source language isn't the
 > bottleneck. Moving CPU work into GPU compute would. Tracked in [docs/PIPELINE.md](docs/PIPELINE.md#planned-last-gpu-compute-for-game-logic).
 
-> **Planned, on hold: optional M3+ tier.** Some techniques need M3 or newer: hardware ray tracing, and mesh shaders
-> driven by indirect command buffers. They would be an opt-in quality tier on capable Macs, with today's path as the
-> fallback on M1/M2 (including the user's M2 Air). Not being implemented yet; see
-> [docs/PIPELINE.md](docs/PIPELINE.md#planned-on-hold-optional-m3-tier).
+> **Planned, on hold: optional M3+ tier.** C1–C10 cover ray-traced shadows, AO, reflections and GI, the MetalFX
+> denoised and neural upscalers, a path-traced photo mode and mesh-shader meshlets. They would be an opt-in tier on
+> M3+ (some items need macOS 27 or M5 Pro/Max), with today's path as the fallback on M1/M2, including the user's
+> M2 Air. Not being implemented yet; see [docs/PIPELINE.md](docs/PIPELINE.md#planned-on-hold-optional-m3-tier).
+> M2-applicable items from the same inspection (PC1–PC7), including **MetalFX frame interpolation**, are queued
+> normally.
 
 ```bash
 (cd js && npm ci) && node js/build.mjs js/examples/three-city.entry.mjs js/dist/three-city.js
