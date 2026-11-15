@@ -3,7 +3,8 @@
 Scope: cktang88/3d-world-objects (+ `patches/`), street view, `quality=low`, `programs: 'three'` on a base M2 Air.
 Numbers marked **Air** are the user's runs (`bench-results/`); numbers marked **node** come from the headless run of
 the game (`js/test/world-objects.node.mjs --gpu-census -`), which sees the same scene and the same programs but no
-GPU. Nothing below has been timed on an Air after the changes: the command at the end does that.
+GPU. `trimLights` has been timed on the Air (below); the instance and draw-order changes have not: the command at the end
+does that.
 
 ## What the Air measured (before any of this)
 
@@ -25,6 +26,26 @@ Two fits of `ms = fixed + per-pixel x pixels`:
 
 So the main pass is all of it, and it has two parts: a fragment cost of about 30 ns per pixel, and about 20 ms that
 does not depend on the resolution (vertex shading and tiling). Shadows, render targets and the upscale are noise.
+
+## What the Air measured after `trimLights` (item 1 below)
+
+`bench-results/2026-11-15-gpu-ablate-Mac14,2-at-a0816db` (1280x800, `fastrender bench`, at a commit that has
+`trimLights` but none of the later items):
+
+| row | main ms | frame ms |
+|---|--:|--:|
+| none | 12.46 | **13.74** |
+| lights0 (cross-check: must equal none) | 12.61 | 13.93 |
+| nolights | 9.91 | 9.91 |
+| noenv / nomaps / notransparent | 12.06 / 12.12 / 12.15 | 13.3 - 13.4 |
+| lambert | 11.63 | 13.30 |
+| basic (unlit: fill + vertex) | 8.93 | 11.21 |
+
+Against ~57 ms in the Electron bench and ~49 ms expected from the per-pass fit at this size, both before
+`trimLights`: about 4x. Not the same harness as the 57 ms (CLI + JavaScriptCore vs Electron), so the Electron
+3-way run should be repeated. What is left is no longer shading: unlit materials still cost 8.9 ms, so ~70 % of the
+main pass is geometry (vertex shading, tiling), which is what items 2 and 3 below act on. They are not in this
+run.
 
 ## What the frame asks for (node census, same view)
 

@@ -2,7 +2,7 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
-## 2026-11-15: GPU cost of the real game: 27 dark lights in every lit fragment, 73 % of instanced triangles off screen. Not yet timed on an Air
+## 2026-11-15: GPU cost of the real game: 27 dark lights in every lit fragment (Air: ~57 -> 13.7 ms with trimLights), 73 % of instanced triangles off screen (not yet timed)
 
 Details, tables and the Air command: docs/notes/gpu-cost.md.
 
@@ -12,6 +12,9 @@ Details, tables and the Air command: docs/notes/gpu-cost.md.
   + 10 spot lights; all 27 point / spot lights have intensity 0 (the game's `LIGHT_BUDGET` padding, there to keep
   shader variants fixed) and one of them a cube shadow. three unrolls a full BRDF per light: 29 per lit fragment, 2
   of them lit. 3.68 M of the frame's 5.07 M triangles are instanced; 27 % of those are inside the frustum.
+- **Air after `trimLights`** (`bench-results/2026-11-15-gpu-ablate-Mac14,2-at-a0816db`, 1280x800, CLI bench): frame
+  13.74 ms (main 12.46, shadow 1.28), against ~57 ms in the Electron bench before. `basic` (unlit) is still 8.93 ms
+  of main: ~70 % of what is left is geometry, not shading. The instance and draw-order changes are not in that run.
 - **Shipped** (picture unchanged):
   - `trimLights` (default on): dark point / spot lights leave the light state; counts step up at once (0 1 2 3 4 6
     8 12 16...) and shrink after 120 frames. Lit programs: `main()` 209 -> 110 lines, 29 -> 2 BRDF evaluations, no
