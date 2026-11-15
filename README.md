@@ -1,0 +1,66 @@
+# fastrender
+
+A Mac-only Metal renderer, built as a **benchmark harness**: it tests the claims about what is
+fast on base Apple Silicon GPUs (MacBook Air M1–M5). Background is in [docs/RESEARCH.md](docs/RESEARCH.md);
+the estimates and the review that challenged them are in [docs/FPS_ESTIMATES.md](docs/FPS_ESTIMATES.md).
+
+Rust + `objc2-metal` (no wgpu: wgpu hides tile memory and MetalFX), MSL shaders compiled at
+runtime (edit `shaders/fastrender.metal` while it runs and it hot-reloads).
+
+## Run it on your Mac
+
+```bash
+cargo run --release                 # window; live fps + GPU ms in the title bar
+cargo run --release -- matrix       # the A..L hypothesis table (offscreen, ~1 min)
+cargo run --release -- probe        # GPU capabilities
+MTL_HUD_ENABLED=1 cargo run --release   # Apple's Metal performance HUD on top
+```
+
+Window keys: `1` forward/deferred · `2` memoryless on/off · `3` MetalFX/bilinear · `-`/`=` render scale ·
+`4` cached/every-frame shadows · `5` GPU culling · `L`/`K` lights ×2 / ÷2 · `D` dynamic resolution ·
+`V` vsync · `Space` pause camera.
+
+Thermal throttling (fanless Air): `cargo run --release -- bench --frames 100000 --log-every 10`
+prints fps every 10 s.
+
+## What the scene is
+
+It is a procedural Manhattan-style grid seen from a car driving at street level.
+- **Geometry:** about 150k instanced boxes (buildings, window frames, street props), about 1.8M triangles.
+- **Draw calls:** one GPU-culled indirect draw.
+- **Lighting:** a sun with a 2048² shadow map (cached; re-rendered after the camera moves 40 m), fog, and N street lights.
+- **Output:** 2940×1912 by default, the backing resolution of the 13.6" Air's default mode.
+
+## Render paths
+
+- **forward**: one pass, with lighting in the fragment shader (point lights brute-forced in a loop).
+- **deferred**: a single-pass deferred renderer.
+  - The G-buffer is held in **memoryless** tile memory and read back with programmable blending.
+  - Point lights are drawn as light volumes in the same pass.
+  - Fog and tonemapping are applied in that pass too.
+  - Only the final 8-bit colour ever goes to DRAM.
+- `--memoryless 0` stores every attachment instead (what a TBDR-unaware engine does).
+- `--scale` and `--upscale metalfx|bilinear` set the internal resolution and the upscaler. The render area is
+  limited with `renderTargetWidth/Height`, so a lower scale really draws fewer pixels.
+
+## The hypothesis matrix (`matrix`)
+
+| Row | Tests |
+|---|---|
+| A vs B | memoryless depth (forward) |
+| C vs D | tile-memory G-buffer vs G-buffer stored to DRAM |
+| B vs D | forward vs single-pass deferred, sun only |
+| B vs E/F | 0.5× render scale; bilinear vs MetalFX cost |
+| H vs I | 32 point lights: forward loop vs deferred volumes |
+| J | 256 lights (deferred) |
+| G vs K | cached shadow vs every-frame shadow |
+| G vs L | GPU culling vs drawing everything |
+
+CI (`.github/workflows/mac.yml`) builds and runs on GitHub's macOS runner. That runner is a
+*paravirtual* GPU with no Apple GPU family, so it checks correctness only. The deferred and memoryless
+paths are skipped there, and its timings mean nothing. **Real numbers have to come from a real Air.**
+
+## Linux
+
+`cargo test` runs the portable core: city generation, camera, frustum maths, stats, and the
+dynamic-resolution controller. `cargo check --target aarch64-apple-darwin` type-checks the Metal code.

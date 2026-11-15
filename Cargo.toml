@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 glam = "0.34.3"
+png = "0.18.1"
 raw-window-handle = "0.6.2"
 winit = "0.30.13"
 
@@ -12,6 +13,7 @@ winit = "0.30.13"
 block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-metal = "0.3.2"
 objc2-metal-fx = "0.3.2"

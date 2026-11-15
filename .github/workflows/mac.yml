@@ -5,10 +5,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - run: sw_vers; sysctl -n machdep.cpu.brand_string
-      - run: cargo build --release
-      - run: ./target/release/fastrender
+      - name: unit tests (portable core)
+        run: cargo test --release
+      - name: build
+        run: cargo build --release
+      - name: offline shader compile (Apple metal compiler)
+        run: xcrun -sdk macosx metal -std=metal3.0 -c shaders/fastrender.metal -o /tmp/fr.air
+      - name: probe
+        run: ./target/release/fastrender probe
+      - name: validation-layer run + screenshots
+        env:
+          MTL_DEBUG_LAYER: "1"
+          MTL_SHADER_VALIDATION: "1"
+        run: |
+          ./target/release/fastrender bench --path forward --upscale metalfx --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --props 60000 --lights 16 --shot shot-forward-metalfx.png
+          ./target/release/fastrender bench --path forward --upscale bilinear --scale 1 --size 1280x800 --frames 40 --warmup 5 --props 60000 --shot shot-forward-native.png
+          ./target/release/fastrender bench --path deferred --size 1280x800 --frames 40 --warmup 5 --shot shot-deferred.png || true
+      - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
+        run: ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.os }}
+          path: |
+            *.png
+            bench-results.json

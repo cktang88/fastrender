@@ -1,29 +1,54 @@
+mod core;
 #[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "macos")]
+mod app;
+
+const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
+  run      window, live stats in the title bar, hot-reloads shaders/fastrender.metal (default)
+  bench    offscreen benchmark of one config
+  matrix   offscreen benchmark of the hypothesis matrix (A..L), writes bench-results.json
+  probe    print GPU capabilities
+options: --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|bilinear
+         --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
+         --warmup n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
+
 fn main() {
-    use objc2_foundation::NSString;
-    use objc2_metal::*;
-    let d = MTLCreateSystemDefaultDevice().expect("no Metal device");
-    println!("device: {}", d.name());
-    for (n, f) in [("Apple7", MTLGPUFamily::Apple7), ("Apple8", MTLGPUFamily::Apple8), ("Apple9", MTLGPUFamily::Apple9), ("Metal3", MTLGPUFamily::Metal3), ("Metal4", MTLGPUFamily::Metal4)] {
-        println!("family {n}: {}", d.supportsFamily(f));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (mode, rest) = match args.first().map(String::as_str) {
+        Some("run" | "bench" | "matrix" | "probe") => (args[0].clone(), &args[1..]),
+        Some("-h" | "--help") => { println!("{USAGE}"); return; }
+        _ => ("run".to_string(), &args[..]),
+    };
+    let mut cfg = core::Config::default();
+    if let Err(e) = cfg.apply_args(rest) {
+        eprintln!("{e}\n\n{USAGE}");
+        std::process::exit(2);
     }
-    println!("unified memory: {}", d.hasUnifiedMemory());
-    println!("working set MB: {}", d.recommendedMaxWorkingSetSize() / (1 << 20));
-    unsafe {
-        println!("metalfx spatial: {}", objc2_metal_fx::MTLFXSpatialScalerDescriptor::supportsDevice(&d));
-        println!("metalfx temporal: {}", objc2_metal_fx::MTLFXTemporalScalerDescriptor::supportsDevice(&d));
-    }
-    let src = r#"
-#include <metal_stdlib>
-using namespace metal;
-struct G { half4 lit [[color(0)]]; half4 alb [[color(1)]]; };
-fragment G fbfetch(G in) { G o; o.lit = in.alb * 0.5h; o.alb = in.alb; return o; }
-"#;
-    let opts = MTLCompileOptions::new();
-    match d.newLibraryWithSource_options_error(&NSString::from_str(src), Some(&opts)) {
-        Ok(_) => println!("framebuffer-fetch shader compile: ok"),
-        Err(e) => println!("framebuffer-fetch shader compile: ERR {}", e.localizedDescription()),
+    run(&mode, cfg);
+}
+
+#[cfg(target_os = "macos")]
+fn run(mode: &str, cfg: core::Config) {
+    match mode {
+        "probe" => mac::probe(),
+        "bench" => {
+            let r = mac::bench(&cfg, &cfg.label());
+            mac::print_results(&mac::device_name(), &[r]);
+        }
+        "matrix" => {
+            let mut out = Vec::new();
+            for (name, c) in core::bench_matrix(&cfg) {
+                eprintln!("running {name} ...");
+                out.push(mac::bench(&c, &name));
+            }
+            mac::print_results(&mac::device_name(), &out);
+        }
+        _ => app::run(cfg),
     }
 }
+
 #[cfg(not(target_os = "macos"))]
-fn main() { eprintln!("fastrender runs on macOS only"); }
+fn run(_mode: &str, _cfg: core::Config) {
+    eprintln!("fastrender's renderer is macOS (Metal) only; `cargo test` runs the portable core here.");
+}
