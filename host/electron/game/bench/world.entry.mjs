@@ -8,6 +8,7 @@ import '../../../../js/examples/world-objects.drive.mjs';
 import { pinView } from '../../../../js/examples/world-objects.view.mjs';
 import { benchPrepare, benchBackend, Material } from 'three';
 import { bench, fatal } from './harness.mjs';
+import { isDarkLight } from './dark-lights.mjs';
 
 const G = globalThis;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -16,11 +17,14 @@ const step = () => { pinView(); G.__worldStep(1 / 60); };
 /** every material of the scene: how many are plain three materials, how many carry GLSL (the TSL-porting list) */
 function census(scene) {
   const mats = new Map();
-  const c = { objects: 0, meshes: 0, visible_meshes: 0, instanced: 0, skinned: 0, batched: 0, sprites: 0, lights: 0 };
+  // point_spot / dark: the visible point and spot lights, and those of them with colour x intensity 0 (what
+  // FastRenderer's trimLights and the *-trim variants leave out); dark_with_children: why the hook uses layers
+  const c = { objects: 0, meshes: 0, visible_meshes: 0, instanced: 0, skinned: 0, batched: 0, sprites: 0, lights: 0, lights_point_spot: 0, lights_dark: 0, lights_dark_with_children: 0, lights_shadow: 0 };
   const hidden = (o) => { for (let p = o; p; p = p.parent) if (!p.visible) return true; return false; };
   scene.traverse((o) => {
     c.objects++;
     if (o.isLight) c.lights++;
+    if ((o.isPointLight || o.isSpotLight) && !hidden(o)) { c.lights_point_spot++; if (o.castShadow) c.lights_shadow++; if (isDarkLight(o)) { c.lights_dark++; if (o.children.length) c.lights_dark_with_children++; } }
     if (o.isSprite) c.sprites++;
     if (!o.isMesh && !o.isSprite && !o.isPoints && !o.isLine) return;
     c.meshes++;

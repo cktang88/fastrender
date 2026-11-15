@@ -15,6 +15,12 @@
 //                     processes' CPU time divided by the frames produced: the cost that does not depend on the GPU
 //   mem MB            resident set per process group (footprint, where `top` gave one, in brackets)
 // If pngjs is installed (js/node_modules), each variant's screenshot is diffed against variant A's (MAE, 0-255).
+//
+// Attribution ladder (when a run has the rows webgl-trim / fastrender-bare / fastrender-trimonly, see
+// docs/research/attribution.md): per scene and size, the rows in ladder order, then each step as a ratio of two rows
+// that differ in ONE thing, with the evidence that the switch took effect (lights hidden, programs compiled,
+// FastRenderer's dropped lights, the render thread's `draws per pass` line from <tag>.log) and the picture checks
+// (webgl-trim vs webgl and fastrender-bare / -trimonly vs fastrender must be the same picture).
 import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -48,9 +54,27 @@ function mae(a, b) {
   } catch { return null; }
 }
 
-const LABEL = { webgl: 'A three WebGLRenderer (ANGLE -> Metal)', webgpu: 'B three WebGPURenderer (Dawn -> Metal)', fastrender: 'C fastrender (Metal, addon)' };
-const ORDER = { webgl: 0, webgpu: 1, fastrender: 2 };
+const LABEL = {
+  webgl: 'A three WebGLRenderer (ANGLE -> Metal)', 'webgl-trim': 'A+ WebGLRenderer, dark lights hidden per render()',
+  webgpu: 'B three WebGPURenderer (Dawn -> Metal)', 'webgpu-trim': 'B+ WebGPURenderer, dark lights hidden per render()',
+  'fastrender-bare': 'C- fastrender bare (trimLights off, no instance culling / discard order)', 'fastrender-trimonly': 'C- fastrender, trimLights only (no instance culling / discard order)',
+  fastrender: 'C fastrender (Metal, addon)',
+};
+const ORDER = { webgl: 0, 'webgl-trim': 1, webgpu: 2, 'webgpu-trim': 3, 'fastrender-bare': 4, 'fastrender-trimonly': 5, fastrender: 6 };
+const label = (v) => LABEL[v] || v;
+const order = (v) => (v in ORDER ? ORDER[v] : 99);
+for (const r of runs) r.base ||= String(r.variant).split('-')[0];
+/** the render thread's last `draws per pass` line of a fastrender run (native/src/fr_render.rs), from <tag>.log */
+function nativeCounts(r) {
+  try {
+    const m = [...readFileSync(path.join(dir, `${r.tag}.log`), 'utf8').matchAll(/draws per pass \(last frame\): ([^\n]*)/g)].pop();
+    return m ? m[1].trim() : null;
+  } catch { return null; }
+}
+const shot = (r) => path.join(dir, `${r.tag}-shot.png`);
 const SCENES = { empty: 'Empty frame (one render() of an empty scene)', city: 'three-city (js/examples/city-scene.mjs)', world: '3d-world-objects, 5 Av street view, quality=low' };
+/** screenshots of two runs of the same picture differ by less than this (MAE, 0-255): animated parts, AA of edges */
+const SAME = 1;
 const f = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v) ? 'n/a' : v.toFixed(d));
 const area = (px) => px.split('x').reduce((a, b) => a * b, 1);
 
@@ -88,13 +112,13 @@ if (!runs.length) md += '_no runs found_\n';
 
 for (const k of keys) {
   const [scene, px, cap] = k.split('|');
-  const rows = groups.get(k).sort((a, b) => ORDER[a.variant] - ORDER[b.variant] || Number(a.aa) - Number(b.aa) || String(a.label || '').localeCompare(String(b.label || '')));
+  const rows = groups.get(k).sort((a, b) => order(a.variant) - order(b.variant) || Number(a.aa) - Number(b.aa) || String(a.label || '').localeCompare(String(b.label || '')));
   md += `## ${SCENES[scene] || scene}, ${px} px, ${cap === 'vsync' ? 'vsync on (display rate)' : 'vsync off (uncapped)'}\n\n`;
   md += '| variant | fps | frame ms p50 / p95 / p99 | JS ms p50: total = update + render | GPU ms mean | draws | CPU %: main / GPU proc / page = total | CPU ms/frame | mem MB: main / GPU proc / page | vs A (MAE) |\n';
   md += '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
   const ref = rows.find((r) => r.variant === 'webgl' && !r.aa && r.ok);
   for (const r of rows) {
-    const name = `${LABEL[r.variant]}${r.aa ? ', aa (MSAA 4x)' : ''}${r.label ? `, ${r.label}` : ''}`;
+    const name = `${label(r.variant)}${r.aa ? ', aa (MSAA 4x)' : ''}${r.label ? `, ${r.label}` : ''}`;
     if (!r.ok || !r.frame_ms) {
       md += `| ${name} | **failed** | ${String(r.error || 'no result').replace(/\|/g, '/').replace(/\s+/g, ' ').slice(0, 160)} | | | | | | | |\n`;
       summary.push({ scene, px, cap, variant: r.variant, aa: r.aa, label: r.label, ok: false, error: r.error });
@@ -105,15 +129,17 @@ for (const k of keys) {
     const mem = (g) => (p[g] ? `${f(p[g].working_set_mb, 0)}${p[g].footprint_mb ? ` (${f(p[g].footprint_mb, 0)})` : ''}` : 'n/a');
     const total = p.total ? p.total.cpu_percent : null;
     const cpuFrame = total !== null && r.fps > 0 ? (total / 100) * 1000 / r.fps : null;
-    const d = ref && ref !== r ? mae(path.join(dir, `${ref.tag}-shot.png`), path.join(dir, `${r.tag}-shot.png`)) : null;
+    const d = ref && ref !== r ? mae(shot(ref), shot(r)) : null;
+    r.mae_vs_webgl = d;
     const gpu = r.gpu_ms ? f(r.gpu_ms.mean) : 'n/a';
-    const draws = r.variant === 'fastrender' && r.native ? `${f(r.draws.p50, 0)} (native ${r.native.draws})` : f(r.draws.p50, 0);
+    const draws = r.native ? `${f(r.draws.p50, 0)} (native ${r.native.draws})` : f(r.draws.p50, 0);
     const be = r.backend && /fell back/.test(r.backend.api) ? ' **(WebGL2 fallback: no WebGPU adapter)**' : '';
     md += `| ${name}${be} | ${f(r.fps, 1)} | ${f(r.frame_ms.p50)} / ${f(r.frame_ms.p95)} / ${f(r.frame_ms.p99)} | ${f(r.js_ms.p50)} = ${f(r.update_ms.p50)} + ${f(r.render_ms.p50)} | ${gpu} | ${draws} | ${f(cpu('main'), 0)} / ${f(cpu('gpu'), 0)} / ${f(cpu('page'), 0)} = ${f(total, 0)} | ${f(cpuFrame)} | ${mem('main')} / ${mem('gpu')} / ${mem('page')} | ${d === null ? '' : f(d)} |\n`;
     summary.push({
       scene, px, cap, variant: r.variant, aa: r.aa, label: r.label, ok: true, backend: r.backend && r.backend.api, fps: r.fps, frame_ms: r.frame_ms, js_ms_p50: r.js_ms.p50, update_ms_p50: r.update_ms.p50, render_ms_p50: r.render_ms.p50,
       gpu_ms_mean: r.gpu_ms ? r.gpu_ms.mean : null, gpu_source: r.gpu_source, draws_p50: r.draws.p50, native: r.native, cpu_percent: { main: cpu('main'), gpu: cpu('gpu'), page: cpu('page'), total }, cpu_ms_per_frame: cpuFrame === null ? null : +cpuFrame.toFixed(3),
       mem_mb: { main: p.main && p.main.working_set_mb, gpu: p.gpu && p.gpu.working_set_mb, page: p.page && p.page.working_set_mb }, mae_vs_webgl: d,
+      base: r.base, switches: r.switches, dark_lights: r.dark_lights, webgl_programs: r.webgl_programs, trim_lights: r.trim_lights,
     });
   }
   const extra = [];
@@ -125,9 +151,114 @@ for (const k of keys) {
     if (r.native) bits.push(`render thread: ${r.native.rendered_fps} fps rendered, ${r.native.skipped} skipped, ${f(r.native.render_thread_cpu_ms)} ms/frame on the render thread (wall: encode + waiting for the drawable); ${r.native.draws} native draws`);
     if (r.gpu_wait_ms_per_frame !== undefined) bits.push(`waited for the GPU ${f(r.gpu_wait_ms_per_frame)} ms/frame`);
     if (r.boot_s) bits.push(`boot ${r.boot_s} s`);
+    if (r.dark_lights) bits.push(`dark lights hidden: ${f(r.dark_lights.hidden_per_render, 1)} per render() (finding them: ${f(r.dark_lights.find_ms_per_frame, 3)} ms/frame of JS)`);
+    if (r.webgl_programs) bits.push(`WebGL programs: ${r.webgl_programs.in_use} in use, ${r.webgl_programs.created_total} compiled since load, ${r.webgl_programs.compiled_in_window} in the measured window`);
+    if (r.trim_lights) bits.push(`trimLights ${r.trim_lights.on ? `on (${r.trim_lights.dropped_last_frame} lights dropped)` : 'off'}`);
+    if (r.switches && r.switches.FASTRENDER_V3_DEBUG) bits.push(`FASTRENDER_V3_DEBUG=${r.switches.FASTRENDER_V3_DEBUG}`);
     extra.push(`- ${r.variant}${r.aa ? ' aa' : ''}${r.label ? ` (${r.label})` : ''}: ${bits.join('; ')}`);
   }
   md += `\n${extra.join('\n')}\n\n`;
+}
+
+// ---- attribution ladder: which part of the gap is a method any three renderer can use, which is native ----
+const LADDER = ['webgl', 'webgl-trim', 'fastrender-bare', 'fastrender-trimonly', 'fastrender'];
+const WHAT = {
+  webgl: 'stock WebGLRenderer; the game with its patches (far LODs, static freeze: already in every row)',
+  'webgl-trim': '+ dark point / spot lights out of each render() (generic: any three renderer)',
+  'fastrender-bare': 'fastrender, renderer-only tricks off: every light shaded, instanced draws whole, discarding draws in state order',
+  'fastrender-trimonly': 'fastrender + trimLights (dark lights out, light counts held): the same trick as `webgl-trim`',
+  fastrender: '+ per-instance frustum culling (base instance) + discarding draws last, nearest first: what ships',
+};
+// [from, to, what the ratio isolates]
+const STEPS = [
+  ['webgl', 'webgl-trim', 'dark lights out, under WebGL (generic method)'],
+  ['fastrender-bare', 'fastrender-trimonly', 'dark lights out, under fastrender (the same method)'],
+  ['webgl', 'fastrender-bare', 'backend + renderer architecture, every light shaded on both sides'],
+  ['webgl-trim', 'fastrender-trimonly', 'backend + renderer architecture, dark lights out on both sides'],
+  ['fastrender-trimonly', 'fastrender', 'native-side tricks: per-instance culling + discard ordering'],
+  ['webgl-trim', 'fastrender', 'what is left for WebGL after the generic method'],
+  ['webgl', 'fastrender', 'the whole gap'],
+];
+const ladder = [];
+const x = (a, b) => (a > 0 && b > 0 ? `${f(a / b, a / b >= 10 ? 1 : 2)}x` : 'n/a');
+let ladderMd = '';
+for (const k of keys) {
+  const [scene, px, cap] = k.split('|');
+  if (cap !== 'uncapped') continue;
+  const by = {};
+  for (const r of groups.get(k)) if (r.ok && r.frame_ms && !r.aa && !r.label && LADDER.includes(r.variant)) by[r.variant] = r;
+  if (!LADDER.some((v) => by[v] && v !== 'webgl' && v !== 'fastrender')) continue; // a plain 3-way run: no ladder
+  const full = by.fastrender, stock = by.webgl;
+  ladderMd += `### ${SCENES[scene] || scene}, ${px} px\n\n`;
+  ladderMd += '| row | what it is | fps | frame ms p50 | GPU ms | JS ms p50 | fps vs stock WebGL | MAE vs stock WebGL | must be the same picture as |\n|---|---|---:|---:|---:|---:|---:|---:|---|\n';
+  const rec = { scene, px, rows: [], steps: [], checks: [] };
+  for (const v of LADDER) {
+    const r = by[v];
+    if (!r) continue;
+    // the pair that must be the same picture: a switch that is exact must not move the screenshot
+    const twin = v === 'webgl-trim' ? stock : v === 'fastrender-bare' || v === 'fastrender-trimonly' ? full : null;
+    const tm = twin ? mae(shot(twin), shot(r)) : null;
+    const same = !twin ? '' : tm === null ? `${twin.variant}: no screenshot diff` : `${twin.variant}: MAE ${f(tm)}${tm > SAME ? ' **(differs: check the switch)**' : ''}`;
+    ladderMd += `| \`${v}\` | ${WHAT[v]} | ${f(r.fps, 1)} | ${f(r.frame_ms.p50)} | ${r.gpu_ms ? f(r.gpu_ms.mean) : 'n/a'} | ${f(r.js_ms.p50)} | ${stock ? x(r.fps, stock.fps) : 'n/a'} | ${r.mae_vs_webgl === null || r.mae_vs_webgl === undefined ? '' : f(r.mae_vs_webgl)} | ${same} |\n`;
+    rec.rows.push({ variant: v, fps: r.fps, frame_ms_p50: r.frame_ms.p50, gpu_ms_mean: r.gpu_ms ? r.gpu_ms.mean : null, js_ms_p50: r.js_ms.p50, mae_vs_webgl: r.mae_vs_webgl ?? null, twin: twin ? twin.variant : null, mae_vs_twin: tm });
+    if (twin && tm !== null && tm > SAME) rec.checks.push(`${v} vs ${twin.variant}: MAE ${tm} (expected the same picture, MAE <= ${SAME})`);
+  }
+  ladderMd += '\n| step | isolates | fps | GPU ms | frame ms p50 |\n|---|---|---:|---:|---:|\n';
+  for (const [a, b, what] of STEPS) {
+    const A = by[a], B = by[b];
+    if (!A || !B) continue;
+    const g = A.gpu_ms && B.gpu_ms ? `${f(A.gpu_ms.mean)} -> ${f(B.gpu_ms.mean)} (${x(A.gpu_ms.mean, B.gpu_ms.mean)})` : 'n/a';
+    ladderMd += `| \`${a}\` -> \`${b}\` | ${what} | ${f(A.fps, 1)} -> ${f(B.fps, 1)} (${x(B.fps, A.fps)}) | ${g} | ${f(A.frame_ms.p50)} -> ${f(B.frame_ms.p50)} (${x(A.frame_ms.p50, B.frame_ms.p50)}) |\n`;
+    rec.steps.push({ from: a, to: b, isolates: what, fps: +(B.fps / A.fps).toFixed(3), gpu_ms: A.gpu_ms && B.gpu_ms && B.gpu_ms.mean > 0 ? +(A.gpu_ms.mean / B.gpu_ms.mean).toFixed(3) : null, frame_ms_p50: +(A.frame_ms.p50 / B.frame_ms.p50).toFixed(3) });
+  }
+  // the evidence that each switch did what its row says
+  const ev = [];
+  const c = (stock || by['webgl-trim'] || full || {}).census;
+  if (c && c.lights_point_spot !== undefined) ev.push(`scene: ${c.lights_point_spot} visible point / spot lights, ${c.lights_dark} of them dark (colour x intensity 0), ${c.lights_shadow} with a shadow${c.lights_dark_with_children ? `; ${c.lights_dark_with_children} dark lights have children (still drawn: the hook clears the light's layers, not \`visible\`)` : ''}`);
+  for (const v of ['webgl', 'webgl-trim']) {
+    const r = by[v];
+    if (!r) continue;
+    const bits = [];
+    if (r.dark_lights) {
+      bits.push(`${f(r.dark_lights.hidden_per_render, 1)} dark lights hidden per render() (${f(r.dark_lights.find_ms_per_frame, 3)} ms/frame of JS to find them)`);
+      if (!(r.dark_lights.hidden_per_render > 0)) { bits.push('**nothing hidden: this row is the stock renderer**'); rec.checks.push(`${v}: no dark light was hidden`); }
+    } else if (v === 'webgl-trim') rec.checks.push(`${v}: the run has no dark_lights record (the hook was not installed)`);
+    const wp = r.webgl_programs;
+    if (wp) bits.push(`${wp.in_use} programs in use, ${wp.created_total} compiled since load, ${wp.compiled_in_window} compiled in the measured window in ${wp.frames_that_compiled} frames${wp.compiled_in_window ? ' (**each of those frames is a compile hitch: stock WebGLRenderer compiles in the frame that needs the program**)' : ''}`);
+    if (bits.length) ev.push(`\`${v}\`: ${bits.join('; ')}`);
+  }
+  for (const v of ['fastrender-bare', 'fastrender-trimonly', 'fastrender']) {
+    const r = by[v];
+    if (!r) continue;
+    const bits = [];
+    const t = r.trim_lights, dbg = (r.switches && r.switches.FASTRENDER_V3_DEBUG) || '';
+    if (t) bits.push(`trimLights ${t.on ? 'on' : 'off'}, ${t.dropped_last_frame} lights dropped in the last frame`);
+    bits.push(`FASTRENDER_V3_DEBUG=${dbg || '(unset)'}`);
+    // "<counts>; FASTRENDER_V3_DEBUG=<what the render thread read from its environment>"
+    const line = nativeCounts(r), nm = line && /^(.*); FASTRENDER_V3_DEBUG=(\d*)$/.exec(line);
+    const nc = nm ? nm[1] : line;
+    bits.push(nc ? `render thread${nm ? ` (read FASTRENDER_V3_DEBUG=${nm[2] || '(unset)'})` : ''}: ${nc}` : 'no `draws per pass` line in the log (an addon built before this row existed?)');
+    if (nm && (nm[2] || '') !== String(dbg)) rec.checks.push(`${v}: the render thread read FASTRENDER_V3_DEBUG=${nm[2] || '(unset)'}, the run asked for ${dbg || '(unset)'}`);
+    const wantTrim = v !== 'fastrender-bare', wantDbg = v !== 'fastrender';
+    if (t && t.on !== wantTrim) rec.checks.push(`${v}: trimLights is ${t.on ? 'on' : 'off'}`);
+    if (!!(Number(dbg) & 2048) !== wantDbg || !!(Number(dbg) & 512) !== wantDbg) rec.checks.push(`${v}: FASTRENDER_V3_DEBUG=${dbg || '(unset)'}`);
+    const tested = nc && /instances (\d+) of (\d+) drawn/.exec(nc);
+    if (tested && wantDbg && Number(tested[2]) !== 0) rec.checks.push(`${v}: the render thread still tested ${tested[2]} instances against the frustum`);
+    if (tested && !wantDbg && scene === 'world' && Number(tested[2]) === 0) rec.checks.push(`${v}: the render thread tested no instance against the frustum`);
+    ev.push(`\`${v}\`: ${bits.join('; ')}`);
+  }
+  ladderMd += `\n${ev.map((l) => `- ${l}`).join('\n')}\n`;
+  ladderMd += rec.checks.length ? `\n**Checks that failed (do not quote this ladder until they pass):**\n\n${rec.checks.map((l) => `- ${l}`).join('\n')}\n\n` : '\nChecks: every switch reported the state its row needs.\n\n';
+  ladder.push(rec);
+}
+if (ladderMd) {
+  md += '## Attribution ladder: generic methods vs the native renderer\n\n';
+  md += 'Every row runs the same game copy (patches 0001-0006: far LODs and the static freeze are in all of them), the same view and the same frames. ';
+  md += 'A step is the ratio of two rows that differ in one thing. fps is what the player sees; GPU ms is the cleaner number while a row is GPU-bound ';
+  md += '(the WebGL rows; A reads a timer query, C the Metal command buffer), and it stops being the limit once JS + CPU per frame is larger (the fast fastrender rows). ';
+  md += 'Steady-state numbers: shader-compile hitches (FastRenderer compiles in the background and holds light-count changes; WebGLRenderer compiles in the frame) are counted, not priced. ';
+  md += 'Reading and caveats: docs/research/attribution.md.\n\n';
+  md += ladderMd;
 }
 
 // what an unchanged WebGL game does under WebGPURenderer
@@ -179,5 +310,5 @@ if (args.includes('--annotate')) {
 }
 
 writeFileSync(mdOut, md);
-writeFileSync(jsonOut, JSON.stringify({ generated: new Date().toISOString(), note, summary, runs }, null, 2));
+writeFileSync(jsonOut, JSON.stringify({ generated: new Date().toISOString(), note, summary, ladder, runs }, null, 2));
 if (!args.includes('--annotate')) console.log(md);

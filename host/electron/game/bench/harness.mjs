@@ -131,9 +131,9 @@ const soon = (f) => { hopFn = f; hop.port2.postMessage(0); };
  * straight back); fastrender's page has nothing for Chromium to present, so its next frame is the next task. While
  * the GPU is busy every variant polls from the task queue (the page's CPU % includes that polling: `waited_ticks`).
  */
-function run(seconds, frame, renderer, acc, timer, pace) {
+function run(seconds, frame, renderer, acc, timer, pace, progs) {
   const cap = 1 << 18;
-  const F = { dt: new Float32Array(cap), js: new Float32Array(cap), render: new Float32Array(cap), flush: new Float32Array(cap), draws: new Float32Array(cap), n: 0, ticks: 0, waited: 0, wait: 0, tris: 0, renders: 0 };
+  const F = { dt: new Float32Array(cap), js: new Float32Array(cap), render: new Float32Array(cap), flush: new Float32Array(cap), draws: new Float32Array(cap), n: 0, ticks: 0, waited: 0, wait: 0, tris: 0, renders: 0, progNew: 0, progFrames: 0, progLen: 0 };
   return new Promise((resolve) => {
     const t0 = realNow();
     let last = 0, waitStart = 0, lastWait = 0;
@@ -164,6 +164,7 @@ function run(seconds, frame, renderer, acc, timer, pace) {
       const te = realNow();
       timer.end();
       pace.mark();
+      progs.frame(F);
       const i = F.n;
       if (i < cap) {
         F.dt[i] = last ? t - last : 0;
@@ -177,6 +178,31 @@ function run(seconds, frame, renderer, acc, timer, pace) {
     };
     realRaf(tick);
   });
+}
+
+/**
+ * WebGL programs compiled by three (WebGLProgram.id counts up, one per compiled program). A light-count change
+ * replaces every lit program, often one for one, so the length of renderer.info.programs alone would miss it: new
+ * ids are counted, and the frames in which the list's length changed. Stock WebGLRenderer compiles in the frame that
+ * needs the program (no lightHold): each such frame is a hitch.
+ */
+function programWatch(renderer) {
+  const list = cfg.variant === 'webgl' && renderer.info && Array.isArray(renderer.info.programs) ? renderer.info.programs : null;
+  let maxId = -1, len = list ? list.length : 0;
+  const scan = () => { let n = 0, m = maxId; for (let i = 0; i < list.length; i++) { const id = list[i].id; if (id > maxId) { n++; if (id > m) m = id; } } maxId = m; return n; };
+  if (list) scan();
+  return {
+    on: !!list,
+    /** after a frame: programs compiled since the previous call (0 without a list) */
+    frame(F) {
+      if (!list) return;
+      const n = scan();
+      if (n) { F.progNew += n; F.progFrames++; }
+      if (list.length !== len) { F.progLen++; len = list.length; }
+    },
+    count: () => (list ? list.length : 0),
+    created: () => maxId + 1,
+  };
 }
 
 /**
@@ -227,12 +253,16 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
 
   log(`warmup ${cfg.warmup} s`);
   const pace = pacer(renderer);
-  await run(cfg.warmup, frame, renderer, acc, timer, pace);
+  const progs = programWatch(renderer);
+  const dark = G.__benchDark && G.__benchDark.on ? G.__benchDark : null; // variants *-trim (bench/dark-lights.mjs)
+  const W0 = await run(cfg.warmup, frame, renderer, acc, timer, pace, progs);
   log(`warmup drained in ${(await drain(renderer)).toFixed(0)} ms`);
   timer.samples.length = 0;
   const s0 = native ? native.stats() : null;
+  const d0 = dark ? { ...dark } : null;
   await ack('measure-start', {});
-  const F = await run(cfg.measure, frame, renderer, acc, timer, pace);
+  const F = await run(cfg.measure, frame, renderer, acc, timer, pace, progs);
+  const d1 = dark ? { ...dark } : null;
   const drainMs = await drain(renderer);
   F.seconds += drainMs / 1000;
   await ack('measure-end', {});
@@ -246,7 +276,7 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
   const dt = F.dt.subarray(1, n); // the first frame has no predecessor
   const frameMs = dist(dt, n - 1);
   const r = {
-    variant: cfg.variant, scene: cfg.scene, px: cfg.px, aa: !!cfg.aa, vsync: !!cfg.vsync, pace: cfg.pace, warmup_s: cfg.warmup, measure_s: q2(F.seconds),
+    variant: cfg.name || cfg.variant, base: cfg.variant, scene: cfg.scene, px: cfg.px, aa: !!cfg.aa, vsync: !!cfg.vsync, pace: cfg.pace, warmup_s: cfg.warmup, measure_s: q2(F.seconds),
     backend: backend(renderer),
     frames: n, fps: q2(n / F.seconds), drain_ms: q2(drainMs), frame_ms: frameMs,
     js_ms: dist(F.js, n), render_ms: dist(F.render, n), update_ms: dist(update, n), flush_ms: host ? dist(F.flush, n) : null,
@@ -256,7 +286,16 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
     issues: { errors: top(issues.errors), warnings: top(issues.warnings), gpu: top(issues.gpu) },
     net,
   };
+  // three's WebGL programs: compiled inside the measured window (a hitch each time: no lightHold), and before it
+  if (progs.on) r.webgl_programs = { in_use: progs.count(), created_total: progs.created(), compiled_in_window: F.progNew, frames_that_compiled: F.progFrames, list_length_changes: F.progLen, compiled_in_warmup: W0.progNew };
+  if (dark) {
+    const calls = Math.max(1, d1.calls - d0.calls);
+    r.dark_lights = { hidden_per_render: q2((d1.hidden - d0.hidden) / calls), hidden_last: d1.last, hidden_max: d1.max, renders: d1.calls - d0.calls, find_ms_per_frame: q2((d1.ms - d0.ms) / Math.max(1, n)) };
+  }
   if (native) {
+    const ir = (renderer.info && renderer.info.render) || {};
+    // FastRenderer's trimLights at work: lights it left out of three's light state in the last frame (0 when off)
+    r.trim_lights = { on: !!(renderer._tp && renderer._tp.trimLights), light_hold: !!(renderer._tp && renderer._tp.lightHold), dropped_last_frame: ir.lightsDropped | 0 };
     const rendered = s1.framesRendered - s0.framesRendered, gf = s1.gpuFrames - s0.gpuFrames;
     r.native = {
       rendered, skipped: s1.framesSkipped - s0.framesSkipped, rendered_fps: q2(rendered / F.seconds),

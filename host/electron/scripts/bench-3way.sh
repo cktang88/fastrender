@@ -9,7 +9,15 @@
 #     --out DIR          default host/electron/bench-out
 #     --sizes "A B"      colour buffer sizes in device pixels (default "1280x800 2560x1600")
 #     --scenes "A B"     of: empty city world (default: all three)
-#     --variants "A B"   of: webgl webgpu fastrender (default: all three)
+#     --variants "A B"   of: webgl webgpu fastrender (default: all three), and the attribution ladder's rows
+#                        (docs/research/attribution.md), each its base's bundle with switches:
+#                          webgl-trim           WebGLRenderer, dark point / spot lights out of each render()
+#                          fastrender-trimonly  fastrender without per-instance culling and discard ordering
+#                          fastrender-bare      ... and without trimLights (every light shaded, as WebGLRenderer)
+#                          webgpu-trim          WebGPURenderer + the same light hook (not part of the ladder)
+#                        the ladder, real game only, about 25 minutes:
+#                          --scenes world --no-vsync-pass
+#                          --variants "webgl webgl-trim fastrender-bare fastrender-trimonly fastrender"
 #     --warmup S         default 10        --measure S   default 20
 #     --quick            3 s warmup, 8 s measure, 1280x800 only
 #     --ci               what the CI job runs: quick timings at both sizes, MSAA / MetalFX rows at the first size
@@ -43,7 +51,7 @@ while [ $# -gt 0 ]; do
     --no-build) build=0; shift;;
     --power) power=1; shift;;
     --note) note="$2"; shift 2;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0;;
     *) echo "unknown option $1"; exit 2;;
   esac
 done
@@ -66,7 +74,7 @@ esac
 if [ "$build" = 1 ]; then
   say "npm ci + addon (cargo, release)"
   [ -d node_modules/electron ] || npm ci || exit 2
-  case " $variants " in *" fastrender "*) npm run build || { echo "addon build failed: running without the fastrender variant"; variants="$(echo " $variants " | sed 's/ fastrender / /')"; };; esac
+  case " $variants " in *" fastrender"*) npm run build || { echo "addon build failed: running without the fastrender variants"; variants="$(echo " $variants " | tr ' ' '\n' | grep -v '^fastrender' | tr '\n' ' ')"; };; esac
   say "bundles"
   if [ -n "$world" ]; then node scripts/bench-3way.bundle.mjs --world "$world" || exit 2; else node scripts/bench-3way.bundle.mjs || exit 2; fi
   (cd "$repo/js" && [ -d node_modules/pngjs ] || npm ci --silent) > /dev/null 2>&1 || true   # screenshot diff (optional)
@@ -102,7 +110,8 @@ for scene in $scenes; do
     for v in $variants; do one "$scene" "$v" "$px" 0 0; done
     [ "$extras_first_only" = 1 ] && [ "$px" != "${sizes%% *}" ] && continue
     # the game as shipped asks for MSAA 4x; fastrender has none, so the rows above turn it off everywhere
-    if [ "$scene" = world ]; then for v in $variants; do [ "$v" = fastrender ] || one world "$v" "$px" 1 0; done; fi
+    # (stock variants only: the ladder's rows are compared without MSAA)
+    if [ "$scene" = world ]; then for v in $variants; do case "$v" in webgl|webgpu) one world "$v" "$px" 1 0;; esac; done; fi
     # what only the native renderer has: a quarter of the pixels shaded, MetalFX spatial upscaling to the same output
     # (NOT like-for-like with the rows above: a different image; the browser's equivalent is FSR1 in a shader)
     if [ "$scene" != empty ]; then case " $variants " in *" fastrender "*) one "$scene" fastrender "$px" 0 0 fx;; esac; fi

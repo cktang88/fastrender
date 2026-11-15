@@ -7,6 +7,8 @@
 //   --variant fastrender  FastRenderer + the addon: fastrender's Metal renderer on a render thread of THIS process,
 //                         CAMetalLayer below the transparent web contents (exactly game/main.js)
 //
+//   (+ webgl-trim, webgpu-trim, fastrender-trimonly, fastrender-bare: a base with switches, see VARIANTS below)
+//
 //   electron game/bench-main.js --variant webgl|webgpu|fastrender --scene city|empty|world [--px 1280x800]
 //     [--aa 0|1] [--vsync 0|1] [--pace gpu|free] [--warmup 10] [--measure 20] [--out DIR] [--tag NAME] [--isolation on|off]
 //     [--html <game>/index.html --assets <game>/public] [--timeout S]
@@ -26,7 +28,28 @@ const { execFile } = require('child_process');
 
 const argv = process.argv.slice(1);
 const opt = (k, d) => { const i = argv.indexOf(`--${k}`); return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : d; };
-const variant = opt('variant', 'webgl');
+// A variant is a base (which bundle, which window, which GPU path) plus switches: the attribution ladder's rows run
+// the SAME bundle as their base, so the switch is the only difference (docs/research/attribution.md).
+//   webgl-trim / webgpu-trim   the stock renderer; dark point / spot lights are out of the frame for each render()
+//                              (game/bench/dark-lights.mjs): FastRenderer's trimLights, done from outside
+//   fastrender-trimonly        fastrender without what only its native side does: instanced draws are not split by
+//                              the frustum (FASTRENDER_V3_DEBUG bit 2048), discarding draws stay in state order (512)
+//   fastrender-bare            ... and with trimLights off: every visible light in the light state, as WebGLRenderer
+const NATIVE_TRICKS_OFF = 2048 | 512; // src/mac_three.rs `dbg` (a decimal number in the environment)
+const VARIANTS = {
+  webgl: { base: 'webgl' },
+  'webgl-trim': { base: 'webgl', hideDark: true },
+  webgpu: { base: 'webgpu' },
+  'webgpu-trim': { base: 'webgpu', hideDark: true },
+  fastrender: { base: 'fastrender' },
+  'fastrender-trimonly': { base: 'fastrender', v3debug: NATIVE_TRICKS_OFF },
+  'fastrender-bare': { base: 'fastrender', v3debug: NATIVE_TRICKS_OFF, params: { trimLights: 0 } },
+};
+const variantName = opt('variant', 'webgl');
+const V = VARIANTS[variantName];
+const variant = V ? V.base : '';
+// read once by the render thread of THIS process when it builds its scene (std::env::var in src/mac_three.rs)
+if (V && V.v3debug && !process.env.FASTRENDER_V3_DEBUG) process.env.FASTRENDER_V3_DEBUG = String(V.v3debug);
 const scene = opt('scene', 'city');
 const [PW, PH] = opt('px', '1280x800').split('x').map(Number);
 const aa = opt('aa', '0') === '1';
@@ -34,14 +57,14 @@ const vsync = opt('vsync', '0') === '1';
 const warmup = Number(opt('warmup', '10'));
 const measure = Number(opt('measure', '20'));
 const outDir = path.resolve(opt('out', '.'));
-const tag = opt('tag', `bench-${scene}-${variant}-${PW}x${PH}${aa ? '-aa' : ''}${vsync ? '-vsync' : ''}`);
+const tag = opt('tag', `bench-${scene}-${variantName}-${PW}x${PH}${aa ? '-aa' : ''}${vsync ? '-vsync' : ''}`);
 const htmlPath = opt('html', '');
 const assets = opt('assets', '') && path.resolve(opt('assets', ''));
 const isolated = opt('isolation', 'on') !== 'off';
 const timeoutS = Number(opt('timeout', '900'));
 const search = opt('search', scene === 'world' ? '?mode=world&quality=low&weather=clear&tod=noon&seamless=0&nodyn' : '');
 const bundle = path.join(__dirname, 'dist', `bench-${scene === 'world' ? 'world' : 'city'}-${variant}.js`);
-if (!['webgl', 'webgpu', 'fastrender'].includes(variant) || !['city', 'empty', 'world'].includes(scene)) { console.error('bench: bad --variant / --scene'); process.exit(2); }
+if (!V || !['city', 'empty', 'world'].includes(scene)) { console.error('bench: bad --variant / --scene'); process.exit(2); }
 
 const sw = (s, v) => app.commandLine.appendSwitch(s, v);
 for (const s of ['disable-renderer-backgrounding', 'disable-background-timer-throttling', 'disable-backgrounding-occluded-windows', 'ignore-gpu-blocklist', 'disable-gpu-watchdog']) sw(s);
@@ -57,7 +80,7 @@ if (variant === 'webgpu') {
 for (const f of (process.env.BENCH_CHROMIUM_FLAGS || '').split(/\s+/).filter(Boolean)) { const i = f.indexOf('='); if (i < 0) sw(f); else sw(f.slice(0, i), f.slice(i + 1)); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
-const results = { tag, label: opt('label', ''), variant, scene, px: `${PW}x${PH}`, aa, vsync, electron: process.versions.electron, chrome: process.versions.chrome, platform: `${process.platform} ${process.arch}`, isolated, requests: { local: 0, missing: 0, remote: 0 } };
+const results = { tag, label: opt('label', ''), variant: variantName, base: variant, scene, px: `${PW}x${PH}`, aa, vsync, electron: process.versions.electron, chrome: process.versions.chrome, platform: `${process.platform} ${process.arch}`, isolated, requests: { local: 0, missing: 0, remote: 0 } };
 let win = null, native = null, finished = false;
 const consoleTop = new Map();
 const log = (...a) => console.log('[bench-main]', ...a);
@@ -181,7 +204,7 @@ ipcMain.on('measure-end', async (e) => {
   e.sender.send('measure-end-ack');
 });
 ipcMain.on('done', (e, r) => {
-  Object.assign(results, r);
+  Object.assign(results, r, { variant: variantName, base: variant }); // the page reports its base
   const p = results.processes || {};
   log('result', JSON.stringify({ tag, fps: r.fps, frame_ms: r.frame_ms, js_ms: r.js_ms && r.js_ms.p50, render_ms: r.render_ms && r.render_ms.p50, gpu_ms: r.gpu_ms && r.gpu_ms.mean, draws: r.draws && r.draws.p50, cpu: p.total && p.total.cpu_percent, backend: r.backend && r.backend.api }));
   finish(0);
@@ -200,7 +223,9 @@ app.whenReady().then(() => {
   protocol.handle('app', serve);
   session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }, (d, cb) => { results.requests.remote++; cb({ cancel: true }); });
   session.defaultSession.setPermissionRequestHandler((wc, perm, cb) => cb(false));
-  const cfg = { variant, scene, px: `${PW}x${PH}`, dpr: dsf, aa, vsync, warmup, measure, bootTimeout: Math.max(60, timeoutS - warmup - measure - 60), pace: opt('pace', 'gpu'), params: JSON.parse(opt('params', '{}')) };
+  const cfg = { variant, name: variantName, hideDark: !!V.hideDark, scene, px: `${PW}x${PH}`, dpr: dsf, aa, vsync, warmup, measure, bootTimeout: Math.max(60, timeoutS - warmup - measure - 60), pace: opt('pace', 'gpu'), params: { ...(V.params || {}), ...JSON.parse(opt('params', '{}')) } };
+  results.switches = { hide_dark_lights: cfg.hideDark, params: cfg.params, FASTRENDER_V3_DEBUG: fr ? process.env.FASTRENDER_V3_DEBUG || '' : undefined };
+  log(`variant ${variantName} = ${variant} + ${JSON.stringify(results.switches)}`);
   win = new BrowserWindow({
     // the window keeps its size on a smaller screen (CI: 1024x768)
     x: 0, y: 0, width: W, height: H, useContentSize: true, enableLargerThanScreen: true,

@@ -2,8 +2,11 @@
 // benchmark's knobs, applied in the constructor so an unchanged game gets them too:
 //   - antialias: cfg.aa (the game asks for MSAA 4x; fastrender has no MSAA, so the like-for-like runs turn it off)
 //   - pixel ratio: cfg.dpr, so the drawing buffer is exactly the benchmark's pixel size on any display
+//   - cfg.hideDark (variant `webgl-trim`): dark point / spot lights are out of the frame for each render() call
+//     (bench/dark-lights.mjs). Off for the stock variant: the same bundle, the hook not installed.
 export * from 'three/src/Three.js';
 import { WebGLRenderer as Base } from 'three/src/Three.js';
+import { hideDarkLights } from './dark-lights.mjs';
 
 const G = globalThis;
 
@@ -13,6 +16,7 @@ export class WebGLRenderer extends Base {
     super({ ...p, antialias: c.aa === undefined ? p.antialias : !!c.aa, powerPreference: 'high-performance' });
     const set = this.setPixelRatio.bind(this); // an instance method of WebGLRenderer
     if (c.dpr) { set(c.dpr); this.setPixelRatio = () => set(c.dpr); }
+    if (c.hideDark) hideDarkLights(this);
     G.__benchRenderer = this;
     this.domElement.addEventListener('webglcontextlost', () => { if (G.__benchLost) G.__benchLost('WebGL context lost'); });
   }

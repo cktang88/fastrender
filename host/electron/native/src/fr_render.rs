@@ -220,5 +220,10 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
         if passes.frames > 0 {
             println!("[fastrender] gpu passes (ms avg over {} frames): {}", passes.frames, passes.line());
         }
+        // what the last frame drew (instances tested against the frustum, discarding draws): the evidence that a
+        // FASTRENDER_V3_DEBUG switch took effect (bench variants fastrender-bare / -trimonly, scripts/bench-3way.sh)
+        if let Some(t) = r.three().filter(|t| t.view.v3) {
+            println!("[fastrender] draws per pass (last frame): {}; FASTRENDER_V3_DEBUG={}", t.counts.line(), std::env::var("FASTRENDER_V3_DEBUG").unwrap_or_default());
+        }
     }
 }
