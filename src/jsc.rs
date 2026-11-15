@@ -430,6 +430,25 @@ impl crate::host::FrameSource for ScriptHost {
     fn js_ms(&self) -> f64 { self.last_js_ms }
 }
 
+/// Peak resident memory of this process in MB (`getrusage`; macOS reports bytes).
+fn peak_rss_mb() -> f64 {
+    #[repr(C)]
+    struct RUsage {
+        utime: [i64; 2],
+        stime: [i64; 2],
+        maxrss: i64,
+        rest: [i64; 13],
+    }
+    unsafe extern "C" {
+        fn getrusage(who: i32, usage: *mut RUsage) -> i32;
+    }
+    let mut r = RUsage { utime: [0; 2], stime: [0; 2], maxrss: 0, rest: [0; 13] };
+    if unsafe { getrusage(0, &mut r) } != 0 {
+        return 0.0;
+    }
+    r.maxrss as f64 / (1024.0 * 1024.0)
+}
+
 /// What the engine is doing, measured from inside it: a hot integer loop (a JIT runs it in a few ns per iteration,
 /// the interpreter in ~10x that) and, where `$vm` exists (JSC_useDollarVM=1), which tiers ran a hot function.
 const PROBE: &str = "(function () { var r = {}, now = __fr.now; function hot(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + (i ^ (s >> 3))) & 0xfffff; return s; } hot(1e5); var t = now(); hot(2e7); r.loop_ns_per_iter = +((now() - t) * 1e6 / 2e7).toFixed(2); var a = new Float32Array(4096); function fill(k) { for (var i = 0; i < 4096; i++) a[i] = i * k; return a[7]; } for (var j = 0; j < 200; j++) fill(j); t = now(); for (j = 0; j < 4000; j++) fill(j); r.f32_write_ns = +((now() - t) * 1e6 / (4000 * 4096)).toFixed(2); if (typeof $vm !== 'undefined') { var f = function () { return ($vm.ftlTrue() ? 4 : 0) | ($vm.dfgTrue() ? 2 : 0); }; var m = 0; for (var i = 0; i < 3e6; i++) m |= f(); r.tiers = (m & 4 ? 'FTL ' : '') + (m & 2 ? 'DFG' : '') || 'none above baseline'; } r.wasm = typeof WebAssembly; return JSON.stringify(r); })()";
@@ -498,7 +517,7 @@ pub fn js_bench(args: &[String]) -> Result<(), String> {
         let mut s = js.clone();
         s.sort_by(|a, b| a.total_cmp(b));
         println!(
-            "jsbench result: JS {:.2} ms/frame mean, {:.2} median, {:.2} min, {:.2} max over frames {}-{}; native callbacks {:.2} ms/frame; in-JS breakdown (ms/frame): {}",
+            "jsbench result: JS {:.2} ms/frame mean, {:.2} median, {:.2} min, {:.2} max over frames {}-{}; native callbacks {:.2} ms/frame; peak RSS {:.0} MB; in-JS breakdown (ms/frame): {}",
             mean,
             s[s.len() / 2],
             s[0],
@@ -506,6 +525,7 @@ pub fn js_bench(args: &[String]) -> Result<(), String> {
             warmup,
             warmup + frames - 1,
             native / n,
+            peak_rss_mb(),
             host.eval_string("JSON.stringify(globalThis.__worldCostReport ? __worldCostReport() : null)").unwrap_or_default()
         );
     }

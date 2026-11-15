@@ -19,7 +19,7 @@ run() {
   local t0=$(date +%s)
   env "$@" perl -e 'alarm shift; exec @ARGV' 300 "$bin" jsbench "$BUNDLE" --warmup 71 --frames 30 --params "$PARAMS" > $OUT/$name.out 2> $OUT/$name.err
   local rc=$?
-  echo "[$name] exit $rc, $(( $(date +%s) - t0 )) s wall: $(grep -h 'jsbench result' $OUT/$name.out | sed 's/jsbench result: //' | cut -c1-270)" | tee -a $SUM
+  echo "[$name] exit $rc, $(( $(date +%s) - t0 )) s wall: $(grep -h 'jsbench result' $OUT/$name.out | sed -e 's/jsbench result: //' -e 's/in-JS breakdown (ms.frame)/breakdown/' -e 's/ over frames 71-100//' | cut -c1-250)" | tee -a $SUM
   echo "[$name] $(grep -h 'jsbench probe\|bundle evaluated' $OUT/$name.out | tr '\n' ' ' | cut -c1-270)" | tee -a $SUM
   grep -h '^fastrender:' $OUT/$name.err | head -2 | cut -c1-270 | sed "s/^/[$name] /" | tee -a $SUM
   [ $rc -ne 0 ] && { tail -2 $OUT/$name.out; tail -2 $OUT/$name.err; } | cut -c1-270 | tee -a $SUM
