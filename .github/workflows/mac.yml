@@ -369,6 +369,12 @@ jobs:
             FASTRENDER_CLUSTERS="$a" FASTRENDER_ABLATE=none env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 40 --warmup 80 --gpu-passes 1 > "wo-cl-$a.txt" 2>&1 || true
             { echo "== clusters $a"; grep -E "gpu passes|three frame cost|^clusters:" "wo-cl-$a.txt" | cut -c1-290; } >> world-objects-clusters-ab.txt
           done
+          # culling alone (a threshold no simplification meets: every cut is the finest level), then the worker path
+          # (builds off the render thread, installed as they finish) under API validation
+          FASTRENDER_CLUSTER_PX=0.0001 FASTRENDER_CLUSTERS=1 FASTRENDER_ABLATE=none env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 40 --warmup 80 --gpu-passes 1 > wo-cl-cull.txt 2>&1 || true
+          { echo "== clusters 1, culling only (FASTRENDER_CLUSTER_PX=0.0001)"; grep -E "gpu passes|^clusters:" wo-cl-cull.txt | cut -c1-290; } >> world-objects-clusters-ab.txt
+          rc6=0; FASTRENDER_COMPILE=async FASTRENDER_CLUSTERS=1 FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 60 --warmup 240 > wo-cl-async.txt 2>&1 || rc6=$?
+          { echo "== clusters 1, async builds, API validation (exit $rc6)"; grep -E "^clusters:|GPU error|rror:" wo-cl-async.txt | cut -c1-290 | tail -6; } >> world-objects-clusters-ab.txt
           bash .github/annotate.sh notice "world-objects cluster LOD A/B (FASTRENDER_CLUSTERS 0 = what ships, 1 = on)" world-objects-clusters-ab.txt 30
       # WP3 (docs/research/perf-audit-2026-11.md): async compile on workers, persisted pipeline manifest + prewarm,
       # MTLBinaryArchive. Seven launches per scene (.github/compile-launch.sh): the old behaviour (blocking, one

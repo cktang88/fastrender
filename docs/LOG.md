@@ -14,7 +14,7 @@ Run 43757285875 (5d4cdfa, paravirtual GPU, Metal API validation where noted):
 
 | | |
 |---|---|
-| golden camera, clusters on (API validation, exit 0, 0 GPU errors) | 168 clustered draws, 39,609 clusters tested, **930,946 -> 137,591 triangles** |
+| golden camera, clusters on (API validation, exit 0, 0 GPU errors) | 168 clustered draws, 39,609 clusters tested, **930,946 -> 137,591 triangles**. The 931k is the finest level of those draws; what ships draws the game's far twins instead where they are built (642k in the node census of a similar view), which clusters switch off |
 | MAE vs the browser golden: plain / clusters | 6.58 / 6.59 (gate < 10) |
 | MAE clusters vs the plain native frame | 0.05 (0.05 % of pixels differ) |
 | builds (blocking mode) | 203 built + 23 from the cache, 3.15 s of worker time in total, longest 105 ms; arena 38 MB |
@@ -23,7 +23,7 @@ Run 43757285875 (5d4cdfa, paravirtual GPU, Metal API validation where noted):
 | frame | 17.37 -> 17.05, 16.41 -> 15.62 ms |
 | other goldens (clusters off: the default) | unchanged, the run is green |
 
-So 85 % of the block triangles go, the picture does not move, and on this GPU the main pass gains 1.2-1.5 ms while
+So 85 % of the finest-level block triangles go (about 79 % of what ships with the twins), the picture does not move, and on this GPU the main pass gains 1.2-1.5 ms while
 the dispatches cost 1.1-1.3 (their cost on a real GPU should be far lower: 40k threads and 0.4 M index writes). The
 Air's own `nofarlod` row (470k far triangles more, main 7.65 vs 7.73 ms) says far triangles are nearly free there,
 so the estimate for the Air is under 1 ms; it stays off by default until `scripts/gpu-ablate.sh` rows `clusters` /
