@@ -2,6 +2,28 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: render targets natively: three's own PMREMGenerator and EffectComposer, IBL golden 0.10 / bloom 0.22
+
+Render targets are resources (kind 5) and a frame is a list of PASSes (docs/PROTOCOL.md "Render targets and passes",
+`src/mac_targets.rs`). Nothing is re-implemented natively: `PMREMGenerator.fromScene(RoomEnvironment)` (r187: 54
+passes into two cube targets at load, run in the first frame) and `EffectComposer` (RenderPass + UnrealBloomPass +
+OutputPass: 28 passes per frame into 15 targets, 14 render encoders) are three's JS and programs.
+
+| run | commit | IBL (PMREM) MAE | IBL bloom MAE | note |
+|---|---|---:|---:|---|
+| 43702851774 | 8fbffe3 | 56.56 | 39.2 | spheres lit by the key light only: the environment cube read black |
+| 43704283746 | 327a5f6 | | | `FASTRENDER_RT_PROBE`: capture passes unprepared (target gone), blur passes drawing nothing (materials gone) |
+| 43705587015 | e87af9b | **0.10** | **0.22** | releases deferred one frame |
+
+- **Cause**: `pmrem.dispose()` right after `fromScene()` released the source cube target and the blur / GGX materials
+  in the same resource batch as their uploads, before the first frame ran the passes. WebGL runs each call at once;
+  here JS describes GPU work that runs later. Fix: `three::defer_releases` applies each batch's releases with the
+  next batch.
+- Existing goldens unchanged by the work (three-programs 0.97, parity 0.96 / 0.84 / 0.83, native path 2.23).
+- CI now gates IBL + bloom at MAE < 1.5.
+- The real game's wrapper (`js/examples/world-objects.three.mjs`) skipped every render into a target, PMREM's
+  included; it now uses FastRenderer's render targets (node r170, 30 frames: no errors).
+
 ## 2026-11-15: per-frame JS cost of `programs: 'three'` halved, garbage ~0 (no wire change)
 
 `js/test/three-programs.bench.mjs` (extended): 5000 meshes × {20, 200, 1000} materials, static / moving camera / moving
