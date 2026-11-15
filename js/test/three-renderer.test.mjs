@@ -1,6 +1,6 @@
 // node test/three-renderer.test.mjs: FastRenderer over a REAL three.js (r170) scene graph.
 import assert from 'node:assert/strict';
-import * as THREE from 'three';
+const THREE = await import(process.env.THREE_PKG || 'three');
 import { FastRenderer, KIND, OP, F, L } from '../fastrender-three.js';
 
 const DRAW_WORDS = 20;
@@ -189,4 +189,4 @@ r2.render(big, camera);
 const t0 = performance.now();
 for (let i = 0; i < 60; i++) { big.children[i].rotation.y = i; r2.render(big, camera); }
 const ms = (performance.now() - t0) / 60;
-console.log(`three-renderer ok: ${fr.draws.length} draws in test scene; 5000 meshes -> ${ms.toFixed(2)} ms/frame in node (scene walk + matrices + draw list)`);
+console.log(`[three r${THREE.REVISION}] three-renderer ok: ${fr.draws.length} draws in test scene; 5000 meshes -> ${ms.toFixed(2)} ms/frame in node (scene walk + matrices + draw list)`);
