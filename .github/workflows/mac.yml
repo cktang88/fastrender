@@ -52,9 +52,15 @@ jobs:
         run: |
           out=""
           for d in 0 1 2 16 17 4 8 32 63; do
-            FASTRENDER_V3_DEBUG=$d ./target/release/fastrender selftest --three js/dist/three-city.js --upscale bilinear --scale 1 --size 640x400 > bisect-$d.txt 2>&1
-            out="$out dbg=$d: $(grep -c 'GPU error' bisect-$d.txt) GPU errors, $(grep '3 frame: output' bisect-$d.txt | sed 's/.*mean/mean/') ;"
+            FASTRENDER_V3_DEBUG=$d ./target/release/fastrender selftest --three js/dist/three-city.js --upscale bilinear --scale 1 --size 640x400 > bisect-$d.txt 2>&1 || true
+            out="$out dbg=$d: $(grep -c 'GPU error' bisect-$d.txt || true) GPU errors, $(grep '3 frame: output' bisect-$d.txt | sed 's/.*mean/mean/' || true) ;"
           done
+          for m in 0 1 2 10; do
+            FASTRENDER_V3_DEBUG=128 FASTRENDER_V3_MAX_DRAWS=$m ./target/release/fastrender selftest --three js/dist/three-city.js --upscale bilinear --scale 1 --size 640x400 > bisect-m$m.txt 2>&1 || true
+            out="$out maxdraws=$m: $(grep -c 'GPU error' bisect-m$m.txt || true) GPU errors ;"
+          done
+          bash .github/annotate.sh notice "bisect max draws 1 log" bisect-m1.txt 30
+          bash .github/annotate.sh notice "bisect dbg 0 log" bisect-0.txt 30
           echo "::notice title=three-programs bisect::$out"
       - name: selftest
         run: |

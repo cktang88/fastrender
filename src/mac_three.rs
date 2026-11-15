@@ -196,6 +196,8 @@ pub struct ThreeScene {
     /// FASTRENDER_V3_DEBUG bits (bisecting on CI): 1 shadow slots bind the lit texture, 2 no v3 shadow pass,
     /// 4 no instanced draws, 8 no transparent draws, 16 neutral textures only, 32 Lambert only, 64 no textures bound
     dbg: u32,
+    /// FASTRENDER_V3_MAX_DRAWS: draw only the first n v3 draws of the main pass (bisecting)
+    max_draws: usize,
     /// CPU ms of the last prepare() (cull, sort, FrObjects, pipeline lookups) and encode_main()
     pub prepare_ms: f64,
     pub encode_ms: std::cell::Cell<f64>,
@@ -336,6 +338,7 @@ impl ThreeScene {
             vis3: Vec::new(),
             shadows: Vec::new(),
             dbg: std::env::var("FASTRENDER_V3_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            max_draws: std::env::var("FASTRENDER_V3_MAX_DRAWS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
             prepare_ms: 0.0,
             encode_ms: std::cell::Cell::new(0.0),
             last_t: 0.0,
@@ -894,8 +897,16 @@ impl ThreeScene {
         let (mut last_pipe, mut last_depth, mut last_bias) = (u32::MAX, u32::MAX, (0.0f32, 0.0f32));
         let inst_names = (self.progs.name_id_get("instanceMatrix"), self.progs.name_id_get("instanceColor"));
         let mut drawn = 0;
-        for v in &self.vis3 {
+        for v in self.vis3.iter().take(self.max_draws) {
             let d = &self.draws[v.i];
+            if self.dbg & 128 != 0 && drawn == 0 {
+                let m = &self.mats3[&d.material].meta;
+                println!(
+                    "v3 first draw: {} prog {} geo {} flags {:#x} start {} count {} inst {} x{} block@{} obj@{} frame@{} pipe {} geo attrs {:?}",
+                    m.ty, m.program, d.geometry, d.flags, d.start, d.count, d.instances, d.instance_count, v.block, v.obj, self.frame_off, v.pipe,
+                    self.geos.get(&d.geometry).map(|g| g.attrs.iter().map(|a| (a.0, a.2)).collect::<Vec<_>>())
+                );
+            }
             let mat = &self.mats3[&d.material];
             if (self.dbg & 4 != 0 && d.flags & flag::INSTANCED != 0)
                 || (self.dbg & 8 != 0 && mat.meta.transparent)
