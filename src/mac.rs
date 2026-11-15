@@ -353,7 +353,9 @@ impl Content {
             SceneKind::Three => {
                 let src = std::fs::read_to_string("shaders/fastrender.metal").unwrap_or_else(|_| SHADER_SRC.to_string());
                 // width / height: the output size (FastRenderer defaults its size to it; render targets sized from getSize)
-                let params = format!("{{\"boxes\": {}, \"lights\": {}, \"programs\": \"{}\", \"width\": {}, \"height\": {}}}", cfg.props, cfg.lights, cfg.programs, cfg.width, cfg.height);
+                // FASTRENDER_ABLATE=a,b,...: GPU-cost diagnostics applied by the game bundle (js/examples/world-objects.three.mjs)
+                let ablate: String = std::env::var("FASTRENDER_ABLATE").unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || *c == ',' || *c == '-').collect();
+                let params = format!("{{\"boxes\": {}, \"lights\": {}, \"programs\": \"{}\", \"width\": {}, \"height\": {}, \"ablate\": \"{}\"}}", cfg.props, cfg.lights, cfg.programs, cfg.width, cfg.height, ablate);
                 (Content::Three(Box::new(ThreeScene::new(dev, &src, &cfg.script, &params)?)), Vec::new())
             }
             SceneKind::Script => {

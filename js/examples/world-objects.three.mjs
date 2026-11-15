@@ -9,6 +9,7 @@
 // in __worldStats.rtRenders.
 export * from 'three/src/Three.js';
 import { FastRenderer } from '../fastrender-three.js';
+import { MeshBasicMaterial, MeshLambertMaterial } from 'three/src/Three.js';
 
 const counts = (globalThis.__worldStats ||= { rtRenders: {}, frames: 0 });
 
@@ -48,9 +49,55 @@ export class WebGLRenderer extends FastRenderer {
       if (globalThis.__worldTrace) { const st = String(new Error().stack).split('\n').slice(2, 5).map((l) => (/at (?:new )?([\w$.<>]+)/.exec(l) || [])[1]).filter(Boolean); who = st.join(' < '); }
       const k = `${what} (${who})`;
       counts.rtRenders[k] = (counts.rtRenders[k] || 0) + 1;
-    } else counts.frames++;
+    } else { counts.frames++; if (ablate.size && scene.isScene) applyAblate(scene); }
     super.render(scene, camera);
   }
+}
+
+// GPU-cost diagnostics (FASTRENDER_ABLATE=a,b,... -> params.ablate). They CHANGE the picture; for attribution only.
+//   lights0       hide lights whose intensity is 0 (three still loops over them in every lit fragment)
+//   nopoint       hide every PointLight / SpotLight (keeps directional, hemisphere, ambient)
+//   nolights      hide every light
+//   notransparent hide meshes whose material is transparent or transmissive
+//   lambert       every lit mesh material -> MeshLambertMaterial (same color/map): ceiling probe for material cost
+//   basic         every mesh material -> MeshBasicMaterial (same color/map): no lighting at all
+//   noenv         scene.environment = null (no IBL)
+//   nomaps        drop normal/roughness/metalness/ao/emissive/bump maps (keeps map)
+const P = (globalThis.__fr && globalThis.__fr.params) || (globalThis.__frHost && globalThis.__frHost.params) || {};
+const ablate = new Set(String(P.ablate || '').split(',').filter(Boolean));
+let ablateFrame = 0;
+const swapped = new WeakMap();
+function swapMat(m, kind) {
+  if (!m || m.isShaderMaterial) return m;
+  let c = swapped.get(m);
+  if (!c) {
+    const o = { color: m.color, map: m.map || null, side: m.side, transparent: m.transparent, opacity: m.opacity, alphaTest: m.alphaTest, vertexColors: m.vertexColors };
+    c = kind === 'basic' ? new MeshBasicMaterial(o) : (m.isMeshBasicMaterial ? m : new MeshLambertMaterial(o));
+    swapped.set(m, c);
+  }
+  return c;
+}
+function applyAblate(scene) {
+  const stats = ablateFrame === 120 ? { lights: {}, zero: 0, transparent: 0, meshes: 0, materials: {} } : null;
+  const kind = ablate.has('basic') ? 'basic' : ablate.has('lambert') ? 'lambert' : null;
+  if (ablate.has('noenv')) scene.environment = null;
+  scene.traverse((o) => {
+    if (o.isLight) {
+      if (stats) { stats.lights[o.type] = (stats.lights[o.type] || 0) + (o.visible ? 1 : 0); if (o.visible && o.intensity === 0) stats.zero++; }
+      if (ablate.has('nolights') || (ablate.has('nopoint') && (o.isPointLight || o.isSpotLight)) || (ablate.has('lights0') && o.intensity === 0)) o.visible = false;
+      else if (ablate.has('lights0') && o.userData.__abl0) o.visible = true;
+      if (ablate.has('lights0')) o.userData.__abl0 = o.intensity === 0;
+      return;
+    }
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    if (stats && o.visible) { stats.meshes++; for (const m of mats) { stats.materials[m.type] = (stats.materials[m.type] || 0) + 1; if (m.transparent || m.transmission > 0) stats.transparent++; } }
+    if (ablate.has('notransparent') && mats.some((m) => m && (m.transparent || m.transmission > 0))) o.visible = false;
+    if (ablate.has('nomaps')) for (const m of mats) if (m) { for (const k of ['normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'bumpMap']) if (m[k]) { m[k] = null; m.needsUpdate = true; } }
+    if (kind) o.material = Array.isArray(o.material) ? o.material.map((m) => swapMat(m, kind)) : swapMat(o.material, kind);
+  });
+  if (stats) console.log('[ablate] ' + [...ablate].join(',') + ' scene: ' + JSON.stringify(stats));
+  ablateFrame++;
 }
 
 function makeCanvas() {
