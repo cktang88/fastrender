@@ -933,6 +933,37 @@ fn open_archive(dev: &Device, path: Option<&std::path::Path>) -> Result<BinaryAr
     dev.newBinaryArchiveWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string())
 }
 
+unsafe extern "C" {
+    fn confstr(name: i32, buf: *mut std::ffi::c_char, len: usize) -> usize;
+}
+
+/// Metal's scratch folder for serialising archives: `<per-user cache dir>/<bundle id>/com.apple.gpuarchiver`.
+fn gpuarchiver_dir() -> Option<PathBuf> {
+    const CS_DARWIN_USER_CACHE_DIR: i32 = 65538;
+    let mut buf = [0u8; 1024];
+    let n = unsafe { confstr(CS_DARWIN_USER_CACHE_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+    let cache = std::str::from_utf8(buf.get(..n.checked_sub(1)?)?).ok()?;
+    let id = objc2_foundation::NSBundle::mainBundle().bundleIdentifier()?.to_string();
+    Some(PathBuf::from(cache).join(id).join("com.apple.gpuarchiver"))
+}
+
+/// `serializeToURL`, then remove the `gpuarchiver-*` folder Metal leaves behind for every call, failed or not (up to
+/// ~1.2 GB each; 133 GB in a day of bench runs on an M2 Air, 2026-11-15).
+fn serialise(ar: &ProtocolObject<dyn MTLBinaryArchive>, url: &NSURL) -> Result<(), String> {
+    let dir = gpuarchiver_dir();
+    let list = || -> HashSet<std::ffi::OsString> {
+        dir.as_ref().and_then(|d| std::fs::read_dir(d).ok()).map_or_else(HashSet::new, |it| it.flatten().map(|e| e.file_name()).collect())
+    };
+    let before = list();
+    let r = ar.serializeToURL_error(url).map_err(|e| e.localizedDescription().to_string());
+    if let Some(d) = &dir {
+        for name in list().difference(&before) {
+            let _ = std::fs::remove_dir_all(d.join(name));
+        }
+    }
+    r
+}
+
 impl Metal3 {
     /// `dir`: the pipeline cache directory (None, or `FASTRENDER_ARCHIVE=0`: no archive).
     pub fn new(dev: &Device, dir: Option<&std::path::Path>) -> Self {
@@ -1045,10 +1076,10 @@ impl PipelineBackend for Metal3 {
             let tmp = a.path.with_extension(format!("{}.tmp", std::process::id()));
             let _ = std::fs::remove_file(&tmp);
             let url = NSURL::from_file_path(&tmp).ok_or("archive path is not a file URL")?;
-            if let Err(e) = ar.serializeToURL_error(&url) {
-                // one pipeline Metal cannot serialise must not cost the whole archive: rebuild it one descriptor
-                // at a time on top of the last file that serialised, leaving out each one that breaks it
-                let why = e.localizedDescription().to_string();
+            if let Err(why) = serialise(ar, &url) {
+                // one pipeline Metal cannot serialise must not cost the whole archive: add the new ones in halves on
+                // top of the last file that serialised, splitting a half that breaks it down to the single pipeline
+                // (about 2 log2(n) serialisations per bad pipeline, not one per pipeline: 533 s for ~300 on an M2 Air)
                 let _ = std::fs::remove_file(&tmp);
                 let good = a.path.with_extension(format!("{}.good.tmp", std::process::id()));
                 let _ = std::fs::remove_file(&good);
@@ -1056,18 +1087,22 @@ impl PipelineBackend for Metal3 {
                     let base = [good, a.path.as_path()].into_iter().find(|p| p.exists());
                     base.and_then(|p| open_archive(dev, Some(p)).ok()).map_or_else(|| open_archive(dev, None), Ok)
                 };
-                let mut cand = reopen(&good).map_err(|e| format!("binary archive not created: {e}"))?;
                 added = 0;
-                for d in &missed {
-                    let ok = cand.addRenderPipelineFunctionsWithDescriptor_error(&d.0).is_ok() && cand.serializeToURL_error(&url).is_ok();
+                let mut todo = vec![&missed[..]];
+                while let Some(part) = todo.pop() {
+                    let cand = reopen(&good).map_err(|e| format!("binary archive not created: {e}"))?;
+                    let ok = part.iter().all(|d| cand.addRenderPipelineFunctionsWithDescriptor_error(&d.0).is_ok()) && serialise(&cand, &url).is_ok();
                     if ok && std::fs::rename(&tmp, &good).is_ok() {
-                        added += 1;
+                        added += part.len();
                     } else {
                         let _ = std::fs::remove_file(&tmp);
-                        cand = reopen(&good).map_err(|e| format!("binary archive not created: {e}"))?;
+                        if part.len() > 1 {
+                            let (a, b) = part.split_at(part.len() / 2);
+                            todo.extend([b, a]);
+                        }
                     }
                 }
-                *w = Some(Mt(cand));
+                *w = Some(Mt(reopen(&good).map_err(|e| format!("binary archive not created: {e}"))?));
                 if added == 0 {
                     return Err(format!("binary archive not serialised: {why} (none of {} pipelines could be kept)", missed.len()));
                 }
