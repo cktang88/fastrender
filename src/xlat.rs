@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 /// Bumped whenever the translation output (MSL or layout) can change, so stale cache entries are never used.
 /// The `xlat-N` part is bumped by hand when this module's output changes; the crate versions are checked against
 /// Cargo.lock by the `translator_version_matches_lockfile` test.
-pub const TRANSLATOR_VERSION: &str = "xlat-3 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
+pub const TRANSLATOR_VERSION: &str = "xlat-4 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
 
 pub const DEFAULT_BLOCK_BUFFER: u32 = 1;
 pub const OBJECT_BLOCK_BUFFER: u32 = 2;
@@ -556,9 +556,41 @@ const KEY_OBJECT: u32 = 1;
 const KEY_FRAME: u32 = 2;
 const KEY_TEXTURE0: u32 = 100;
 
-fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture]) -> Result<String, String> {
+/// The vertex stage's outputs: (name, location).
+fn stage_outputs(words: &[u32]) -> Result<Vec<(String, u32)>, String> {
+    let c: Msl = sc(Compiler::new(Module::from_words(words)))?;
+    let all = sc(sc(c.shader_resources())?.all_resources())?;
+    let mut out = Vec::new();
+    for r in &all.stage_outputs {
+        if let Some(DecorationValue::Literal(l)) = sc(c.decoration(r.id, Decoration::Location))? {
+            out.push((r.name.to_string(), l));
+        }
+    }
+    Ok(out)
+}
+
+/// `varyings`: for the fragment stage, the vertex stage's output locations by name. glslang's auto-mapped locations
+/// are assigned per stage in declaration order, and three declares varyings in a different order in each stage
+/// (Lambert: vViewPosition/vFogDepth/vNormal vs vFogDepth/vNormal/vViewPosition), while Metal matches
+/// `[[user(locnN)]]` by number: fragment inputs are renumbered to the vertex outputs of the same name.
+fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture], varyings: &[(String, u32)]) -> Result<String, String> {
     let mut c: Msl = sc(Compiler::new(Module::from_words(words)))?;
     let all = sc(sc(c.shader_resources_for_active_variables(sc(c.active_interface_variables())?))?.all_resources())?;
+    if model == ExecutionModel::Fragment {
+        // inputs the vertex stage never writes (WebGL accepts that; three does it) get locations after all outputs
+        let mut spare = varyings.iter().map(|v| v.1 + 1).max().unwrap_or(0).max(32);
+        for r in &all.stage_inputs {
+            let name = r.name.to_string();
+            let loc = match varyings.iter().find(|v| v.0 == name) {
+                Some(v) => v.1,
+                None => {
+                    spare += 1;
+                    spare - 1
+                }
+            };
+            sc(c.set_decoration(r.id, Decoration::Location, Some(loc)))?;
+        }
+    }
     let set_key = |c: &mut Msl, id, key: u32| -> Result<(), String> {
         sc(c.set_decoration(id, Decoration::DescriptorSet, Some(0u32)))?;
         sc(c.set_decoration(id, Decoration::Binding, Some(key)))
@@ -678,8 +710,9 @@ fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String>
         }
     }
 
-    let vertex_msl = to_msl(&vw, ExecutionModel::Vertex, VERTEX_ENTRY, &textures)?;
-    let fragment_msl = to_msl(&fw, ExecutionModel::Fragment, FRAGMENT_ENTRY, &textures)?;
+    let varyings = stage_outputs(&vw)?;
+    let vertex_msl = to_msl(&vw, ExecutionModel::Vertex, VERTEX_ENTRY, &textures, &[])?;
+    let fragment_msl = to_msl(&fw, ExecutionModel::Fragment, FRAGMENT_ENTRY, &textures, &varyings)?;
     Ok(Program {
         vertex_msl,
         fragment_msl,
@@ -1178,6 +1211,22 @@ mod tests {
                 if check_msl_agrees(name, msl, "FrFrame", fb) && msl.contains("FrFrame& ") {
                     assert!(msl.contains(&format!("[[buffer({FRAME_BLOCK_BUFFER})]]")), "{name}");
                 }
+            }
+        }
+        // varyings: every fragment input is a vertex output of the same name and type at the same [[user(locnN)]]
+        let user = |msl: &str, st: &str| -> Vec<(String, String)> {
+            let body = &msl[msl.find(st).unwrap()..];
+            let body = &body[..body.find("};").unwrap()];
+            body.lines().filter(|l| l.contains("[[user(")).map(|l| {
+                let l = l.trim();
+                let decl = l[..l.find(" [[").unwrap()].to_string();
+                (l[l.find("[[user(").unwrap()..].to_string(), decl)
+            }).collect()
+        };
+        if p.fragment_msl.contains("struct fr_fragment_in") {
+            let vo = user(&p.vertex_msl, "struct fr_vertex_out");
+            for fi in user(&p.fragment_msl, "struct fr_fragment_in") {
+                assert!(vo.contains(&fi), "{name}: fragment input {fi:?} not matched by a vertex output {vo:?}");
             }
         }
         // every derivative in y goes through the GL-sign wrapper
