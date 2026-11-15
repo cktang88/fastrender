@@ -309,3 +309,11 @@ impl Drop for ScriptHost {
         }
     }
 }
+
+/// The in-process host: `frame()` runs the game's JS (src/host.rs).
+impl crate::host::FrameSource for ScriptHost {
+    fn frame(&mut self, t: f64, dt: f64) -> Result<&[u32], String> { ScriptHost::frame(self, t, dt) }
+    fn take_programs(&mut self) -> Vec<(u32, String, crate::xlat::Program)> { ScriptHost::take_programs(self) }
+    fn take_resources(&mut self) -> Vec<Resource> { ScriptHost::take_resources(self) }
+    fn js_ms(&self) -> f64 { self.last_js_ms }
+}

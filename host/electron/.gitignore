@@ -6,3 +6,4 @@ native/index.d.ts
 app/dist/
 *.png
 spike-result*.json
+game/dist/

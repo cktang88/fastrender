@@ -27,6 +27,7 @@ use objc2_metal::*;
 
 use crate::core::{frustum_planes, sphere_visible};
 use crate::jsc::ScriptHost;
+use crate::host::FrameSource;
 use crate::mac::{buffer_with, Buffer, Device, Texture, FRAME_SLOTS, OUT_FORMAT};
 use crate::three::{self, flag, light, kind, Array, Draw, GeometryMeta, InstancesMeta, MaterialMeta, Resource, TextureMeta, ThreeLight};
 
@@ -171,7 +172,8 @@ pub struct ThreeView {
 }
 
 pub struct ThreeScene {
-    host: Box<ScriptHost>,
+    /// where frames come from: JavaScriptCore in-process, or the Electron addon's feed (src/host.rs)
+    host: Box<dyn FrameSource>,
     pipes: Pipes,
     geos: HashMap<u32, Geo>,
     texs: HashMap<u32, (Texture, TextureMeta, Sampler)>,
@@ -536,6 +538,11 @@ impl ThreeScene {
         // glslang's one-time setup off the first host.program call's path
         ScriptHost::warm_up_translator();
         let host = ScriptHost::new("", &game, bundle_path, params_json, 4 << 20)?;
+        Self::with_source(dev, shader_src, Box::new(host))
+    }
+
+    /// A scene fed by any host (src/host.rs): the Electron addon's render thread uses this.
+    pub fn with_source(dev: &Device, shader_src: &str, host: Box<dyn FrameSource>) -> Result<Self, String> {
         let white = {
             let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::RGBA8Unorm, 1, 1, false) };
             d.setUsage(MTLTextureUsage::ShaderRead);
@@ -552,7 +559,7 @@ impl ThreeScene {
             t
         };
         Ok(ThreeScene {
-            host: Box::new(host),
+            host,
             pipes: pipes(dev, shader_src)?,
             geos: HashMap::new(),
             texs: HashMap::new(),
@@ -610,7 +617,7 @@ impl ThreeScene {
         Ok(())
     }
 
-    pub fn js_ms(&self) -> f64 { self.host.last_js_ms }
+    pub fn js_ms(&self) -> f64 { self.host.js_ms() }
 
     pub fn light_count(&self) -> usize { self.lights.len().min(MAX_LIGHTS) }
 

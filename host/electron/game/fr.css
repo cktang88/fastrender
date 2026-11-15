@@ -1,0 +1,6 @@
+/* Injected by game/main.js: the page is transparent so the Metal view below it shows (the game's own CSS is not
+   bundled: the golden is the WebGL canvas only). .fr-hide-ui hides the DOM UI for the golden screenshot. */
+html, body { background: transparent !important; margin: 0; overflow: hidden; }
+canvas { background: transparent !important; }
+html.fr-hide-ui body > *:not(#app) { visibility: hidden !important; }
+html.fr-hide-ui #app > *:not(canvas) { visibility: hidden !important; }

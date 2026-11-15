@@ -326,6 +326,36 @@ jobs:
           bash .github/annotate.sh notice "world-objects programs (xlat + metal)" wo-xlat-summary.txt 32
           cat wo-xlat-summary.txt >> "$GITHUB_STEP_SUMMARY"
           ! grep -q "^FAIL\|^METAL FAIL" wo-xlat.txt
+      # Electron host with the REAL renderer (docs/HOST.md "Electron host"): the game runs in the renderer process (V8, real
+      # DOM / 2D canvas), the addon's main-process render thread runs fastrender's Metal renderer under the web contents.
+      # Screenshot = screencapture of the window (the Metal layer is not in capturePage), diffed like the JSC goldens.
+      - name: electron fastrender - three-city (golden vs ref-t1) and 3d-world-objects (golden vs world-objects-ref)
+        if: ${{ !cancelled() && steps.electron_build.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          MTL_DEBUG_LAYER: "1"
+        run: |
+          set -o pipefail
+          W=""; test -d ../3d-world-objects && W="--world $GITHUB_WORKSPACE/../3d-world-objects"
+          (cd host/electron && node scripts/bundle-game.mjs $W)
+          rc=0; (cd host/electron && npx electron game/main.js --kind city --out "$GITHUB_WORKSPACE" --tag electron-city --timeout 300) > electron-city.log 2>&1 || rc=$?
+          grep -v "^\[page\] \[fr\] program" electron-city.log | tail -40 > electron-city-tail.txt; bash .github/annotate.sh notice "electron three-city (exit $rc)" electron-city-tail.txt 40
+          if [ -f electron-city-golden.png ]; then
+            node js/golden/diff.mjs js/golden/ref-t1.png electron-city-golden.png golden-diff-electron-city.png | tee electron-city-golden.json
+            node -e "const r=require('./electron-city.json');console.log(JSON.stringify({golden:require('./electron-city-golden.json'),cost:r.cost,draws:r.stats&&r.stats.lastDrawCount,programs:r.programs,xlat:r.xlat,unsupported:r.unsupported,captures:r.captures}))" > electron-city-summary.txt || true
+            echo "::notice title=electron three-city golden (MAE vs ref-t1; JSC host: 0.97)::$(cat electron-city-summary.txt | cut -c1-1500)"
+            echo "electron three-city: $(cat electron-city-summary.txt)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          test -d ../3d-world-objects || { echo "no game checkout: world skipped"; exit 0; }
+          rc=0; (cd host/electron && npx electron game/main.js --kind world --html "$GITHUB_WORKSPACE/../3d-world-objects/index.html" --assets "$GITHUB_WORKSPACE/../3d-world-objects/public" --out "$GITHUB_WORKSPACE" --tag electron-world --timeout 900) > electron-world.log 2>&1 || rc=$?
+          grep -v "^\[page\] \[fr\] program" electron-world.log | tail -60 > electron-world-tail.txt; bash .github/annotate.sh notice "electron world-objects (exit $rc)" electron-world-tail.txt 60
+          if [ -f electron-world-golden.png ]; then
+            node js/golden/diff.mjs js/golden/world-objects-ref.png electron-world-golden.png golden-diff-electron-world.png | tee electron-world-golden.json
+            node -e "const r=require('./electron-world.json');console.log(JSON.stringify({golden:require('./electron-world-golden.json'),boot_s:r.boot_s,cost:r.cost,golden_frames_js_ms:r.golden_frames_js_ms,draws:r.draws,programs:r.programs,xlat:r.xlat,images:r.images,net:r.net,requests:r.requests,gpu_errors:r.stats&&r.stats.gpuErrors,unsupported:r.unsupported}))" > electron-world-summary.txt || true
+            echo "::notice title=electron world-objects golden (MAE vs browser; JSC host 46.9)::$(cat electron-world-summary.txt | cut -c1-2500)"
+            echo "electron world-objects: $(cat electron-world-summary.txt)" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -334,4 +364,5 @@ jobs:
             *.png
             bench-results.json
             electron-*-spike.json
+            electron-*.json
             electron-*.log

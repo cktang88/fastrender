@@ -1,0 +1,149 @@
+// Loaded before the game's bundle (game/dist/boot.js, a classic script): builds the FastRenderer host over the addon
+// (window.__frNative from game/preload.js) and installs it as globalThis.__fr — the global FastRenderer and the
+// world-objects `three` shim look for — then drives the game once it has loaded:
+//
+//   world: cktang88/3d-world-objects, its own src/main.ts with WebGLRenderer = FastRenderer({ programs: 'three' })
+//          (js/examples/world-objects.three.mjs) under the deterministic driver the browser golden uses
+//          (js/examples/world-objects.drive.mjs: seeded Math.random, virtual clock, rAF stepped per frame).
+//          Golden protocol (js/golden/world-objects.reference.mjs): step until the world started, 10 settle frames
+//          500 ms apart, wait for fetches, 3 frames, capture the last; then a cost run.
+//   city:  js/examples/three-city.entry.mjs (the JavaScriptCore bundle, unchanged): frame(1, dt) per frame (bench
+//          --time 1), capture after a few frames; then a cost run.
+//
+// Captures are screenshots of the window taken by the main process (the Metal layer is not in capturePage); the page
+// waits until the frame it captures was rendered (stats().lastFrameSeq >= the seq present() returned).
+import { createHost } from '../host.js';
+
+const G = globalThis;
+const N = G.__frNative;
+if (!N) throw new Error('fastrender: window.__frNative missing (game/preload.js)');
+const { native, ipc, cfg } = N;
+// real clocks / frame callbacks, saved before world-objects.drive.mjs replaces them with virtual ones
+const realNow = performance.now.bind(performance);
+const realRaf = requestAnimationFrame.bind(G);
+const log = (...a) => { console.log('[fr]', ...a); };
+
+const params = Object.assign({ width: innerWidth, height: innerHeight, programs: 'three' }, cfg.params || {});
+const host = createHost(native, { shmName: cfg.shmName, subarray: cfg.isolated, typed: true, now: realNow, params });
+host.now = realNow; // world-objects.drive.mjs: wall clock for measurements
+host.log = log;
+G.__fr = host;
+G.__frHost = host;
+
+// fetch accounting (the golden waits for in-flight requests before its last frames)
+const net = { inflight: 0, done: 0, failed: 0 };
+const realFetch = G.fetch.bind(G);
+G.fetch = (...a) => { net.inflight++; return realFetch(...a).then((r) => { net.inflight--; net.done++; return r; }, (e) => { net.inflight--; net.failed++; throw e; }); };
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const raf = () => new Promise((r) => realRaf(r));
+const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : 0; };
+const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+const q = (v) => +v.toFixed(2);
+
+let captureDone = null;
+ipc.on('captured', () => { if (captureDone) captureDone(); });
+
+/** wait until the main process rendered the last presented frame, then let it screenshot the window */
+async function capture(tag, extra) {
+  const seq = host.lastSeq;
+  const t0 = realNow();
+  let s = native.stats();
+  while (s.lastFrameSeq < seq && realNow() - t0 < 20000) { await sleep(10); s = native.stats(); }
+  if (s.lastFrameSeq < seq) log(`capture ${tag}: frame ${seq} not rendered after 20 s (last ${s.lastFrameSeq})`);
+  const done = new Promise((r) => { captureDone = r; });
+  ipc.send('capture', { tag, rendered: s.lastFrameSeq >= seq, ...extra });
+  await done;
+}
+
+function hideUI(on) {
+  document.documentElement.classList.toggle('fr-hide-ui', on);
+}
+
+/** per-frame JS cost: `step()` wall ms, plus the native GPU / render-thread numbers over the same frames */
+async function measure(step, frames) {
+  const js = [], present = [];
+  const s0 = native.stats();
+  for (let i = 0; i < frames; i++) {
+    await raf();
+    const t = realNow();
+    step();
+    js.push(realNow() - t);
+  }
+  const seq = host.lastSeq;
+  const t0 = realNow();
+  let s1 = native.stats();
+  while (s1.lastFrameSeq < seq && realNow() - t0 < 10000) { await sleep(5); s1 = native.stats(); }
+  await sleep(200);
+  s1 = native.stats();
+  const gpuFrames = s1.gpuFrames - s0.gpuFrames;
+  return {
+    frames, js_ms_median: q(median(js)), js_ms_mean: q(mean(js)), js_ms_max: q(Math.max(...js)),
+    gpu_ms_mean: gpuFrames > 0 ? q(((s1.avgGpuMs * s1.gpuFrames) - (s0.avgGpuMs * s0.gpuFrames)) / gpuFrames) : 0,
+    rendered: s1.framesRendered - s0.framesRendered, skipped: s1.framesSkipped - s0.framesSkipped,
+    render_thread_cpu_ms_last: q(s1.lastCpuMs), draws: s1.lastDrawCount,
+    present_ms: present.length ? q(mean(present)) : undefined,
+  };
+}
+
+function summary(r) {
+  const s = native.stats();
+  const u = r && r.info && r.info.unsupported ? r.info.unsupported : {};
+  return {
+    stats: s, images: host.imageStats, net,
+    unsupported: Object.fromEntries(Object.entries(u).sort((a, b) => b[1] - a[1]).slice(0, 20)),
+    draws: r && r.info ? r.info.render.calls : 0,
+    programs: s.programs, xlat: { count: s.xlatCount, avg_ms: q(s.xlatAvgMs) },
+  };
+}
+
+async function runWorld() {
+  const t0 = realNow();
+  const step = () => { G.__worldPin(); G.__worldStep(1 / 60); };
+  // boot: one virtual frame per display frame until the world has started (level built, programs translated)
+  let boot = 0;
+  for (; boot < 6000; boot++) {
+    await raf();
+    G.__worldStep(1 / 60);
+    if (G.__worldPin && G.__worldPin()) break;
+  }
+  const bootMs = realNow() - t0;
+  log(`world started after ${boot} frames, ${(bootMs / 1000).toFixed(1)} s; fetch ${JSON.stringify(net)}`);
+  for (let i = 0; i < 10; i++) { step(); await sleep(500); }
+  for (let i = 0; i < 100 && net.inflight > 0; i++) await sleep(100);
+  // the golden's 3 frames, each its own display frame; the capture shows the last
+  const last = [];
+  for (let i = 0; i < 3; i++) { await raf(); const t = realNow(); step(); last.push(realNow() - t); }
+  const r = G.__world && G.__world.renderer;
+  hideUI(true);
+  await raf(); await raf();
+  await capture('golden', { draws: r ? r.info.render.calls : 0 });
+  hideUI(false);
+  await raf(); await raf();
+  await capture('ui', {});
+  // cost after the level streamed in: like the JavaScriptCore bench (frames 61-90), 30 frames after 30 more
+  for (let i = 0; i < 30; i++) { await raf(); step(); }
+  const cost = await measure(step, Number(cfg.costFrames) || 30);
+  return { kind: 'world', boot_frames: boot, boot_s: q(bootMs / 1000), golden_frames_js_ms: last.map(q), cost, ...summary(r) };
+}
+
+async function runCity() {
+  const t0 = realNow();
+  if (typeof G.frame !== 'function') throw new Error('three-city bundle defines no frame(t, dt)');
+  for (let i = 0; i < 5; i++) { await raf(); G.frame(1, 1 / 60); }
+  log(`city: 5 frames in ${((realNow() - t0) / 1000).toFixed(1)} s`);
+  await capture('golden', {});
+  const cost = await measure(() => G.frame(1, 1 / 60), Number(cfg.costFrames) || 120);
+  return { kind: 'city', cost, ...summary(null) };
+}
+
+addEventListener('load', async () => {
+  try {
+    const r = cfg.kind === 'city' ? await runCity() : await runWorld();
+    ipc.send('done', r);
+  } catch (e) {
+    ipc.send('fatal', String((e && e.stack) || e));
+  }
+});
+addEventListener('error', (e) => log('page error:', e.message, e.filename + ':' + e.lineno));
+addEventListener('unhandledrejection', (e) => log('unhandled rejection:', String(e.reason && (e.reason.stack || e.reason)).slice(0, 400)));

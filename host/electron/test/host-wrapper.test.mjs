@@ -52,3 +52,23 @@ const stolen = structuredClone(renderer.cmd, { transfer: [renderer.cmd] });
 assert.ok(stolen.byteLength > 0 && renderer.cmd.byteLength === 0);
 assert.throws(() => host.present(100), /detached/);
 console.log('host-wrapper ok:', JSON.stringify({ words: calls.present[0], draws: fr.draws, uploads: calls.upload }));
+
+// fastrender mode (typed uploads): element types travel with the bytes; views into bigger buffers are sliced when
+// the bridge would copy the whole buffer (opts.subarray); unsupported array types go as null, like JavaScriptCore
+{
+  const got = [];
+  const fakeT = { attach() {}, present: () => 42, release() {}, stats: () => ({}), upload(kind, id, meta, arrays, types) { got.push({ arrays, types }); }, program: (k, v, f, id) => `{"id":${id}}` };
+  const big = new Float32Array(100);
+  const h = createHost(fakeT, { typed: true, subarray: true });
+  h.attach(new ArrayBuffer(64));
+  h.upload(1, 2, {}, big.subarray(10, 13), null, new Uint16Array(3), new Int8Array(2), new Uint32Array(1), new Uint8ClampedArray(5));
+  assert.deepEqual(got[0].types, [1, 0, 2, 0, 3, 4]);
+  assert.equal(got[0].arrays[0].byteLength, 12);
+  assert.equal(got[0].arrays[0].buffer.byteLength, 12, 'a view into a bigger buffer is sliced in bridge mode');
+  assert.equal(got[0].arrays[3].byteLength, 0);
+  assert.equal(h.present(4), 42);
+  assert.equal(h.lastSeq, 42);
+  assert.equal(h.program('k', 'v', 'f', 7), '{"id":7}');
+  assert.equal(h.imagePixels({ width: 0 }), null);
+  console.log('host-wrapper typed mode ok');
+}

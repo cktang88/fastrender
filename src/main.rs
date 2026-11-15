@@ -1,22 +1,6 @@
-mod core;
-mod voxel;
-mod script;
-mod three;
-mod xlat;
-mod ring; // v3 per-slot ring layout + bounds-checked writes (src/mac_three.rs)
-mod image; // __fr.readFile / __fr.decodeImage for real web games (JavaScriptCore host)
+use fastrender::{core, voxel, xlat};
 #[cfg(target_os = "macos")]
-mod jsc;
-#[cfg(target_os = "macos")]
-mod mac_three;
-#[cfg(target_os = "macos")]
-mod dfg_lut;
-#[cfg(target_os = "macos")]
-mod mac_programs;
-#[cfg(target_os = "macos")]
-mod mac;
-#[cfg(target_os = "macos")]
-mod app;
+use fastrender::{app, mac};
 
 const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
   run      window, live stats in the title bar, hot-reloads shaders/fastrender.metal (default)

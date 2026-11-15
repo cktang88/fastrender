@@ -34,6 +34,13 @@ pub const DEFAULT_RING_BYTES: u32 = 4 << 20;
 pub const MSG_HEADER_BYTES: usize = 24;
 pub const OP_UPLOAD: u32 = 0;
 pub const OP_RELEASE: u32 = 1;
+/// fastrender mode (docs/HOST.md "Electron host"): codec in the fastrender crate, src/host.rs `op`
+pub const OP_PROGRAM: u32 = 2;
+pub const OP_UPLOAD_TYPED: u32 = 3;
+pub const OP_FRAME: u32 = 4;
+/// `Header::mode`: 0 = spike (frames through the mailbox, markers drawn), 1 = fastrender (frames through the ring,
+/// rendered by the fastrender library)
+pub const MODE_FASTRENDER: u32 = 1;
 const MAX_MSG_BYTES: usize = 1 << 30;
 const FNV_INIT: u32 = 0x811c_9dc5;
 
@@ -78,6 +85,22 @@ pub struct Header {
     /// cumulative (carried across rotations)
     pub res_applied_total: AtomicU64,
     pub res_bytes_applied: AtomicU64,
+    // ---- fastrender mode (appended: the spike's layout above is unchanged)
+    pub mode: AtomicU32,
+    /// programs received by the render thread
+    pub programs: AtomicU32,
+    /// command buffers that completed with an error / resources the renderer rejected
+    pub gpu_errors: AtomicU32,
+    pub unsupported_resources: AtomicU32,
+    /// GPU time of completed frames (us) and their count
+    pub gpu_us: AtomicU64,
+    pub gpu_frames: AtomicU64,
+    /// screen-only frames dropped because a newer frame was already queued
+    pub frames_skipped: AtomicU64,
+    /// ring sequence number of the last FRAME message rendered (the game waits on it before a screenshot)
+    pub last_frame_seq: AtomicU64,
+    /// CPU time of the last frame's prepare + encode on the render thread (us)
+    pub cpu_us_last: AtomicU64,
 }
 
 const _: () = assert!(std::mem::size_of::<Header>() <= HEADER_BYTES);
@@ -250,6 +273,14 @@ impl Shm {
         if self.retired() {
             return Err("host channel was reset (renderer reloaded?); re-attach".into());
         }
+        if h.mode.load(Ordering::Acquire) == MODE_FASTRENDER {
+            // ordered with the resources and never dropped here: the render thread decides which frames to skip
+            // (a frame rendering into a target always runs, see fr_queue.rs)
+            let bytes = unsafe { std::slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * 4) };
+            self.send_resource(OP_FRAME, 0, 0, &[bytes])?;
+            h.frames_published.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
         if words.len() > self.capacity_words() {
             return Err(format!("frame of {} words exceeds mailbox capacity {}", words.len(), self.capacity_words()));
         }
@@ -346,7 +377,7 @@ impl Shm {
             self.ring_write(p)?;
         }
         h.res_seq_written.store(seq, Ordering::Release);
-        if op == OP_UPLOAD {
+        if op == OP_UPLOAD || op == OP_UPLOAD_TYPED {
             h.uploads.fetch_add(1, Ordering::Relaxed);
             h.upload_bytes.fetch_add(payload as u64, Ordering::Relaxed);
         }
@@ -429,12 +460,14 @@ impl Shm {
         let (n, o) = (self.header(), old.header());
         for (a, b) in [(&n.frames_published, &o.frames_published), (&n.frames_rendered, &o.frames_rendered), (&n.uploads, &o.uploads),
             (&n.upload_bytes, &o.upload_bytes), (&n.render_ns, &o.render_ns), (&n.res_applied_total, &o.res_applied_total),
-            (&n.res_bytes_applied, &o.res_bytes_applied)] {
+            (&n.res_bytes_applied, &o.res_bytes_applied), (&n.gpu_us, &o.gpu_us), (&n.gpu_frames, &o.gpu_frames),
+            (&n.frames_skipped, &o.frames_skipped)] {
             a.store(b.load(Ordering::Relaxed), Ordering::Relaxed);
         }
         for (a, b) in [(&n.last_draw_count, &o.last_draw_count), (&n.last_clear_rgb, &o.last_clear_rgb), (&n.render_ready, &o.render_ready),
             (&n.drawable_w, &o.drawable_w), (&n.drawable_h, &o.drawable_h), (&n.res_hash, &o.res_hash), (&n.res_errors, &o.res_errors),
-            (&n.res_waits, &o.res_waits)] {
+            (&n.res_waits, &o.res_waits), (&n.mode, &o.mode), (&n.programs, &o.programs), (&n.gpu_errors, &o.gpu_errors),
+            (&n.unsupported_resources, &o.unsupported_resources)] {
             a.store(b.load(Ordering::Relaxed), Ordering::Relaxed);
         }
     }
@@ -505,7 +538,21 @@ impl Slot {
 // ---------------------------------------------------------------------------------------------
 // Render-thread side: applies resource messages in order, then yields the newest frame.
 
+/// Receives every decoded message body: (op, kind, id, seq, body). fastrender mode turns them into renderer input.
+pub type Sink = Box<dyn FnMut(u32, u32, u32, u64, &[u8]) + Send>;
+
+/// What `Consumer::pump` saw.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pump {
+    Quit,
+    /// the region was replaced (page reloaded / renderer crashed): the next messages belong to a new page
+    Rotated,
+    Messages,
+}
+
 pub struct Consumer {
+    /// fastrender mode: every message goes here after validation
+    pub sink: Option<Sink>,
     slot: Arc<Slot>,
     shm: Arc<Shm>,
     pending: Vec<u8>,
@@ -518,7 +565,7 @@ pub struct Consumer {
 impl Consumer {
     pub fn new(slot: Arc<Slot>) -> Consumer {
         let shm = slot.current();
-        Consumer { slot, shm, pending: Vec::new(), applied: 0, last_seq: 0, words: Vec::new() }
+        Consumer { sink: None, slot, shm, pending: Vec::new(), applied: 0, last_seq: 0, words: Vec::new() }
     }
 
     /// Header of the region currently in use (changes after a rotation).
@@ -526,13 +573,38 @@ impl Consumer {
         self.shm.header()
     }
 
-    fn adopt(&mut self) {
+    fn adopt(&mut self) -> bool {
         let cur = self.slot.current();
         if !Arc::ptr_eq(&cur, &self.shm) {
             self.shm = cur;
             self.pending.clear();
             self.applied = 0;
             self.last_seq = 0;
+            return true;
+        }
+        false
+    }
+
+    /// fastrender mode (reader thread): block until messages were decoded (they went to `sink`), the region was
+    /// rotated, or quit. Frames travel in the ring too, so there is no mailbox to look at.
+    pub fn pump(&mut self) -> Pump {
+        loop {
+            if self.adopt() {
+                return Pump::Rotated;
+            }
+            if self.slot.quitting() || self.shm.header().quit.load(Ordering::Acquire) != 0 {
+                return Pump::Quit;
+            }
+            if !self.shm.retired() {
+                if self.shm.is_linked() && self.shm.peer_attached() {
+                    self.shm.unlink_names();
+                }
+                if self.drain_resources() {
+                    return Pump::Messages;
+                }
+            }
+            self.shm.wait();
+            self.shm.drain_sem();
         }
     }
 
@@ -626,13 +698,14 @@ impl Consumer {
         let mut hash = fnv_chain(h.res_hash.load(Ordering::Relaxed), &kind.to_le_bytes());
         hash = fnv_chain(hash, &id.to_le_bytes());
         match op {
-            OP_UPLOAD => {
-                // [meta_len u32][n u32][len_i u32 x n][meta][array_0]...[array_n-1]
+            OP_UPLOAD | OP_UPLOAD_TYPED => {
+                // [meta_len u32][n u32][len_i u32 x n]([type_i u32 x n] typed)[meta][array_0]...[array_n-1]
+                let words_per = if op == OP_UPLOAD_TYPED { 2 } else { 1 };
                 let rd = |o: usize| body.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
                 let parsed = (|| {
                     let meta_len = rd(0)?;
                     let n = rd(4)?;
-                    let mut off = 8usize.checked_add(n.checked_mul(4)?)?;
+                    let mut off = 8usize.checked_add(n.checked_mul(4 * words_per)?)?;
                     let lens: Vec<usize> = (0..n).map(|i| rd(8 + i * 4)).collect::<Option<_>>()?;
                     let meta = body.get(off..off.checked_add(meta_len)?)?;
                     off += meta_len;
@@ -650,8 +723,13 @@ impl Consumer {
                     None => bad = true,
                 }
             }
-            OP_RELEASE => {}
+            OP_RELEASE | OP_PROGRAM | OP_FRAME => {}
             _ => bad = true,
+        }
+        if !bad {
+            if let Some(sink) = self.sink.as_mut() {
+                sink(op, kind, id, seq, body);
+            }
         }
         if bad {
             h.res_errors.fetch_add(1, Ordering::Relaxed);

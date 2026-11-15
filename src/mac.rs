@@ -331,8 +331,13 @@ enum Content {
 }
 
 impl Content {
-    fn build(dev: &Device, cfg: &Config) -> Result<(Content, Vec<Light>), String> {
+    /// `source`: frames from a host outside this process (Electron: src/host.rs); None = JavaScriptCore runs `cfg.script`
+    fn build(dev: &Device, cfg: &Config, source: Option<Box<dyn crate::host::FrameSource>>) -> Result<(Content, Vec<Light>), String> {
         Ok(match cfg.scene {
+            SceneKind::Three if source.is_some() => {
+                let src = std::fs::read_to_string("shaders/fastrender.metal").unwrap_or_else(|_| SHADER_SRC.to_string());
+                (Content::Three(Box::new(ThreeScene::with_source(dev, &src, source.unwrap())?)), Vec::new())
+            }
             SceneKind::Three => {
                 let src = std::fs::read_to_string("shaders/fastrender.metal").unwrap_or_else(|_| SHADER_SRC.to_string());
                 // width / height: the output size (FastRenderer defaults its size to it; render targets sized from getSize)
@@ -787,11 +792,25 @@ pub struct Renderer {
     prev_vp: Option<(Mat4, Vec3)>,
     /// discard MetalFX history on the next temporal encode (first frame, resize, scene switch, cut)
     history_reset: bool,
+    /// content fed by an outside host (Renderer::with_source): set_config never rebuilds it
+    external: bool,
 }
 
 impl Renderer {
     /// `in_flight`: 2 for an interactive window (latency), 3 for benchmarks (throughput)
     pub fn new(cfg: Config, in_flight: usize) -> Result<Self, String> {
+        Self::new_with(cfg, in_flight, None)
+    }
+
+    /// A three.js scene fed by a host outside this process (the Electron addon's render thread, src/host.rs).
+    /// `cfg.scene` is forced to Three; the content is never rebuilt by `set_config` (the host owns it).
+    pub fn with_source(mut cfg: Config, in_flight: usize, source: Box<dyn crate::host::FrameSource>) -> Result<Self, String> {
+        cfg.scene = SceneKind::Three;
+        Self::new_with(cfg, in_flight, Some(source))
+    }
+
+    fn new_with(cfg: Config, in_flight: usize, source: Option<Box<dyn crate::host::FrameSource>>) -> Result<Self, String> {
+        let external = source.is_some();
         let dev = device();
         let caps = caps(&dev);
         let cfg = Self::effective(cfg, caps)?;
@@ -799,7 +818,7 @@ impl Renderer {
         let src = std::fs::read_to_string(&shader_path).unwrap_or_else(|_| SHADER_SRC.to_string());
         let pipes = Pipelines::new(&dev, &src, caps)?;
         let queue = dev.newCommandQueue().ok_or("no command queue")?;
-        let (content, lights) = Content::build(&dev, &cfg)?;
+        let (content, lights) = Content::build(&dev, &cfg, source)?;
         let targets = Targets::new(&dev, &cfg, caps, (cfg.width as usize, cfg.height as usize), cfg.scale)?;
         let (cv, ci) = cube();
         let in_flight = in_flight.clamp(1, FRAME_SLOTS);
@@ -828,6 +847,7 @@ impl Renderer {
             jitter: glam::Vec2::ZERO,
             prev_vp: None,
             history_reset: true,
+            external,
             caps,
             cfg,
             dev,
@@ -910,8 +930,11 @@ impl Renderer {
         if content_changed || targets_changed {
             self.wait_idle();
         }
+        if content_changed && self.external {
+            return Err("this renderer's content belongs to its host: scene/props/script/programs cannot change".into());
+        }
         if content_changed {
-            let (content, lights) = Content::build(&self.dev, &cfg)?;
+            let (content, lights) = Content::build(&self.dev, &cfg, None)?;
             self.content = content;
             self.n_lights = lights.len();
             self.static_lights = lights;
@@ -941,6 +964,12 @@ impl Renderer {
     }
 
     pub fn frame_count(&self) -> u64 { self.frame }
+
+    /// Command buffers that completed with an error so far.
+    pub fn gpu_error_count(&self) -> usize { self.gpu_errors.load(std::sync::atomic::Ordering::Relaxed) }
+
+    /// The three.js scene, when that is the content (hosts read its error / program counters).
+    pub fn three(&self) -> Option<&ThreeScene> { match &self.content { Content::Three(s) => Some(s), _ => None } }
 
     /// This frame's sub-pixel jitter in pixels of the content rect (x right, y down), zero unless
     /// MetalFX temporal is active. Any path that builds its own projection (e.g. packing three.js's
