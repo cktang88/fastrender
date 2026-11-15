@@ -147,5 +147,19 @@ Ranked alternatives if this proves too costly:
 - **(a) Now:** cheap browser-side fixes in the existing games. They're independent of the native work and pay off immediately.
 - **(b) The real port:** the JSC + fastrender shim path, starting with voxel-castle-defense. Its Rust core is already native-ready.
 
+### Status (implemented in fastrender)
+
+- **The bridge exists**: `js/three-shim.js` (three.js-shaped API) → command stream in Rust memory → `src/jsc.rs`
+  (JavaScriptCore) → `Content::Script` in the Metal renderer. The shim covers Scene/Group/Mesh(BoxGeometry), materials as
+  colour only, PerspectiveCamera, PointLight, DirectionalLight, Fog/FogExp2, and Euler XYZ transforms with parenting.
+- **The voxel core runs natively**: voxel-castle-defense's `crates/voxel-core` is a git dependency; `--scene voxel`.
+- **Next pieces, in order, for porting voxel-castle-defense:**
+  1. Expose voxel chunks to scripts, so the game's TS asks the native core for chunks instead of uploading geometry.
+  2. Add arbitrary meshes (glTF / BufferGeometry upload by handle) and an InstancedMesh equivalent.
+  3. Sprites/billboards for the pixel-art characters.
+  4. Port the custom materials to MSL one at a time, checked with golden-image diffs.
+  5. UI: keep the DOM UI in a WKWebView overlay, or move to an immediate-mode UI.
+  6. Rapier native, through the same command/handle protocol.
+
 We are deliberately **not** cross-compiling three.js. The research says no such layer exists, and the closest things
 (WebGPURenderer on Dawn/Deno) don't reach the features that make the Air fast.

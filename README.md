@@ -5,7 +5,18 @@ fast on base Apple Silicon GPUs (MacBook Air M1–M5). Background is in [docs/RE
 the estimates and the review that challenged them are in [docs/FPS_ESTIMATES.md](docs/FPS_ESTIMATES.md).
 
 Rust + `objc2-metal` (no wgpu: wgpu hides tile memory and MetalFX), MSL shaders compiled at
-runtime (edit `shaders/fastrender.metal` while it runs and it hot-reloads).
+runtime (edit `shaders/fastrender.metal` while it runs and it hot-reloads). It uses the Metal 3 API
+today; Metal 4 command buffers and MetalFX temporal and frame interpolation are next.
+
+Three scenes (`--scene`):
+- `city` (default): procedural Manhattan grid of instanced boxes, GPU-culled into one indirect draw.
+- `voxel`: a 512×128×512 voxel island meshed natively by **voxel-castle-defense's own greedy mesher**
+  (`crates/voxel-core`, pulled in as a git dependency). Meshing runs in parallel with rayon, vertices are packed into 8 bytes,
+  and chunks are frustum-culled on the CPU.
+- `script`: a **JavaScript game** written against a three.js-shaped API (`js/three-shim.js`), running in
+  macOS's JavaScriptCore. Each frame the script writes GPU-ready instances, lights and the camera into Rust memory
+  shared as an `ArrayBuffer`, so JS and native cross only once per frame. Run
+  `cargo run --release -- run --script js/examples/boxes.js --props 20000`.
 
 ## Run it on your Mac
 
@@ -17,8 +28,14 @@ MTL_HUD_ENABLED=1 cargo run --release   # Apple's Metal performance HUD on top
 ```
 
 Window keys: `1` forward/deferred · `2` memoryless on/off · `3` MetalFX/bilinear · `-`/`=` render scale ·
-`4` cached/every-frame shadows · `5` GPU culling · `L`/`K` lights ×2 / ÷2 · `D` dynamic resolution ·
-`V` vsync · `Space` pause camera.
+`4` cached/every-frame shadows · `5` GPU culling · `6` city/voxel · `L`/`K` lights ×2 / ÷2 · `D` dynamic resolution ·
+`V` vsync · `Space` pause camera. Live fps, GPU ms, JS ms and draw count are shown in the title bar.
+
+```bash
+cargo run --release -- run --scene voxel             # the native voxel island
+cargo run --release -- voxel-mesh                    # native meshing benchmark (any OS)
+cargo run --release -- matrix --rounds 3             # A..L, interleaved rounds, median per row
+```
 
 Thermal throttling (fanless Air): `cargo run --release -- bench --frames 100000 --log-every 10`
 prints fps every 10 s.
@@ -62,5 +79,20 @@ paths are skipped there, and its timings mean nothing. **Real numbers have to co
 
 ## Linux
 
-`cargo test` runs the portable core: city generation, camera, frustum maths, stats, and the
-dynamic-resolution controller. `cargo check --target aarch64-apple-darwin` type-checks the Metal code.
+- `cargo test` runs the portable core: city and voxel generation, voxel meshing and packing, the script
+  command-stream decoder, frustum maths, stats and dynamic resolution.
+- `node js/test/shim.test.mjs` tests the JS shim's command stream.
+- `cargo check --target aarch64-apple-darwin` type-checks the Metal and JavaScriptCore code.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `src/mac.rs` | Renderer: `Pipelines`, `Content` (City / Voxel / Script), `Targets` (+ MetalFX), `FrameRes`, the passes, bench, selftest |
+| `src/app.rs` | window, CAMetalLayer, keys, dynamic resolution, title-bar stats |
+| `src/core.rs` | config, city, camera, frustum, stats, dynres, benchmark matrix |
+| `src/voxel.rs` | island generation, parallel meshing via `voxel-core`, 8-byte vertex packing |
+| `src/script.rs` / `src/jsc.rs` | command-stream decoder / JavaScriptCore host |
+| `shaders/fastrender.metal` | all shaders |
+| `js/three-shim.js` | three.js-shaped API that writes the command stream |
+| `patches/` | changes for the game repos (this session has read-only access to them) |

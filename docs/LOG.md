@@ -2,6 +2,31 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: review round 1 applied; native voxel meshing; JS bridge
+
+- **Review 1** (independent agent, full code read) found one critical and four high issues. All are fixed (see the commit
+  "Restructure renderer per review").
+  - **Critical:** with up to 64 lights, every street light sat 400–800 m from the camera, so the H/I/J light rows
+    measured lights nobody could see. A test now checks that 48 of 64 lights line the camera's avenue.
+  - **High:** the shadow pass drew all 150k instances; light volumes had no depth test; MetalFX was sized at
+    the full output size whatever the render scale; every resize rebuilt the whole renderer.
+- **Native meshing**, `voxel-mesh`: 512×128×512 island, 1024 chunks (424 non-empty), 1.47M vertices,
+  735k triangles, 20.6 MB of vertex and index data. voxel-castle-defense's own mesher, compiled natively.
+
+  | Machine | Threads | Total | Per chunk (wall) |
+  |---|---|---|---|
+  | Linux VM (Xeon) | 1 | 291 ms | 0.28 ms |
+  | Linux VM (Xeon) | 4 | 85 ms | 0.08 ms |
+  | CI macOS runner | 3 | 176 ms | 0.17 ms |
+
+  For reference, the game's docs quote 0.5 ms per chunk for the WASM mesher in workers. The native per-chunk speed is
+  similar; the gain comes from real threads with shared memory and no message passing. An Air's 4 performance + 4 efficiency
+  cores should land between the two VM rows (unmeasured).
+- **Voxel render on the CI Mac:** the selftest frame has real content, with 99 chunk draws after culling.
+- **JS bridge:** `node js/test/shim.test.mjs` passes. The command stream tiles exactly, box matrices are orthonormal
+  with the right half extents, and node takes about 1 ms per frame for 500 boxes including warm-up. JavaScriptCore numbers are
+  reported by `bench --script` (column "JS ms/frame").
+
 ## 2026-11-15: CI runner = paravirtual GPU; blank screenshots traced to shader validation
 
 - **Probe** (macos-15 and macos-26 runners):
