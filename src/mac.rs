@@ -1443,7 +1443,7 @@ impl Renderer {
     }
 }
 
-fn save_png(path: &str, w: usize, h: usize, px: &[u8]) -> Result<(), String> {
+pub fn save_png(path: &str, w: usize, h: usize, px: &[u8]) -> Result<(), String> {
     let f = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
     enc.set_color(png::ColorType::Rgba);

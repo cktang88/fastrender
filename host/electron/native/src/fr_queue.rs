@@ -14,7 +14,7 @@ use fastrender::host::{decode_frame, decode_program, decode_upload, frame_has_of
 use fastrender::three::Resource;
 use fastrender::xlat::Program;
 
-use crate::shm::{Consumer, OP_FRAME, OP_PROGRAM, OP_RELEASE, OP_UPLOAD_TYPED, Pump, Slot};
+use crate::shm::{Consumer, OP_FRAME, OP_PROGRAM, OP_RELEASE, OP_SHOT, OP_UPLOAD_TYPED, Pump, Slot};
 
 pub enum Item {
     /// the page reloaded or its process died: everything before belongs to the old page
@@ -22,6 +22,8 @@ pub enum Item {
     Resource(Resource),
     Program(u32, String, Program),
     Frame { words: Vec<u32>, seq: u64 },
+    /// save the next frame's output to this PNG path
+    Shot(String),
 }
 
 #[derive(Default)]
@@ -50,6 +52,8 @@ pub struct Batch {
     pub seq: u64,
     /// screen-only frames dropped in favour of this one
     pub skipped: u64,
+    /// save this frame's output (the drawable) as PNG here
+    pub shot: Option<String>,
 }
 
 impl Shared {
@@ -101,9 +105,10 @@ impl Shared {
                     }
                     Item::Resource(r) => b.resources.push(r),
                     Item::Program(id, key, p) => b.programs.push((id, key, p)),
+                    Item::Shot(path) => b.shot = Some(path),
                     Item::Frame { words, seq } => {
                         q.frames -= 1;
-                        if q.frames > 0 && !frame_has_offscreen_pass(&words) {
+                        if q.frames > 0 && b.shot.is_none() && !frame_has_offscreen_pass(&words) {
                             b.skipped += 1;
                             continue;
                         }
@@ -134,6 +139,7 @@ pub fn sink_into(shared: Arc<Shared>) -> crate::shm::Sink {
             Err(e) => shared.decode_error(e),
         },
         OP_FRAME => shared.push(Item::Frame { words: decode_frame(body), seq }),
+        OP_SHOT => shared.push(Item::Shot(String::from_utf8_lossy(body).into_owned())),
         _ => {} // the spike's untyped uploads: hashed only
     })
 }

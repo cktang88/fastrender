@@ -38,6 +38,8 @@ pub const OP_RELEASE: u32 = 1;
 pub const OP_PROGRAM: u32 = 2;
 pub const OP_UPLOAD_TYPED: u32 = 3;
 pub const OP_FRAME: u32 = 4;
+/// save the output of the next FRAME as a PNG (body: the path, UTF-8): the golden screenshot, exact pixels
+pub const OP_SHOT: u32 = 5;
 /// `Header::mode`: 0 = spike (frames through the mailbox, markers drawn), 1 = fastrender (frames through the ring,
 /// rendered by the fastrender library)
 pub const MODE_FASTRENDER: u32 = 1;
@@ -723,7 +725,7 @@ impl Consumer {
                     None => bad = true,
                 }
             }
-            OP_RELEASE | OP_PROGRAM | OP_FRAME => {}
+            OP_RELEASE | OP_PROGRAM | OP_FRAME | OP_SHOT => {}
             _ => bad = true,
         }
         if !bad {

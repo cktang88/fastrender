@@ -348,8 +348,11 @@ jobs:
             echo "electron three-city: $(cat electron-city-summary.txt)" >> "$GITHUB_STEP_SUMMARY"
           fi
           test -d ../3d-world-objects || { echo "no game checkout: world skipped"; exit 0; }
-          rc=0; (cd host/electron && npx electron game/main.js --kind world --html "$GITHUB_WORKSPACE/../3d-world-objects/index.html" --assets "$GITHUB_WORKSPACE/../3d-world-objects/public" --out "$GITHUB_WORKSPACE" --tag electron-world --timeout 900) > electron-world.log 2>&1 || rc=$?
-          grep -v "^\[page\] \[fr\] program" electron-world.log | tail -60 > electron-world-tail.txt; bash .github/annotate.sh notice "electron world-objects (exit $rc)" electron-world-tail.txt 60
+          # API validation logs instead of aborting here (MTL_DEBUG_LAYER_ERROR_MODE=nslog): the problems are listed below
+          rc=0; (cd host/electron && MTL_DEBUG_LAYER_ERROR_MODE=nslog npx electron game/main.js --kind world --html "$GITHUB_WORKSPACE/../3d-world-objects/index.html" --assets "$GITHUB_WORKSPACE/../3d-world-objects/public" --out "$GITHUB_WORKSPACE" --tag electron-world --timeout 900) > electron-world.log 2>&1 || rc=$?
+          grep -v "Security Policy\|Fetch API cannot\|ERR_BLOCKED\|failed assertion\|Validation" electron-world.log | tail -60 > electron-world-tail.txt; bash .github/annotate.sh notice "electron world-objects (exit $rc)" electron-world-tail.txt 60
+          grep -A3 "failed assertion\|Validation" electron-world.log | grep -v "Validation Enabled" | sort | uniq -c | sort -rn | head -30 > electron-world-validation.txt || true
+          test -s electron-world-validation.txt && bash .github/annotate.sh warning "electron world-objects: Metal API validation" electron-world-validation.txt 30
           if [ -f electron-world-golden.png ]; then
             node js/golden/diff.mjs js/golden/world-objects-ref.png electron-world-golden.png golden-diff-electron-world.png | tee electron-world-golden.json
             node -e "const r=require('./electron-world.json');console.log(JSON.stringify({golden:require('./electron-world-golden.json'),boot_s:r.boot_s,cost:r.cost,golden_frames_js_ms:r.golden_frames_js_ms,draws:r.draws,programs:r.programs,xlat:r.xlat,images:r.images,net:r.net,requests:r.requests,gpu_errors:r.stats&&r.stats.gpuErrors,unsupported:r.unsupported}))" > electron-world-summary.txt || true

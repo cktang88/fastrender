@@ -73,15 +73,33 @@ function createHost(native, opts = {}) {
   };
   const now = opts.now || (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
   const images = createImageReader(now);
+  let pending = false;
+  const send = (words) => {
+    const k = live();
+    host.lastSeq = opts.subarray ? native.present(k.slice(0, words === undefined ? k[1] : words)) : native.present(k, words);
+    return host.lastSeq;
+  };
   const host = {
     attach(cmd) {
       keep = cmd instanceof Uint32Array ? cmd : new Uint32Array(cmd);
       return native.attach(opts.handle || null, keep, opts.shmName || null, opts.stack || null);
     },
     present(words) {
-      const k = live();
-      host.lastSeq = opts.subarray ? native.present(k.slice(0, words === undefined ? k[1] : words)) : native.present(k, words);
-      return host.lastSeq;
+      if (opts.flush) { pending = true; return host.lastSeq; } // sent once per display frame by flush()
+      return send(words);
+    },
+    /**
+     * `opts.flush` (fastrender mode): one frame per display frame, as the JavaScriptCore host does. FastRenderer
+     * accumulates every render() of the frame (offscreen passes, then the screen) in the stream; flush() sends it and
+     * zeroes word 0, so the next render() starts a fresh stream. Passes written at load (PMREM) stay in the stream
+     * until the first flush, and run in the first frame. Called after each requestAnimationFrame callback (boot.mjs).
+     */
+    flush() {
+      if (!pending) return host.lastSeq;
+      pending = false;
+      const seq = send();
+      live()[0] = 0;
+      return seq;
     },
     upload(kind, id, meta, ...arrays) {
       const views = arrays.map((a) => {

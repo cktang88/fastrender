@@ -12,6 +12,7 @@ const arg = (k) => {
 };
 const isolated = arg('fr-isolated') !== '0';
 const shmName = arg('fr-shm');
+const shotPrefix = decodeURIComponent(arg('fr-shot'));
 let params = {};
 try { params = JSON.parse(decodeURIComponent(arg('fr-params') || '%7B%7D')); } catch { params = {}; }
 
@@ -22,6 +23,8 @@ const api = {
     upload: (kind, id, meta, arrays, types) => native.upload(kind, id, meta, arrays, types),
     release: (kind, id) => native.release(kind, id),
     program: (key, vs, fs, id) => native.program(key, vs, fs, id),
+    // the page names the shot, main chose the directory: <out>/<tag>-<name>.png
+    shot: (name) => native.shot(`${shotPrefix}-${String(name).replace(/[^\w-]/g, '')}.png`),
     stats: () => native.stats(),
   },
   ipc: {

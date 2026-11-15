@@ -70,5 +70,15 @@ console.log('host-wrapper ok:', JSON.stringify({ words: calls.present[0], draws:
   assert.equal(h.lastSeq, 42);
   assert.equal(h.program('k', 'v', 'f', 7), '{"id":7}');
   assert.equal(h.imagePixels({ width: 0 }), null);
+  // flush mode: presents of one display frame become one send, then word 0 is zeroed (a fresh stream next frame)
+  let sent = 0;
+  const hf = createHost({ ...fakeT, present: () => ++sent }, { flush: true });
+  const cmd = new Uint32Array(16); cmd[0] = 0x46524d33; cmd[1] = 2;
+  hf.attach(cmd);
+  hf.present(2); hf.present(2);
+  assert.equal(sent, 0);
+  assert.equal(hf.flush(), 1);
+  assert.equal(cmd[0], 0);
+  assert.equal(hf.flush(), 1, 'nothing pending: no send');
   console.log('host-wrapper typed mode ok');
 }

@@ -209,6 +209,14 @@ pub fn program(key: String, vertex: String, fragment: String, id: u32) -> Result
     }
 }
 
+/// Renderer process, fastrender mode: save the output of the NEXT presented frame to `path` (PNG, exact drawable
+/// pixels, written by the main process's render thread). Ordered like every ring message.
+#[napi]
+pub fn shot(path: String) -> Result<f64> {
+    let shm = lock().shm.clone().ok_or_else(|| err("shot() before attach()"))?;
+    Ok(shm.send_resource(shm::OP_SHOT, 0, 0, &[path.as_bytes()]).map_err(err)? as f64)
+}
+
 #[napi]
 pub fn release(kind: u32, id: u32) -> Result<f64> {
     let shm = lock().shm.clone().ok_or_else(|| err("release() before attach()"))?;

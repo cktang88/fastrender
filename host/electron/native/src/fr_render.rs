@@ -23,7 +23,7 @@ use fastrender::mac::Renderer;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
-use objc2_quartz_core::CAMetalLayer;
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::fr_queue::Shared;
 use crate::shm::Slot;
@@ -132,8 +132,24 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                 }
             }
             let tc = Instant::now();
-            rr.render(t0.elapsed().as_secs_f32(), || layer.nextDrawable());
+            let mut drawn = None;
+            rr.render(t0.elapsed().as_secs_f32(), || {
+                let d = layer.nextDrawable();
+                drawn = d.clone();
+                d
+            });
             let cpu = tc.elapsed();
+            if let Some(path) = &b.shot {
+                // the frame's exact output (no window compositing, no DOM): read back after the frame's GPU work
+                let r = match &drawn {
+                    Some(d) => rr.read_texture(&d.texture()).and_then(|(w, hh, px)| fastrender::mac::save_png(path, w, hh, &px)),
+                    None => Err("no drawable".into()),
+                };
+                match r {
+                    Ok(()) => println!("[fastrender] shot {path}"),
+                    Err(e) => eprintln!("[fastrender] shot {path}: {e}"),
+                }
+            }
             for ms in rr.take_gpu_times() {
                 h.gpu_us.fetch_add((ms * 1000.0) as u64, Ordering::Relaxed);
                 h.gpu_frames.fetch_add(1, Ordering::Relaxed);

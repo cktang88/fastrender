@@ -52,7 +52,8 @@ function finish(code, why) {
 }
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ktx2': 'image/ktx2', '.hdr': 'application/octet-stream', '.bin': 'application/octet-stream', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
-const CSP = "default-src 'self' blob: data:; script-src 'self' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; connect-src 'self' blob: data:; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'none'";
+// remote http(s) stays allowed by the CSP so the request reaches webRequest, which refuses it quietly (counted)
+const CSP = "default-src 'self' blob: data:; script-src 'self' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https:; media-src 'self' blob: data:; connect-src 'self' blob: data: https:; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'none'";
 
 function page() {
   const inject = '<link rel="stylesheet" href="/__fr/fr.css"><script src="/__fr/boot.js"></script><script src="/__fr/game.js"></script>';
@@ -94,17 +95,16 @@ ipcMain.on('capture', async (e, msg) => {
   try {
     await sleep(400); // the drawable reaches the screen
     const b = win.getContentBounds();
-    const raw = path.join(outDir, `${tag}-${msg.tag}-raw.png`);
-    const r = await run('screencapture', ['-x', '-R', `${b.x},${b.y},${b.width},${b.height}`, raw]);
-    let info = { ...msg, file: null };
-    if (!r.err && fs.existsSync(raw)) {
-      let img = nativeImage.createFromPath(raw);
-      const sz = img.getSize();
-      if (sz.width !== W || sz.height !== H) img = img.resize({ width: W, height: H, quality: 'best' });
-      const file = path.join(outDir, `${tag}-${msg.tag}.png`);
-      fs.writeFileSync(file, img.toPNG());
-      info = { ...msg, file, screen: `${sz.width}x${sz.height}` };
-    } else info.error = `screencapture: ${r.err && r.err.message} ${r.se || ''}`;
+    const scr = path.join(outDir, `${tag}-${msg.tag}-screen.png`);
+    const r = await run('screencapture', ['-x', '-R', `${b.x},${b.y},${b.width},${b.height}`, scr]);
+    const info = { ...msg, bounds: b };
+    if (!r.err && fs.existsSync(scr)) { const sz = nativeImage.createFromPath(scr).getSize(); info.screen = `${sz.width}x${sz.height} (the screen clips a window larger than it)`; }
+    else info.error = `screencapture: ${r.err && r.err.message} ${r.se || ''}`;
+    if (msg.tag === 'golden') { // written by the render thread (native.shot): exact drawable pixels
+      const g = path.join(outDir, `${tag}-golden.png`);
+      for (let i = 0; i < 100 && !fs.existsSync(g); i++) await sleep(100);
+      info.golden = fs.existsSync(g) ? nativeImage.createFromPath(g).getSize() : 'missing';
+    }
     const cap = await win.webContents.capturePage();
     fs.writeFileSync(path.join(outDir, `${tag}-${msg.tag}-capturePage.png`), cap.toPNG());
     (results.captures ||= []).push(info);
@@ -125,13 +125,14 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((wc, perm, cb) => cb(false));
   const shmName = `/fr-${process.pid}`;
   win = new BrowserWindow({
-    x: 0, y: 0, width: W, height: H, useContentSize: true,
+    // the CI runner's screen is 1024x768: the window keeps the game's size (innerWidth/Height, the drawable) anyway
+    x: 0, y: 0, width: W, height: H, useContentSize: true, enableLargerThanScreen: true,
     frame: false, transparent: true, backgroundColor: '#00000000', hasShadow: false, show: false, resizable: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false, contextIsolation: isolated, sandbox: false, backgroundThrottling: false,
       webSecurity: true, webviewTag: false, spellcheck: false,
-      additionalArguments: [`--fr-shm=${shmName}`, `--fr-isolated=${isolated ? 1 : 0}`, `--fr-kind=${kind}`, `--fr-cost-frames=${costFrames}`, `--fr-params=${encodeURIComponent(JSON.stringify(params))}`],
+      additionalArguments: [`--fr-shm=${shmName}`, `--fr-isolated=${isolated ? 1 : 0}`, `--fr-kind=${kind}`, `--fr-cost-frames=${costFrames}`, `--fr-shot=${encodeURIComponent(path.join(outDir, tag))}`, `--fr-params=${encodeURIComponent(JSON.stringify(params))}`],
     },
   });
   win.setAlwaysOnTop(true, 'floating');

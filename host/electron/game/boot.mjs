@@ -10,8 +10,10 @@
 //   city:  js/examples/three-city.entry.mjs (the JavaScriptCore bundle, unchanged): frame(1, dt) per frame (bench
 //          --time 1), capture after a few frames; then a cost run.
 //
-// Captures are screenshots of the window taken by the main process (the Metal layer is not in capturePage); the page
-// waits until the frame it captures was rendered (stats().lastFrameSeq >= the seq present() returned).
+// The golden image is the exact output of a frame: native.shot(name) before that frame's present makes the render
+// thread read its drawable back (<out>/<tag>-golden.png). The composited window (Metal + DOM) is a screencapture taken
+// by the main process (the Metal layer is not in capturePage): <tag>-<name>-screen.png. The page waits until the frame
+// was rendered (stats().lastFrameSeq >= the seq present() returned).
 import { createHost } from '../host.js';
 
 const G = globalThis;
@@ -24,11 +26,14 @@ const realRaf = requestAnimationFrame.bind(G);
 const log = (...a) => { console.log('[fr]', ...a); };
 
 const params = Object.assign({ width: innerWidth, height: innerHeight, programs: 'three' }, cfg.params || {});
-const host = createHost(native, { shmName: cfg.shmName, subarray: cfg.isolated, typed: true, now: realNow, params });
+const host = createHost(native, { shmName: cfg.shmName, subarray: cfg.isolated, typed: true, flush: true, now: realNow, params });
 host.now = realNow; // world-objects.drive.mjs: wall clock for measurements
 host.log = log;
 G.__fr = host;
 G.__frHost = host;
+// one frame per display frame (host.js flush): a game on the real rAF gets its frame sent after each callback.
+// (world-objects.drive.mjs replaces rAF with its virtual queue; the drivers below flush after each step.)
+G.requestAnimationFrame = (cb) => realRaf((t) => { try { cb(t); } finally { host.flush(); } });
 
 // fetch accounting (the golden waits for in-flight requests before its last frames)
 const net = { inflight: 0, done: 0, failed: 0 };
@@ -99,12 +104,13 @@ function summary(r) {
 
 async function runWorld() {
   const t0 = realNow();
-  const step = () => { G.__worldPin(); G.__worldStep(1 / 60); };
+  const step = () => { G.__worldPin(); G.__worldStep(1 / 60); host.flush(); };
   // boot: one virtual frame per display frame until the world has started (level built, programs translated)
   let boot = 0;
   for (; boot < 6000; boot++) {
     await raf();
     G.__worldStep(1 / 60);
+    host.flush();
     if (G.__worldPin && G.__worldPin()) break;
   }
   const bootMs = realNow() - t0;
@@ -113,14 +119,16 @@ async function runWorld() {
   for (let i = 0; i < 100 && net.inflight > 0; i++) await sleep(100);
   // the golden's 3 frames, each its own display frame; the capture shows the last
   const last = [];
-  for (let i = 0; i < 3; i++) { await raf(); const t = realNow(); step(); last.push(realNow() - t); }
+  for (let i = 0; i < 3; i++) {
+    await raf();
+    if (i === 2) native.shot('golden');
+    const t = realNow(); step(); last.push(realNow() - t);
+  }
   const r = G.__world && G.__world.renderer;
+  await capture('golden', { draws: r ? r.info.render.calls : 0 });
   hideUI(true);
   await raf(); await raf();
-  await capture('golden', { draws: r ? r.info.render.calls : 0 });
-  hideUI(false);
-  await raf(); await raf();
-  await capture('ui', {});
+  await capture('noui', {});
   // cost after the level streamed in: like the JavaScriptCore bench (frames 61-90), 30 frames after 30 more
   for (let i = 0; i < 30; i++) { await raf(); step(); }
   const cost = await measure(step, Number(cfg.costFrames) || 30);
@@ -130,10 +138,10 @@ async function runWorld() {
 async function runCity() {
   const t0 = realNow();
   if (typeof G.frame !== 'function') throw new Error('three-city bundle defines no frame(t, dt)');
-  for (let i = 0; i < 5; i++) { await raf(); G.frame(1, 1 / 60); }
+  for (let i = 0; i < 5; i++) { await raf(); if (i === 4) native.shot('golden'); G.frame(1, 1 / 60); host.flush(); }
   log(`city: 5 frames in ${((realNow() - t0) / 1000).toFixed(1)} s`);
   await capture('golden', {});
-  const cost = await measure(() => G.frame(1, 1 / 60), Number(cfg.costFrames) || 120);
+  const cost = await measure(() => { G.frame(1, 1 / 60); host.flush(); }, Number(cfg.costFrames) || 120);
   return { kind: 'city', cost, ...summary(null) };
 }
 
