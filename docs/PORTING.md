@@ -105,4 +105,47 @@ Ranked alternatives if this proves too costly:
 [naga vs SPIRV-Cross](https://gfx-rs.github.io/2021/05/09/dota2-msl-compilation.html) ·
 [three.js → Godot concepts](https://www.summerengine.com/make-great-games/threejs-game-to-a-game-engine)
 
-*Section D (native JS runtimes and WebGPU) gets more detail when the second research pass lands.*
+---
+
+## Running three.js code natively without a browser: second research pass
+
+1. **Nobody has documented three.js WebGPURenderer in a native window outside a browser** (Deno, Bun or Node) [U]. The pieces
+   exist, but the canvas/DOM glue would be ours to write.
+   - **Deno** has built-in WebGPU (wgpu → Metal) and native windows via `Deno.UnsafeWindowSurface` [V,
+     [docs](https://docs.deno.com/runtime/desktop/webgpu/)]. The API is unstable, and nobody has run three.js on it.
+   - **Node + Dawn** (`webgpu` npm) is aimed at headless/compute work, with no windowing [V].
+   - **Electrobun** (Bun + Dawn) is unverified.
+   - **react-native-wgpu** runs three.js WebGPURenderer, but on iOS/Android/Web only, not macOS [V].
+   - **headless-gl** is not for realtime use.
+   - **Tauri/WKWebView** gives no tuning knobs.
+2. **Native WebGPU does not fix three.js's CPU cost.** Recent reports show WebGPURenderer at about 2× the per-draw CPU cost of
+   WebGLRenderer, independent of backend ([r183](https://discourse.threejs.org/t/webgpurenderer-2x-slower-cpu-and-5-10x-slower-first-frame-than-webglrenderer-on-many-mesh-scenes-r183-same-on-both-backends/91904),
+   [5k cubes: ~140 vs ~350 fps](https://discourse.threejs.org/t/webgpu-performance-issue/87939)) [V]. Moving from WebGL to
+   WebGPURenderer can make these games *slower* before native helps. Leaving the browser only saves the GPU-process
+   IPC and the compositor hop [I].
+3. **Memoryless and MetalFX are reachable underneath, but not from unchanged three.js code.**
+   - Dawn `TextureUsage::TransientAttachment` → Metal memoryless (Apple2+) [V,
+     [doc](https://git.axiodl.com/encounter/dawn-cmake/src/branch/main/docs/dawn/features/transient_attachments.md)].
+   - wgpu `TextureUsages::TRANSIENT` (requires `StoreOp::Discard`) [V].
+   - Dawn `SharedTextureMemory` wraps IOSurface↔MTLTexture, so a native host *could* feed a WebGPU frame into MetalFX [V
+     for interop, U for anyone doing it]. three.js doesn't request transient usage, and EffectComposer is WebGL-only [I].
+4. **Chrome on Mac is worth testing as a quick check.** One report found WebGL much slower on ANGLE-Metal than on ANGLE-OpenGL
+   ([Babylon forum](https://forum.babylonjs.com/t/chrome-mac-extremely-slow/48492)) [V, anecdotal]. Try
+   `chrome://flags` → "Choose ANGLE graphics backend" = OpenGL vs Metal, and Safari.
+
+### Combined verdict
+
+| Path | Effort | Keeps three.js code? | Reaches memoryless / MetalFX | Expected gain |
+|---|---|---|---|---|
+| Tune in the browser (DPR, passes, shadows, compile hitches) + try Safari / ANGLE backend | low | yes | no | **largest per hour** (most of the current slowness is settings) |
+| Deno + three.js WebGPURenderer in a native window | medium, risky | mostly (EffectComposer → TSL port) | no | small (IPC/compositor only); WebGPURenderer may be slower |
+| Mystral Native (V8/JSC + Dawn) | medium | mostly (same TSL port) | no (unless we patch it) | small |
+| **JSC-hosted TS logic + fastrender Metal renderer behind a small three.js-shaped shim** | high | game logic yes, rendering no | **yes** | **highest ceiling** |
+| Bevy / Godot rewrite | high | no | Godot: MetalFX yes; Bevy no | high, engine lock-in |
+
+**Decision.** Two tracks:
+- **(a) Now:** cheap browser-side fixes in the existing games. They're independent of the native work and pay off immediately.
+- **(b) The real port:** the JSC + fastrender shim path, starting with voxel-castle-defense. Its Rust core is already native-ready.
+
+We are deliberately **not** cross-compiling three.js. The research says no such layer exists, and the closest things
+(WebGPURenderer on Dawn/Deno) don't reach the features that make the Air fast.
