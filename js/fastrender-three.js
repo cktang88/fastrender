@@ -99,7 +99,9 @@ export class FastRenderer {
     this.frustumCulling = opts.frustumCulling !== false;
     // opt-in: scene.updateMatrixWorld() that leaves subtrees alone in which nothing has moved for a while, and looks
     // at each of them again every `staticSubtrees` frames (true: 4). See updateWorldSettled. 0 / false: three's own walk.
-    this.staticSubtrees = opts.staticSubtrees === true ? 4 : opts.staticSubtrees | 0;
+    // (a host can switch it on for a game it runs unchanged: host.params.staticSubtrees)
+    const ss = opts.staticSubtrees ?? (this.host.params && this.host.params.staticSubtrees);
+    this.staticSubtrees = ss === true ? 4 : ss | 0;
     this._settle = { frame: 0, check: 8, frozen: 0, skipped: 0 };
     this.info.transforms = this._settle; // { frozen: subtrees left alone, skipped: of them not looked at this frame }
     this._rawInstances = true;      // (false: v3 instance matrices as 3x4 rows, the wire format before raw 4x4; for A/B runs)

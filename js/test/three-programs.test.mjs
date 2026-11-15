@@ -749,6 +749,8 @@ else {
   for (let i = 0; i < 120; i++) frame();
   rig.position.x = 9; frame();
   assert.equal(cam.matrixWorld.elements[12], 9, 'the subtree holding the render camera is updated every frame');
+  { const hp = makeHost(); hp.params = { staticSubtrees: true }; assert.equal(new FastRenderer({ host: hp, programs: 'three' }).staticSubtrees, 4, 'host.params.staticSubtrees'); }
+  assert.equal(new FastRenderer({ host: makeHost(), programs: 'three' }).staticSubtrees, 0, 'off by default');
   // switched off: three's walk
   r.staticSubtrees = 0;
   blocks[4].children[4].position.y = 90; frame();

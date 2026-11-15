@@ -175,7 +175,9 @@ geometry for static props are one object each.
 
 **What the renderer can do without the game's help: `staticSubtrees` (opt-in).** `new FastRenderer({ programs:
 'three', staticSubtrees: true })` (or `renderer.staticSubtrees = 4`) replaces three's walk by one that does not visit
-subtrees in which nothing has moved for a while (`updateWorldSettled` in js/fastrender-three.js). A subtree settles
+subtrees in which nothing has moved for a while (`updateWorldSettled` in js/fastrender-three.js). A host can switch it on
+for a game it runs unchanged with `host.params.staticSubtrees` (the hosts' params JSON: `fastrender jsbench --params`,
+the Electron host's `params`; the `bench --three` path builds its params in src/mac_three.rs). A subtree settles
 when a hash of its world matrices is the same on consecutive samples; a settled subtree gets three's own
 `updateMatrixWorld` again every N frames (N = the option's value, `true` = 4, staggered over the subtrees) and goes back
 to per-frame updates when its hash changed. The price, and the reason it is opt-in: **a transform changed inside a
