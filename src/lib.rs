@@ -17,12 +17,12 @@ pub mod host; // FrameSource (host -> renderer boundary) + the Electron wire cod
 #[cfg(target_os = "macos")]
 pub mod jsc;
 #[cfg(target_os = "macos")]
-pub mod mac_three;
+pub mod mac_three; // + its child modules: mac_targets.rs, mac_upload.rs, mac_shadow.rs, mac_bind.rs
 #[cfg(target_os = "macos")]
 pub mod dfg_lut;
 #[cfg(target_os = "macos")]
 pub mod mac_programs;
 #[cfg(target_os = "macos")]
-pub mod mac;
+pub mod mac; // + its child module mac_fx.rs (MetalFX, internal-resolution targets)
 #[cfg(target_os = "macos")]
 pub mod app;
