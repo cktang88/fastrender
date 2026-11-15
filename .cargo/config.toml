@@ -1,0 +1,4 @@
+# cc-rs: the C++ compiler for the macOS target. On a Mac this is `c++` itself; on Linux it lets
+# `DOCS_RS=1 cargo check --target aarch64-apple-darwin` get past the build script of `meshopt` (scripts/cross-cxx.sh).
+[env]
+CXX_aarch64_apple_darwin = { value = "scripts/cross-cxx.sh", relative = true }

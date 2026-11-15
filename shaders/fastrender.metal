@@ -41,6 +41,81 @@ kernel void cull(device const Instance* inst [[buffer(0)]],
     visible[slot] = id;
 }
 
+// ------------------------------------------------------------------ cluster LOD (docs/notes/clusters.md)
+
+// One kernel for every clustered draw of the frame: a thread is one cluster of one draw. It decides whether the
+// cluster is the level of detail to draw from that draw's camera and whether it can be seen, and if so appends its
+// triangles to the draw's region of the frame's index buffer. The CPU reference is src/clusters.rs
+// (cluster_selected / cluster_visible): keep the two equal.
+struct ClusterRec {          // src/clusters.rs ClusterRec, 96 bytes
+    float4 sphere;           // own bounds
+    float4 cone_apex;        // w: cutoff
+    float4 cone_axis;        // w: error of the group this cluster was simplified from
+    float4 self_sphere;      // bounds of that group
+    float4 parent_sphere;    // bounds of the group this cluster is in
+    float parent_error;      // error of that group's simplified replacement
+    uint index_offset;
+    uint index_count;
+    uint level;
+};
+struct ClusterDraw {         // src/clusters.rs DrawRec, 160 bytes
+    float4 planes[6];        // object space, normals unit length in world space
+    float4 cam;              // camera in object space
+    float4 lod;              // x: threshold units per unit of error at distance 1, y: nearest distance, z: radius scale
+    uint first_thread;
+    uint cluster_base;
+    uint cluster_count;
+    uint index_base;
+    uint out_base;
+    uint out_cap;
+    uint flags;              // 1 orthographic, 2 backface cone
+    uint pad;
+};
+struct ClusterParams { uint draws; uint threads; };
+
+static float lod_error(float4 sphere, float error, const device ClusterDraw& d) {
+    if (error <= 0.0) return 0.0;
+    float e = error * d.lod.x;
+    if (d.flags & 1u) return e;
+    return e / max(distance(sphere.xyz, d.cam.xyz) - sphere.w, d.lod.y);
+}
+
+kernel void cluster_cull(const device ClusterDraw* draws [[buffer(0)]],
+                         constant ClusterParams& cp [[buffer(1)]],
+                         const device ClusterRec* clusters [[buffer(2)]],
+                         const device uint* indices [[buffer(3)]],
+                         device uint* out [[buffer(4)]],
+                         device atomic_uint* args [[buffer(5)]],
+                         uint id [[thread_position_in_grid]]) {
+    if (id >= cp.threads) return;
+    // the draw whose thread range holds this thread: the last one that starts at or before it
+    uint lo = 0, hi = cp.draws;
+    while (hi - lo > 1) {
+        uint mid = (lo + hi) / 2;
+        if (draws[mid].first_thread <= id) lo = mid; else hi = mid;
+    }
+    const device ClusterDraw& d = draws[lo];
+    uint k = id - d.first_thread;
+    if (k >= d.cluster_count) return;
+    const device ClusterRec& c = clusters[d.cluster_base + k];
+    // the cut: this level is fine enough, the next coarser one is not
+    if (lod_error(c.self_sphere, c.cone_axis.w, d) > 1.0) return;
+    if (!(lod_error(c.parent_sphere, c.parent_error, d) > 1.0)) return;
+    float r = -c.sphere.w * d.lod.z;
+    for (int p = 0; p < 6; p++)
+        if (dot(d.planes[p].xyz, c.sphere.xyz) + d.planes[p].w < r) return;
+    if ((d.flags & 3u) == 2u && c.cone_apex.w < 1.0) {
+        float3 v = c.cone_apex.xyz - d.cam.xyz;
+        if (dot(v, c.cone_axis.xyz) >= c.cone_apex.w * length(v)) return;
+    }
+    uint n = c.index_count;
+    // args: 5 words per draw (MTLDrawIndexedPrimitivesIndirectArguments), word 0 = indexCount
+    uint at = atomic_fetch_add_explicit(&args[lo * 5], n, memory_order_relaxed);
+    if (at + n > d.out_cap) return; // cannot happen (no cut is larger than the finest level): never write past the region
+    uint src = d.index_base + c.index_offset, dst = d.out_base + at;
+    for (uint i = 0; i < n; i++) out[dst + i] = indices[src + i];
+}
+
 // ------------------------------------------------------------------ geometry
 
 struct VOut {

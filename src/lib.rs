@@ -12,6 +12,7 @@ pub mod script;
 pub mod three;
 pub mod xlat;
 pub mod xlat_half; // WP10: three's BRDF functions in 16-bit float (a SPIR-V pass; off by default)
+pub mod clusters; // cluster LOD for static meshes: DAG build (meshoptimizer), kernel records + CPU reference, arena ranges, worker pool (docs/notes/clusters.md)
 pub mod bindlist; // id tables, program / stream plans, bind lists, last-bound filter: the backend-neutral encoder data
 pub mod ring; // v3 per-slot ring layout + bounds-checked writes (src/mac_three.rs)
 pub mod image; // __fr.readFile / __fr.decodeImage for real web games (JavaScriptCore host)
