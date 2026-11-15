@@ -9,6 +9,7 @@ const PKG = process.env.THREE_PKG || 'three';
 export async function resolve(specifier, context, next) {
   if (specifier === 'three') return next(`${PKG}/src/Three.js`, context);
   if (specifier.startsWith('three/src/')) return next(PKG + specifier.slice(5), context);
+  if (specifier.startsWith('three/addons/')) return next(PKG + specifier.slice(5), context);
   return next(specifier, context);
 }
 if (isMainThread) register(import.meta.url, import.meta.url);

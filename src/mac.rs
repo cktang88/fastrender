@@ -335,7 +335,8 @@ impl Content {
         Ok(match cfg.scene {
             SceneKind::Three => {
                 let src = std::fs::read_to_string("shaders/fastrender.metal").unwrap_or_else(|_| SHADER_SRC.to_string());
-                let params = format!("{{\"boxes\": {}, \"lights\": {}, \"programs\": \"{}\"}}", cfg.props, cfg.lights, cfg.programs);
+                // width / height: the output size (FastRenderer defaults its size to it; render targets sized from getSize)
+                let params = format!("{{\"boxes\": {}, \"lights\": {}, \"programs\": \"{}\", \"width\": {}, \"height\": {}}}", cfg.props, cfg.lights, cfg.programs, cfg.width, cfg.height);
                 (Content::Three(Box::new(ThreeScene::new(dev, &src, &cfg.script, &params)?)), Vec::new())
             }
             SceneKind::Script => {
@@ -1101,7 +1102,9 @@ impl Renderer {
         // three.js's own programs (v3) render every shadow map of the frame themselves (directional, spot, point cube,
         // VSM blur), with three's depth programs where the native depth-only path would be wrong
         let three_v3 = matches!(&self.content, Content::Three(s) if s.view.v3);
-        if let Content::Three(s) = &self.content {
+        if let Content::Three(s) = &mut self.content {
+            // render-target passes first (PMREM, post-processing, ...: src/mac_targets.rs), then the main pass's shadows
+            s.encode_offscreen(&self.dev, &cb, slot);
             s.encode_shadows_v3(&cb, slot);
         }
         if shadow && !three_v3 {
@@ -1226,8 +1229,9 @@ impl Renderer {
         enc.setCullMode(MTLCullMode::Back);
         enc.setFrontFacingWinding(MTLWinding::CounterClockwise);
         enc.setDepthStencilState(Some(&self.pipes.depth_less));
-        if let Content::Three(s) = &self.content {
-            self.last_draws = s.encode_main(&enc, slot, &f.uniforms, &self.shadow_map, &self.pipes.depth_less, &self.pipes.depth_test_only);
+        if let Content::Three(s) = &mut self.content {
+            // several screen passes (a HUD over the scene, a post-processing output pass...): src/mac_targets.rs
+            self.last_draws = if s.multipass() { s.encode_screen(&self.dev, &enc, slot, (cw, ch)) } else { s.encode_main(&enc, slot, &f.uniforms, &self.shadow_map, &self.pipes.depth_less, &self.pipes.depth_test_only) };
             enc.endEncoding();
             return;
         }

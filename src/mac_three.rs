@@ -37,6 +37,9 @@ const MAX_LIGHTS: usize = 256;
 const OBJ_BYTES: usize = 64;
 // v3 ring buffer: layout, alignment and bounds-checked writes (portable, unit-tested)
 use crate::ring::{align, Bump, RingLayout, RingWriter, RING_ALIGN};
+// render targets and passes (src/mac_targets.rs): a child module, it works on ThreeScene's per-pass state
+#[path = "mac_targets.rs"]
+pub(crate) mod targets;
 
 /// `FrObject` (xlat::OBJECT_BLOCK): modelMatrix, modelViewMatrix, normalMatrix as 3 columns of float4. 176 bytes.
 #[repr(C)]
@@ -229,6 +232,8 @@ pub struct ThreeScene {
     pub prepare_ms: f64,
     pub encode_ms: std::cell::Cell<f64>,
     last_t: f32,
+    /// render targets and this frame's passes (src/mac_targets.rs)
+    targets: targets::Targets,
 }
 
 fn pipes(dev: &Device, src: &str) -> Result<Pipes, String> {
@@ -596,6 +601,7 @@ impl ThreeScene {
             prepare_ms: 0.0,
             encode_ms: std::cell::Cell::new(0.0),
             last_t: 0.0,
+            targets: targets::Targets::new(dev),
         })
     }
 
@@ -614,66 +620,11 @@ impl ThreeScene {
         let dt = (t - self.last_t).max(0.0);
         self.last_t = t;
         self.progs.ensure_lit_depth(dev, queue);
-        let (slots, uni, uni_tex, shadows, shadow_keep) = (&mut self.slots, &mut self.uni, &mut self.uni_tex, &mut self.shadows, &mut self.shadow_keep);
-        let (layout, layout_slot) = (&mut self.layout, &mut self.layout_slot);
-        let (shadow_ty, shadow_depth_textures, shadow_vsm, shadow_ids) = (&mut self.shadow_ty, &mut self.shadow_depth_textures, &mut self.shadow_vsm, &mut self.shadow_ids);
-        let result = self.host.frame(t as f64, dt as f64).and_then(|words| {
-            let f = three::decode(words)?;
-            if f.v3 {
-                // ring layout: uniform blocks, main FrFrame + FrPass, the shadow passes (FrFrame + FrPass per 2D map or cube
-                // face, a FrPass and two blocks per VSM blur), then FrObjects: one per draw for the main pass, one per draw
-                // for the shadow passes (identity view)
-                let blocks: usize = f.uniforms.map(|u| align(u.block.len() * 4)).sum();
-                let faces: usize = f.shadows.iter().map(|s| if s.kind & 0xFF == three::tex::POINT { 6 } else { 1 }).sum();
-                let l = RingLayout::new(blocks, faces, f.shadows.len(), VSM_BLOCK, f.draws.len(), std::mem::size_of::<FrObject>());
-                let s = &mut slots[slot_i];
-                if s.ring_cap < l.need {
-                    // the slot's previous frame has finished (its semaphore), so its buffer can be replaced
-                    s.ring_cap = RingLayout::capacity_for(l.need);
-                    s.ring = ring(dev, s.ring_cap);
-                }
-                let w = unsafe { RingWriter::new(s.ring.contents().as_ptr() as *mut u8, s.ring_cap) };
-                uni.clear();
-                uni_tex.clear();
-                let mut off = 0;
-                for u in f.uniforms {
-                    let bytes = unsafe { std::slice::from_raw_parts(u.block.as_ptr() as *const u8, u.block.len() * 4) };
-                    w.bytes(off, bytes);
-                    uni.insert(u.id, (off, uni_tex.len()));
-                    uni_tex.extend_from_slice(u.textures);
-                    off += align(u.block.len() * 4);
-                }
-                *layout = l;
-                *layout_slot = slot_i;
-                shadows.clear();
-                shadow_keep.clear();
-                for r in f.shadows {
-                    shadows.push(ShadowRec { kind: r.kind & 0xFF, ..*r });
-                    shadow_keep.push(r.kind & three::SHADOW_KEEP != 0);
-                }
-                let sp = f.shadow_pass.unwrap_or_default();
-                *shadow_ty = sp.ty;
-                *shadow_depth_textures = sp.depth_textures && f.shadow_pass.is_some();
-                shadow_vsm.clear();
-                shadow_vsm.extend_from_slice(sp.vsm);
-                shadow_ids.clear();
-                shadow_ids.extend_from_slice(f.shadow_draws);
-            }
-            self.view.view = Mat4::from_cols_array(&f.view);
-            self.view.proj = Mat4::from_cols_array(&f.proj);
-            self.view.cam_pos = Vec3::from(f.cam_pos);
-            self.view.background = f.background;
-            self.view.fog = f.fog;
-            self.view.tonemap = f.tonemap;
-            self.view.v3 = f.v3;
-            // v2: the game's shadow camera for mac.rs's shadow pass; v3 renders every map itself (prepare_shadows_v3)
-            self.view.shadow_vp = if f.v3 { None } else { f.shadow_vp.map(|m| three::gl_to_metal(&Mat4::from_cols_array(&m))) };
-            self.lights.clear();
-            self.lights.extend_from_slice(&f.lights[..f.lights.len().min(MAX_LIGHTS)]);
-            self.draws.clear();
-            self.draws.extend_from_slice(f.draws);
-            Ok(())
-        });
+        // the stream stays in the host's buffer until the next frame() (JS is not running): detach it from the borrow
+        let words = self.host.frame(t as f64, dt as f64).map(|w| unsafe { std::slice::from_raw_parts(w.as_ptr(), w.len()) });
+        // every pass of the frame, each with its own ring region (src/mac_targets.rs); the main screen pass ends up in
+        // this struct's fields, as the single pass of a frame without render targets always was
+        let result = words.and_then(|words| self.load_frame(dev, slot_i, words));
         // programs first (material uploads refer to them), then the other resources; both are applied even when
         // the frame failed: they describe resources, not the frame
         for (id, key, p) in self.host.take_programs() {
@@ -705,13 +656,16 @@ impl ThreeScene {
                         kind::TEXTURE => { self.texs.remove(&id); }
                         kind::INSTANCES => { self.insts.remove(&id); }
                         kind::MATERIAL => { self.mats3.remove(&id); }
+                        kind::RENDER_TARGET => self.targets.release(id),
                         _ => {}
                     }
                 }
                 Resource::Upload { kind: k, id, meta, arrays } => {
                     let ok = match k {
                         kind::GEOMETRY => self.upload_geometry(dev, id, &meta, &arrays),
+                        kind::TEXTURE if meta.contains("\"framebuffer\":true") => self.targets.framebuffer_texture(dev, id, &meta),
                         kind::TEXTURE => self.upload_texture(dev, queue, id, &meta, &arrays, &mut mip_cb),
+                        kind::RENDER_TARGET => self.targets.upload(dev, id, &meta),
                         kind::MATERIAL if meta.contains("\"program\":") => self.upload_program_material(dev, id, &meta),
                         kind::MATERIAL => self.upload_material(id, &meta),
                         kind::INSTANCES => self.upload_instances(dev, id, &meta, &arrays),
@@ -987,7 +941,7 @@ impl ThreeScene {
                 self.vsm_jobs.len(),
                 self.layout.need >> 10,
                 crate::ring::OVERFLOWS.load(std::sync::atomic::Ordering::Relaxed)
-            )
+            ) + &self.pass_stats().map_or(String::new(), |p| format!("; {p}"))
         })
     }
 
@@ -1005,6 +959,14 @@ impl ThreeScene {
     /// `projection`: v3's FrFrame projectionMatrix (three's, with this frame's MetalFX jitter applied).
     /// `viewport_h`: the main pass's render height (gl_FragCoord.y = height - Metal's y, FrPass).
     pub fn prepare(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], shadow_planes: &[Vec4; 6], cam: Vec3, projection: Mat4, viewport_h: f32) -> usize {
+        if self.view.v3 && self.targets.multi() {
+            return self.prepare_passes(dev, slot_i, planes, shadow_planes, cam, projection, viewport_h); // src/mac_targets.rs
+        }
+        self.prepare_one(dev, slot_i, planes, shadow_planes, cam, projection, viewport_h)
+    }
+
+    /// prepare() for the pass whose state is in this struct's fields (mac_targets.rs runs it for every pass).
+    fn prepare_one(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], shadow_planes: &[Vec4; 6], cam: Vec3, projection: Mat4, viewport_h: f32) -> usize {
         let t0 = std::time::Instant::now();
         self.visible.clear();
         self.casters.clear();
@@ -1091,7 +1053,8 @@ impl ThreeScene {
         if v3 {
             self.ensure_ring(dev, slot_i);
             self.prepare_v3(dev, slot_i, projection);
-            self.ring_writer(slot_i).put(self.layout.pass, [viewport_h, 1.0, 0.0, 0.0f32]);
+            // FrPass: gl_FragCoord.y = height - Metal's y; render targets store GL-oriented rows (flip 0, mac_targets.rs)
+            self.ring_writer(slot_i).put(self.layout.pass, [viewport_h, if self.targets.gl_rows { 0.0 } else { 1.0 }, 0.0, 0.0f32]);
             self.prepare_shadows_v3(dev, slot_i);
         }
         self.prepare_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -1141,7 +1104,7 @@ impl ThreeScene {
             let mat = &self.mats3[&d.material];
             let Some(&(block, tex)) = self.uni.get(&d.material) else { continue };
             let depth = mat.depth;
-            let pipe = self.instance_pipeline(dev, d.material, &d, Target::Main).unwrap_or(u32::MAX);
+            let pipe = self.instance_pipeline(dev, d.material, &d, self.targets.pipe_target).unwrap_or(u32::MAX);
             if pipe == u32::MAX {
                 continue;
             }
@@ -1574,7 +1537,8 @@ impl ThreeScene {
         if id == tex::DFG_LUT && t.kind == "2d" {
             return (&p.dfg, &p.linear_clamp);
         }
-        if let Some((tx, _, s)) = self.texs.get(&id) {
+        // a game texture, or a render target's attachment (mac_targets.rs)
+        if let Some((tx, s)) = self.texs.get(&id).map(|(t, _, s)| (t, s)).or_else(|| self.targets.texture(id)) {
             let ty = tx.textureType();
             let fits = match t.kind.as_str() {
                 "2d" => ty == MTLTextureType::Type2D,
@@ -1654,7 +1618,8 @@ impl ThreeScene {
             let m = &mat.meta;
             enc.setCullMode(if m.side == 2 && self.dbg & 256 == 0 { MTLCullMode::None } else { MTLCullMode::Back });
             let mirrored = Self::winding(d) == MTLWinding::Clockwise;
-            enc.setFrontFacingWinding(if (m.side == 1) != mirrored { MTLWinding::Clockwise } else { MTLWinding::CounterClockwise });
+            // a render-target pass's y-flipped projection mirrors winding too (mac_targets.rs)
+            enc.setFrontFacingWinding(if (m.side == 1) != (mirrored != self.targets.gl_rows) { MTLWinding::Clockwise } else { MTLWinding::CounterClockwise });
             let bias = m.polygon_offset.map_or((0.0, 0.0), |p| (p[0], p[1]));
             if bias != last_bias {
                 enc.setDepthBias_slopeScale_clamp(bias.1, bias.0, 0.0);

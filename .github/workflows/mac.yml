@@ -171,6 +171,47 @@ jobs:
       - name: golden parity MAE<1.5 (PCF, VSM, Basic)
         if: always()
         run: node -e "for(const f of ['golden-parity.json','golden-parity-vsm.json','golden-parity-basic.json']){const r=JSON.parse(require('fs').readFileSync(f,'utf8'));console.log(f,'MAE',r.mae);if(!(r.mae<1.5))process.exit(1)}"
+      # render targets and passes (src/mac_targets.rs, docs/PROTOCOL.md "Render targets and passes"): three's own
+      # PMREMGenerator (RoomEnvironment -> cube render target -> blur -> GGX-prefiltered mips) lighting PBR spheres, and
+      # EffectComposer (RenderPass -> UnrealBloomPass -> OutputPass), every pass three's JS + programs, natively
+      - name: render-target programs compile (PMREM, bloom, OutputPass; Apple metal compiler)
+        if: always()
+        run: |
+          (cd js && node --import ./test/three-alias.mjs test/render-targets.test.mjs ../rt-programs)
+          for d in ibl bloom; do
+            ./target/release/fastrender xlat-dump rt-programs/$d rt-xlat-$d || exit 1
+            for f in rt-xlat-$d/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /tmp/x.air || exit 1; done
+          done
+      - name: IBL + bloom scenes render (selftest, Metal API validation)
+        if: always()
+        env:
+          MTL_DEBUG_LAYER: "1"
+        run: |
+          node js/build.mjs js/examples/ibl-scene.entry.mjs js/dist/ibl.js
+          node js/build.mjs js/examples/ibl-bloom.entry.mjs js/dist/ibl-bloom.js
+          rc=0; ./target/release/fastrender selftest --three js/dist/ibl.js --upscale bilinear --scale 1 --size 640x400 > ibl-selftest.txt 2>&1 || rc=$?
+          bash .github/annotate.sh notice "IBL selftest (exit $rc)" ibl-selftest.txt 25
+          rc2=0; ./target/release/fastrender selftest --three js/dist/ibl-bloom.js --upscale bilinear --scale 1 --size 640x400 > ibl-bloom-selftest.txt 2>&1 || rc2=$?
+          bash .github/annotate.sh notice "IBL bloom selftest (exit $rc2)" ibl-bloom-selftest.txt 25
+          grep -q "three-programs selftest: PASS" ibl-selftest.txt
+          grep -q "three-programs selftest: PASS" ibl-bloom-selftest.txt
+      - name: golden IBL + bloom (render targets; MAE printed, not gating yet)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          test -s js/dist/ibl.js || node js/build.mjs js/examples/ibl-scene.entry.mjs js/dist/ibl.js
+          test -s js/dist/ibl-bloom.js || node js/build.mjs js/examples/ibl-bloom.entry.mjs js/dist/ibl-bloom.js
+          rc=0; ./target/release/fastrender bench --three js/dist/ibl.js --time 1 --scale 1 --upscale bilinear --size 960x600 --frames 3 --warmup 2 --shot golden-ibl-t1.png > golden-ibl-bench.txt 2>&1 || rc=$?
+          bash .github/annotate.sh notice "golden IBL bench (exit $rc)" golden-ibl-bench.txt 20
+          rc2=0; ./target/release/fastrender bench --three js/dist/ibl-bloom.js --time 1 --scale 1 --upscale bilinear --size 960x600 --frames 3 --warmup 2 --shot golden-ibl-bloom-t1.png > golden-ibl-bloom-bench.txt 2>&1 || rc2=$?
+          bash .github/annotate.sh notice "golden IBL bloom bench (exit $rc2)" golden-ibl-bloom-bench.txt 20
+          node js/golden/diff.mjs js/golden/ref-ibl-t1.png golden-ibl-t1.png golden-diff-ibl-t1.png | tee golden-ibl.json
+          node js/golden/diff.mjs js/golden/ref-ibl-bloom-t1.png golden-ibl-bloom-t1.png golden-diff-ibl-bloom-t1.png | tee golden-ibl-bloom.json
+          echo "golden IBL: $(cat golden-ibl.json), bloom: $(cat golden-ibl-bloom.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=golden IBL (PMREM)::$(cat golden-ibl.json)"
+          echo "::notice title=golden IBL bloom (EffectComposer)::$(cat golden-ibl-bloom.json)"
+          grep "three programs:" golden-ibl-bench.txt golden-ibl-bloom-bench.txt >> "$GITHUB_STEP_SUMMARY" || true
       - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
         run: |
           ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000 --rounds 1

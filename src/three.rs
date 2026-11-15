@@ -18,7 +18,13 @@ const OP_MATERIAL_UNIFORMS: u32 = 8;
 const OP_SHADOWS: u32 = 9;
 const OP_SHADOW_PASS: u32 = 10;
 const OP_SHADOW_DRAWS: u32 = 11;
+/// render targets (docs/PROTOCOL.md "Render targets and passes"): starts a pass; the ops after it belong to it
+pub const OP_PASS: u32 = 12;
+/// `copyFramebufferToTexture`, in stream order between passes
+pub const OP_COPY: u32 = 13;
 pub const SHADOW_WORDS: usize = 28;
+pub const PASS_WORDS: usize = 24;
+pub const COPY_WORDS: usize = 12;
 
 /// three's shadow map types (renderer.shadowMap.type)
 pub mod shadow_type {
@@ -62,6 +68,8 @@ pub mod kind {
     pub const TEXTURE: u32 = 2;
     pub const MATERIAL: u32 = 3;
     pub const INSTANCES: u32 = 4;
+    /// a WebGLRenderTarget / WebGLCubeRenderTarget / WebGL3DRenderTarget / WebGLArrayRenderTarget (meta only)
+    pub const RENDER_TARGET: u32 = 5;
 }
 
 pub mod flag {
@@ -132,6 +140,81 @@ pub struct ShadowRec {
     pub pos: [f32; 3],
     /// shadow camera view-projection, column-major, OpenGL clip space (point lights: face 0)
     pub vp: [f32; 16],
+}
+
+/// PASS flags.
+pub mod pass_flag {
+    pub const CLEAR_COLOR: u32 = 1;
+    pub const CLEAR_DEPTH: u32 = 2;
+    pub const CLEAR_STENCIL: u32 = 4;
+    /// the scissor rectangle applies (draws and clears)
+    pub const SCISSOR: u32 = 8;
+    /// after the pass: regenerate the colour attachments' mip chains (three's updateRenderTargetMipmap)
+    pub const GEN_MIPMAPS: u32 = 16;
+    /// a render() (camera, draws, ... follow); without it the pass only clears (renderer.clear())
+    pub const RENDER: u32 = 32;
+    /// not on the wire: the pass a stream without PASS ops implies (one screen pass cleared to BACKGROUND)
+    pub const IMPLICIT: u32 = 1 << 31;
+}
+
+/// One PASS record (24 words): where the ops that follow render.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PassHeader {
+    /// render target id (kind 5), 0 = the screen
+    pub target: u32,
+    /// active cube face (cube targets) or layer (array / 3D targets)
+    pub face: u32,
+    /// active mipmap level
+    pub level: u32,
+    pub flags: u32,
+    /// x, y, width, height in target pixels, GL convention (y from the bottom); the screen: drawing-buffer pixels
+    pub viewport: [f32; 4],
+    pub scissor: [f32; 4],
+    /// already in the target's colour space and premultiplied, as three hands it to gl.clearColor
+    pub clear_color: [f32; 4],
+    /// the screen's drawing-buffer size (getDrawingBufferSize) the screen viewport is relative to
+    pub screen: [f32; 2],
+    pub reserved: [u32; 6],
+}
+
+impl PassHeader {
+    /// the single screen pass of a stream without PASS ops: cleared to its BACKGROUND colour
+    pub fn implicit() -> Self {
+        PassHeader {
+            flags: pass_flag::IMPLICIT | pass_flag::RENDER | pass_flag::CLEAR_COLOR | pass_flag::CLEAR_DEPTH | pass_flag::CLEAR_STENCIL,
+            viewport: [0.0, 0.0, 1.0, 1.0],
+            screen: [1.0, 1.0],
+            ..Default::default()
+        }
+    }
+    pub fn renders(&self) -> bool { self.flags & pass_flag::RENDER != 0 }
+    pub fn clears(&self) -> u32 { self.flags & (pass_flag::CLEAR_COLOR | pass_flag::CLEAR_DEPTH | pass_flag::CLEAR_STENCIL) }
+}
+
+/// One COPY record (12 words): `copyFramebufferToTexture(texture, position, level)` from the target bound then.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CopyRec {
+    /// destination texture id (a FramebufferTexture upload) and its mip level
+    pub texture: u32,
+    pub level: u32,
+    /// destination x, y (texels)
+    pub dst: [u32; 2],
+    /// source: render target id (0 = screen), face, level
+    pub src_target: u32,
+    pub src_face: u32,
+    pub src_level: u32,
+    /// source x, y, width, height (GL convention, y from the bottom)
+    pub src: [u32; 4],
+    pub reserved: u32,
+}
+
+/// One step of a frame, in stream order.
+#[derive(Debug)]
+pub enum Step<'a> {
+    Pass(PassHeader, Frame<'a>),
+    Copy(CopyRec),
 }
 
 /// One material instance's packed uniform block and texture ids for this frame (MATERIAL_UNIFORMS).
@@ -227,7 +310,7 @@ fn view<T>(words: &[u32], count: usize, stride: usize) -> Result<&[T], String> {
     Ok(unsafe { std::slice::from_raw_parts(words.as_ptr() as *const T, count) })
 }
 
-pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
+fn header(words: &[u32]) -> Result<(bool, usize), String> {
     if words.len() < 2 || (words[0] != MAGIC && words[0] != MAGIC3) {
         return Err("bad magic: renderer.render() was not called this frame".into());
     }
@@ -235,11 +318,60 @@ pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
     if end > words.len() {
         return Err(format!("stream length {end} exceeds buffer {}", words.len()));
     }
-    let f = |w: u32| f32::from_bits(w);
-    let mut out = Frame { v3: words[0] == MAGIC3, ..Frame::default() };
-    let mut w = 2;
+    Ok((words[0] == MAGIC3, end))
+}
+
+/// A single-pass view of the stream: the LAST pass that renders (for a stream without PASS ops, the whole stream).
+/// Kept for callers that draw one pass; `decode_passes` gives every pass.
+pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
+    let v3 = header(words)?.0;
+    let last = decode_passes(words)?.into_iter().rev().find_map(|s| match s {
+        Step::Pass(h, f) if h.renders() => Some(f),
+        _ => None,
+    });
+    Ok(last.unwrap_or(Frame { v3, ..Frame::default() }))
+}
+
+/// Every step of the frame in stream order (docs/PROTOCOL.md "Render targets and passes"). Ops before the first PASS
+/// form the implicit screen pass of older streams (`PassHeader::implicit`, cleared to BACKGROUND).
+pub fn decode_passes(words: &[u32]) -> Result<Vec<Step<'_>>, String> {
+    let (v3, end) = header(words)?;
+    let mut steps = Vec::new();
+    let mut lead = Frame { v3, ..Frame::default() };
+    let mut w = decode_ops(words, 2, end, &mut lead)?;
+    if w > 2 {
+        steps.push(Step::Pass(PassHeader::implicit(), lead));
+    }
     while w + 1 < end {
         let (op, n) = (words[w], words[w + 1] as usize);
+        let p = words.get(w + 2..w + 2 + n).filter(|_| w + 2 + n <= end).ok_or_else(|| format!("op {op} at {w} runs past the end"))?;
+        if op == OP_COPY {
+            if n < COPY_WORDS {
+                return Err(format!("copy: {n} words, need {COPY_WORDS}"));
+            }
+            steps.push(Step::Copy(view::<CopyRec>(p, 1, COPY_WORDS)?[0]));
+            w += 2 + n;
+            continue;
+        }
+        if n < PASS_WORDS {
+            return Err(format!("pass: {n} words, need {PASS_WORDS}"));
+        }
+        let h = view::<PassHeader>(p, 1, PASS_WORDS)?[0];
+        let mut fr = Frame { v3, ..Frame::default() };
+        w = decode_ops(words, w + 2 + n, end, &mut fr)?;
+        steps.push(Step::Pass(h, fr));
+    }
+    Ok(steps)
+}
+
+/// The ops of one pass, from `w` up to the next PASS / COPY or `end`, into `out`; returns where it stopped.
+fn decode_ops<'a>(words: &'a [u32], mut w: usize, end: usize, out: &mut Frame<'a>) -> Result<usize, String> {
+    let f = |w: u32| f32::from_bits(w);
+    while w + 1 < end {
+        let (op, n) = (words[w], words[w + 1] as usize);
+        if op == OP_PASS || op == OP_COPY {
+            break;
+        }
         let p = words.get(w + 2..w + 2 + n).filter(|_| w + 2 + n <= end).ok_or_else(|| format!("op {op} at {w} runs past the end"))?;
         match op {
             OP_CAMERA if n >= 35 => {
@@ -299,7 +431,7 @@ pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
         }
         w += 2 + n;
     }
-    Ok(out)
+    Ok(w)
 }
 
 /// OpenGL clip space (z in [-w, w]) to Metal (z in [0, w]): z' = 0.5 z + 0.5 w.
@@ -367,6 +499,9 @@ pub struct TextureMeta {
     pub compressed: bool,
     #[serde(default = "one_usize")]
     pub levels: usize,
+    /// a FramebufferTexture (copyFramebufferToTexture destination): no pixels, allocated natively
+    #[serde(default)]
+    pub framebuffer: bool,
 }
 
 fn one_usize() -> usize { 1 }
@@ -442,7 +577,7 @@ fn one_u() -> u32 { 1 }
 
 impl Default for TextureMeta {
     fn default() -> Self {
-        TextureMeta { width: 1, height: 1, srgb: false, repeat: [1.0, 1.0], offset: [0.0, 0.0], flip_y: false, mipmaps: false, mag_filter: 1006, min_filter: 1006, wrap: clamp2(), anisotropy: 1, format: 1023, ty: 1009, flip_rows: false, depth: 1, dim: 0, compressed: false, levels: 1 }
+        TextureMeta { width: 1, height: 1, srgb: false, repeat: [1.0, 1.0], offset: [0.0, 0.0], flip_y: false, mipmaps: false, mag_filter: 1006, min_filter: 1006, wrap: clamp2(), anisotropy: 1, format: 1023, ty: 1009, flip_rows: false, depth: 1, dim: 0, compressed: false, levels: 1, framebuffer: false }
     }
 }
 
@@ -595,6 +730,136 @@ pub struct InstancesMeta {
     pub count: usize,
 }
 
+/// RENDER_TARGET (kind 5) meta: a three render target; its textures keep their own texture ids, so a material
+/// sampling `rt.texture` / `rt.depthTexture` binds the native attachment.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderTargetMeta {
+    pub width: usize,
+    pub height: usize,
+    /// layers (WebGLArrayRenderTarget) or depth (WebGL3DRenderTarget); 1 otherwise
+    #[serde(default = "one_usize")]
+    pub depth: usize,
+    /// WebGLCubeRenderTarget: 6 faces
+    #[serde(default)]
+    pub cube: bool,
+    /// 2 array, 3 3D (as TEXTURE `dim`), 0 2D / cube
+    #[serde(default)]
+    pub dim: u32,
+    /// MSAA samples three asked for (0: none)
+    #[serde(default)]
+    pub samples: u32,
+    #[serde(default = "yes")]
+    pub depth_buffer: bool,
+    #[serde(default)]
+    pub stencil_buffer: bool,
+    /// one per colour attachment (MRT: several), in `rt.textures` order
+    pub colors: Vec<TargetTextureMeta>,
+    /// `rt.depthTexture` (a sampleable depth attachment), if any
+    #[serde(default)]
+    pub depth_texture: Option<TargetTextureMeta>,
+}
+
+/// A texture of a render target: its id, three's format / type / colour space, mip levels, sampler state.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetTextureMeta {
+    pub id: u32,
+    #[serde(default = "rgba_format")]
+    pub format: u32,
+    #[serde(default = "ubyte_type", rename = "type")]
+    pub ty: u32,
+    #[serde(default)]
+    pub srgb: bool,
+    /// mip levels to allocate (three: `texture.mipmaps.length` (PMREM), or the full chain when generateMipmaps
+    /// with a mipmap min filter)
+    #[serde(default = "one_usize")]
+    pub levels: usize,
+    #[serde(default = "linear")]
+    pub mag_filter: u32,
+    #[serde(default = "linear")]
+    pub min_filter: u32,
+    #[serde(default = "clamp2")]
+    pub wrap: [u32; 2],
+    #[serde(default = "one_u")]
+    pub anisotropy: u32,
+    /// depth textures: three's compareFunction (null: a plain depth sample)
+    #[serde(default)]
+    pub compare: Option<u32>,
+}
+
+impl TargetTextureMeta {
+    /// the sampler state, as a TextureMeta (same constants)
+    pub fn sampler_meta(&self) -> TextureMeta {
+        TextureMeta { mag_filter: self.mag_filter, min_filter: self.min_filter, wrap: self.wrap, anisotropy: self.anisotropy, mipmaps: self.levels > 1, ..TextureMeta::default() }
+    }
+}
+
+/// Colour formats a render target attachment can have natively (portable names; mac_targets.rs maps them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TargetFormat {
+    Rgba8,
+    Rgba8Srgb,
+    Rgba16F,
+    Rgba32F,
+    Rg8,
+    Rg16F,
+    Rg32F,
+    R8,
+    R16F,
+    R32F,
+}
+
+impl TargetFormat {
+    /// three's (format, type, colour space) of a colour attachment; None for what WebGL2 can't render either
+    /// (or we don't map yet: integer formats)
+    pub fn of(format: u32, ty: u32, srgb: bool) -> Option<Self> {
+        use TargetFormat::*;
+        // UnsignedByte 1009, Float 1015, HalfFloat 1016; RGBA 1023, RG 1030, Red 1028
+        Some(match (format, ty) {
+            (1023, 1009) => if srgb { Rgba8Srgb } else { Rgba8 },
+            (1023, 1016) => Rgba16F,
+            (1023, 1015) => Rgba32F,
+            (1030, 1009) => Rg8,
+            (1030, 1016) => Rg16F,
+            (1030, 1015) => Rg32F,
+            (1028, 1009) => R8,
+            (1028, 1016) => R16F,
+            (1028, 1015) => R32F,
+            _ => return None,
+        })
+    }
+    /// 4-bit code in a pipeline's target key (0 = no attachment)
+    pub fn code(self) -> u32 { self as u32 + 1 }
+    pub fn from_code(c: u32) -> Option<Self> {
+        use TargetFormat::*;
+        [Rgba8, Rgba8Srgb, Rgba16F, Rgba32F, Rg8, Rg16F, Rg32F, R8, R16F, R32F].get((c as usize).checked_sub(1)?).copied()
+    }
+    pub fn bytes_per_pixel(self) -> usize {
+        use TargetFormat::*;
+        match self {
+            Rgba8 | Rgba8Srgb | Rg16F | R32F => 4,
+            Rgba16F | Rg32F => 8,
+            Rgba32F => 16,
+            Rg8 | R16F => 2,
+            R8 => 1,
+        }
+    }
+}
+
+/// A pipeline's attachment set for a render target pass, packed: 4 bits of `TargetFormat::code` per colour attachment
+/// (up to 4), bit 16 depth, bit 17 stencil.
+pub fn target_key(colors: &[Option<TargetFormat>], depth: bool, stencil: bool) -> u32 {
+    let mut k = 0;
+    for (i, c) in colors.iter().take(4).enumerate() {
+        k |= c.map_or(0, |c| c.code()) << (4 * i);
+    }
+    k | (depth as u32) << 16 | (stencil as u32) << 17
+}
+
+/// Full mip chain length for a w x h texture.
+pub fn mip_levels(w: usize, h: usize) -> usize { (usize::BITS - w.max(h).max(1).leading_zeros()) as usize }
+
 fn one() -> f32 { 1.0 }
 fn one2() -> [f32; 2] { [1.0, 1.0] }
 fn yes() -> bool { true }
@@ -704,6 +969,83 @@ mod tests {
         assert_eq!((g.attributes[1].name.as_str(), g.attributes[1].item_size, g.attributes[1].per_instance), ("aSize", 2, true));
         let t: TextureMeta = serde_json::from_str(r#"{"width":16,"height":16,"format":1030,"type":1016,"flipRows":true}"#).unwrap();
         assert_eq!((t.texel(), t.flip_rows), (Some((2, 2)), true));
+    }
+
+    fn pass(target: u32, face: u32, level: u32, flags: u32, vp: [f32; 4]) -> Vec<u32> {
+        let mut s = vec![OP_PASS, PASS_WORDS as u32, target, face, level, flags];
+        s.extend(vp.iter().map(|v| fw(*v)));
+        s.extend([fw(0.0); 4]); // scissor
+        s.extend([fw(0.25), fw(0.5), fw(0.75), fw(1.0)]); // clear colour
+        s.extend([fw(640.0), fw(400.0)]);
+        s.extend([0; 6]);
+        s
+    }
+
+    #[test]
+    fn decodes_passes() {
+        // two passes into a cube target's face 3, mip 2, then a copy, then the screen
+        let mut s = vec![MAGIC3, 0];
+        s.extend(pass(9, 3, 2, pass_flag::RENDER | pass_flag::CLEAR_COLOR | pass_flag::GEN_MIPMAPS, [0.0, 0.0, 64.0, 64.0]));
+        s.extend([OP_DRAWS, 1 + 20, 1, 7, 9, 0, 0, 0, 36, 1, 0]);
+        s.extend((0..12).map(|i| fw(i as f32)));
+        s.extend(pass(9, 0, 0, pass_flag::CLEAR_DEPTH, [0.0, 0.0, 64.0, 64.0])); // renderer.clear(): no ops
+        s.extend([OP_COPY, COPY_WORDS as u32, 33, 0, 4, 5, 9, 0, 0, 0, 0, 16, 16, 0]);
+        s.extend(pass(0, 0, 0, pass_flag::RENDER | pass_flag::CLEAR_COLOR | pass_flag::CLEAR_DEPTH, [0.0, 0.0, 640.0, 400.0]));
+        s.extend([OP_BACKGROUND, 4, fw(0.1), fw(0.2), fw(0.3), fw(1.0)]);
+        s.extend([OP_DRAWS, 1, 0]);
+        s[1] = s.len() as u32;
+        let steps = decode_passes(&s).unwrap();
+        assert_eq!(steps.len(), 4);
+        match &steps[0] {
+            Step::Pass(h, f) => {
+                assert_eq!((h.target, h.face, h.level, h.viewport[2]), (9, 3, 2, 64.0));
+                assert!(h.renders() && h.flags & pass_flag::GEN_MIPMAPS != 0);
+                assert_eq!(h.clear_color, [0.25, 0.5, 0.75, 1.0]);
+                assert_eq!(f.draws.len(), 1);
+                assert!(f.v3);
+            }
+            _ => panic!("pass"),
+        }
+        match &steps[1] {
+            Step::Pass(h, f) => assert!(!h.renders() && h.clears() == pass_flag::CLEAR_DEPTH && f.draws.is_empty()),
+            _ => panic!("clear pass"),
+        }
+        match &steps[2] {
+            Step::Copy(c) => assert_eq!((c.texture, c.dst, c.src_target, c.src), (33, [4, 5], 9, [0, 0, 16, 16])),
+            _ => panic!("copy"),
+        }
+        // the single-pass view is the last pass that renders: the screen
+        let f = decode(&s).unwrap();
+        assert_eq!((f.background[2], f.draws.len()), (0.3, 0));
+        assert_eq!(std::mem::size_of::<PassHeader>(), PASS_WORDS * 4);
+        assert_eq!(std::mem::size_of::<CopyRec>(), COPY_WORDS * 4);
+        // a stream without PASS ops is one implicit screen pass
+        let old = [MAGIC3, 8, OP_BACKGROUND, 4, fw(0.1), fw(0.2), fw(0.3), fw(1.0)];
+        let steps = decode_passes(&old).unwrap();
+        assert!(matches!(&steps[..], [Step::Pass(h, f)] if h.flags & pass_flag::IMPLICIT != 0 && h.target == 0 && f.background[0] == 0.1));
+        // a truncated PASS is refused
+        let mut bad = vec![MAGIC3, 0, OP_PASS, 3, 0, 0, 0];
+        bad[1] = bad.len() as u32;
+        assert!(decode_passes(&bad).is_err());
+    }
+
+    #[test]
+    fn render_target_meta() {
+        let m: RenderTargetMeta = serde_json::from_str(r#"{"width":256,"height":256,"cube":true,"depthBuffer":false,"colors":[{"id":12,"format":1023,"type":1016,"srgb":false,"levels":6,"minFilter":1008}],"depthTexture":null}"#).unwrap();
+        assert!(m.cube && !m.depth_buffer && m.depth_texture.is_none());
+        assert_eq!((m.colors[0].id, m.colors[0].levels), (12, 6));
+        assert_eq!(TargetFormat::of(m.colors[0].format, m.colors[0].ty, m.colors[0].srgb), Some(TargetFormat::Rgba16F));
+        assert!(m.colors[0].sampler_meta().min_filter_mips());
+        assert_eq!(TargetFormat::of(1023, 1009, true), Some(TargetFormat::Rgba8Srgb));
+        assert_eq!(TargetFormat::of(1026, 1014, false), None); // DepthFormat is not a colour attachment
+        for f in [TargetFormat::Rgba8, TargetFormat::R32F, TargetFormat::Rg16F] {
+            assert_eq!(TargetFormat::from_code(f.code()), Some(f));
+        }
+        let k = target_key(&[Some(TargetFormat::Rgba16F), Some(TargetFormat::R8)], true, false);
+        assert_eq!((k & 15, (k >> 4) & 15, k >> 16), (TargetFormat::Rgba16F.code(), TargetFormat::R8.code(), 1));
+        assert_eq!((mip_levels(256, 256), mip_levels(1, 1), mip_levels(300, 20)), (9, 1, 9));
+        let t: TextureMeta = serde_json::from_str(r#"{"width":64,"height":32,"framebuffer":true}"#).unwrap();
+        assert!(t.framebuffer);
     }
 
     #[test]

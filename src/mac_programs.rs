@@ -68,6 +68,8 @@ pub enum Target {
     Depth,
     /// a VSM blur pass: RG16Float colour, no depth
     Rg16,
+    /// a render target (src/mac_targets.rs): its attachment formats as `three::target_key` packs them
+    Rt(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -327,7 +329,7 @@ impl Programs {
     /// build is cached too, so it is attempted once).
     pub fn pipeline(&mut self, dev: &Device, m: &ProgramMaterialMeta, sig: StreamSig, target: Target) -> Option<u32> {
         let key = match target {
-            Target::Main => PipeKey { prog: m.program, blend: three::blend_of(m), color_write: m.color_write, sig, target },
+            Target::Main | Target::Rt(_) => PipeKey { prog: m.program, blend: three::blend_of(m), color_write: m.color_write, sig, target },
             // WebGLShadowMap: NoBlending; the colour attachment is not there (Depth) or always written (Rg16)
             _ => PipeKey { prog: m.program, blend: None, color_write: true, sig, target },
         };
@@ -468,19 +470,31 @@ fn build_pipeline(dev: &Device, p: &Prog, key: &PipeKey) -> Result<RenderPipelin
         a.setPixelFormat(MTLPixelFormat::RG16Float);
         return dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string());
     }
-    a.setPixelFormat(OUT_FORMAT);
-    if !key.color_write {
-        a.setWriteMask(MTLColorWriteMask::empty());
+    // the main pass, or a render target's attachments (MRT: the same state on every colour attachment, as WebGL)
+    let (colors, depth) = match key.target {
+        Target::Rt(k) => crate::mac_three::targets::key_formats(k),
+        _ => (vec![OUT_FORMAT], MTLPixelFormat::Depth32Float),
+    };
+    for (i, f) in colors.iter().enumerate() {
+        let a = unsafe { d.colorAttachments().objectAtIndexedSubscript(i) };
+        a.setPixelFormat(*f);
+        if !key.color_write {
+            a.setWriteMask(MTLColorWriteMask::empty());
+        }
+        if let Some([sr, dr, sa, da, er, ea]) = key.blend {
+            a.setBlendingEnabled(true);
+            a.setSourceRGBBlendFactor(blend_factor(sr));
+            a.setDestinationRGBBlendFactor(blend_factor(dr));
+            a.setSourceAlphaBlendFactor(blend_factor(sa));
+            a.setDestinationAlphaBlendFactor(blend_factor(da));
+            a.setRgbBlendOperation(blend_op(er));
+            a.setAlphaBlendOperation(blend_op(ea));
+        }
     }
-    if let Some([sr, dr, sa, da, er, ea]) = key.blend {
-        a.setBlendingEnabled(true);
-        a.setSourceRGBBlendFactor(blend_factor(sr));
-        a.setDestinationRGBBlendFactor(blend_factor(dr));
-        a.setSourceAlphaBlendFactor(blend_factor(sa));
-        a.setDestinationAlphaBlendFactor(blend_factor(da));
-        a.setRgbBlendOperation(blend_op(er));
-        a.setAlphaBlendOperation(blend_op(ea));
+    let _ = a;
+    d.setDepthAttachmentPixelFormat(depth);
+    if depth == MTLPixelFormat::Depth32Float_Stencil8 {
+        d.setStencilAttachmentPixelFormat(depth);
     }
-    d.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
     dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string())
 }

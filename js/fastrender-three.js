@@ -21,12 +21,17 @@
 // (js/three-programs.js, docs/PROTOCOL.md).
 
 import { ThreePrograms, TEX, shadowDraw, writeShadows, writeShadowDraws, textureDim, uploadCompressedTexture } from './three-programs.js';
+import { Color } from 'three/src/math/Color.js';
 
 export const PROTOCOL = 2;
 const MAGIC = 0x46524d32; // 'FRM2'
 const MAGIC3 = 0x46524d33; // 'FRM3': programs: 'three'
-export const OP = { CAMERA: 1, LIGHTS: 2, FOG: 3, BACKGROUND: 4, DRAWS: 5, TONEMAP: 6, SHADOW: 7, MATERIAL_UNIFORMS: 8, SHADOWS: 9 };
-export const KIND = { GEOMETRY: 1, TEXTURE: 2, MATERIAL: 3, INSTANCES: 4 };
+export const OP = { CAMERA: 1, LIGHTS: 2, FOG: 3, BACKGROUND: 4, DRAWS: 5, TONEMAP: 6, SHADOW: 7, MATERIAL_UNIFORMS: 8, SHADOWS: 9, PASS: 12, COPY: 13 };
+export const KIND = { GEOMETRY: 1, TEXTURE: 2, MATERIAL: 3, INSTANCES: 4, RENDER_TARGET: 5 };
+/** PASS flags (docs/PROTOCOL.md "Render targets and passes") */
+export const PASS_FLAG = { CLEAR_COLOR: 1, CLEAR_DEPTH: 2, CLEAR_STENCIL: 4, SCISSOR: 8, GEN_MIPMAPS: 16, RENDER: 32 };
+export const PASS_WORDS = 24;
+export const COPY_WORDS = 12;
 export { TEX };
 // draw flags
 export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256 };
@@ -91,21 +96,59 @@ export class FastRenderer {
       });
       this._textureId = (t) => this._texture(t);
     }
+    this._initTargets();
+    // the host's output size (native owns resolution): what getSize / getDrawingBufferSize report until setSize
+    const hp = this.host.params;
+    if (hp && hp.width > 0 && hp.height > 0) this.setSize(hp.width, hp.height);
   }
 
   // ------------------------------------------------------------------ WebGLRenderer surface (no-ops / stubs)
   setPixelRatio(r) { this._pixelRatio = r; } // native owns resolution (render scale + MetalFX)
   getPixelRatio() { return this._pixelRatio; }
-  setSize(w, h) { this._size = { w, h }; }
+  setSize(w, h) { this._size = { w, h }; this._viewport[0] = 0; this._viewport[1] = 0; this._viewport[2] = w; this._viewport[3] = h; }
   getSize(target) { return target ? target.set(this._size.w, this._size.h) : { x: this._size.w, y: this._size.h }; }
-  getDrawingBufferSize(target) { return this.getSize(target); }
-  setClearColor(c, a = 1) { this._clearColor = [c.r ?? 0, c.g ?? 0, c.b ?? 0]; this._clearAlpha = a; }
-  getClearColor(t) { return t ? t.setRGB(...this._clearColor) : null; }
-  getClearAlpha() { return this._clearAlpha; }
+  getDrawingBufferSize(target) {
+    const r = this._pixelRatio;
+    return target ? target.set(Math.floor(this._size.w * r), Math.floor(this._size.h * r)) : { x: Math.floor(this._size.w * r), y: Math.floor(this._size.h * r) };
+  }
   setAnimationLoop(cb) { this._loop = cb; if (this.host.setAnimationLoop) this.host.setAnimationLoop(cb); }
-  setRenderTarget(rt) { if (rt) this._unsupported('render targets (post-processing)'); }
-  getRenderTarget() { return null; }
-  clear() {} clearDepth() {} clearColor() {}
+  // render targets, viewport / scissor, clears: see "render targets and passes" below
+  setClearColor(c, a = 1) { this._clearColorC.set(c); this._clearColor[0] = this._clearColorC.r; this._clearColor[1] = this._clearColorC.g; this._clearColor[2] = this._clearColorC.b; this._clearAlpha = a; }
+  getClearColor(t) { return t ? t.copy(this._clearColorC) : this._clearColorC.clone(); }
+  getClearAlpha() { return this._clearAlpha; }
+  setClearAlpha(a) { this._clearAlpha = a; }
+  setRenderTarget(rt, activeCubeFace = 0, activeMipmapLevel = 0) {
+    this._rt = rt || null; this._face = activeCubeFace | 0; this._level = activeMipmapLevel | 0;
+    if (this._rt && this._tp) this._renderTarget(this._rt);
+    else if (this._rt) this._unsupported('render targets (programs: native)');
+  }
+  getRenderTarget() { return this._rt; }
+  getActiveCubeFace() { return this._face; }
+  getActiveMipmapLevel() { return this._level; }
+  initRenderTarget(rt) { if (this._tp) this._renderTarget(rt); }
+  setViewport(x, y, w, h) { const v = this._viewport; if (x.isVector4) { v[0] = x.x; v[1] = x.y; v[2] = x.z; v[3] = x.w; } else { v[0] = x; v[1] = y; v[2] = w; v[3] = h; } }
+  getViewport(t) { const v = this._viewport; return t.set(v[0], v[1], v[2], v[3]); }
+  getCurrentViewport(t) {
+    if (this._rt) return t.copy(this._rt.viewport);
+    const v = this._viewport, r = this._pixelRatio;
+    return t.set(Math.floor(v[0] * r), Math.floor(v[1] * r), Math.floor(v[2] * r), Math.floor(v[3] * r));
+  }
+  setScissor(x, y, w, h) { const v = this._scissor; if (x.isVector4) { v[0] = x.x; v[1] = x.y; v[2] = x.z; v[3] = x.w; } else { v[0] = x; v[1] = y; v[2] = w; v[3] = h; } }
+  getScissor(t) { const v = this._scissor; return t.set(v[0], v[1], v[2], v[3]); }
+  setScissorTest(b) { this._scissorTest = !!b; }
+  getScissorTest() { return this._scissorTest; }
+  /** WebGLRenderer.clear: a pass that only clears (v3); the native side folds it into the next pass's load action */
+  clear(color = true, depth = true, stencil = true) {
+    if (!this._tp) return;
+    const flags = (color ? PASS_FLAG.CLEAR_COLOR : 0) | (depth ? PASS_FLAG.CLEAR_DEPTH : 0) | (stencil ? PASS_FLAG.CLEAR_STENCIL : 0);
+    if (!flags) return;
+    this._clearRGBA(this._clearColorC, this._clearAlpha);
+    const w = this._beginPass(flags);
+    this._commit(w, false);
+  }
+  clearColor() { this.clear(true, false, false); }
+  clearDepth() { this.clear(false, true, false); }
+  clearStencil() { this.clear(false, false, true); }
   /**
    * WebGLRenderer.compile: with three's own programs (v3), get every program the scene needs translated (and compiled
    * natively) now, at load, instead of on the frame an object first appears. Returns the materials, as three does.
@@ -218,6 +261,7 @@ export class FastRenderer {
   /** texture -> id (0 = none); pixels via DataTexture data, or the host's image decoder */
   _texture(t) {
     if (!t) return 0;
+    if (t.isRenderTargetTexture || t.isDepthTexture || t.isFramebufferTexture) return this._targetTexture(t);
     const id = this._id(t);
     if (this._versions.get(id) === t.version) return id;
     if (t.isCompressedTexture && this._tp) return this._uploaded(id, t, uploadCompressedTexture(this, t, id)); // ASTC/BC/ETC mip chains (KTX2Loader)
@@ -323,15 +367,217 @@ export class FastRenderer {
     return id;
   }
 
+  // ------------------------------------------------------------------ render targets and passes (protocol v3)
+  // docs/PROTOCOL.md "Render targets and passes". Every render() and clear() is a PASS in the stream: target (0 = the
+  // screen), face / mip level, viewport, scissor, clear. Render targets are resources (kind 5) whose textures keep
+  // texture ids, so materials sampling rt.texture bind the native attachment. Passes accumulate over a frame: the host
+  // zeroes word 0 before each frame (JavaScriptCore), which starts a fresh stream; passes written before the first
+  // frame (PMREM at load) are kept for it. A host that never zeroes gets one frame per render() to the screen.
+
+  _initTargets() {
+    this.autoClearColor = true; this.autoClearDepth = true; this.autoClearStencil = true;
+    this.coordinateSystem = 2000; // WebGLCoordinateSystem (CubeCamera, PMREMGenerator)
+    this.xr = { enabled: false, isPresenting: false, cameraAutoUpdate: false, getEnvironmentBlendMode: () => undefined, getCamera: () => null, hasDepthSensing: () => false, addEventListener() {}, removeEventListener() {} };
+    this._rt = null; this._face = 0; this._level = 0;
+    this._viewport = [0, 0, 1, 1]; this._scissor = [0, 0, 1, 1]; this._scissorTest = false;
+    this._clearColorC = new Color(0, 0, 0);
+    this._clearRGB = new Color(); this._clearOut = [0, 0, 0, 1];
+    this._rtRec = new WeakMap();      // render target -> { id, sig }
+    this._texTarget = new WeakMap();  // render-target texture -> its render target (r170 textures have no .renderTarget)
+    this._fbTex = new WeakMap();      // FramebufferTexture -> uploaded size
+    this._renderDepth = 0; this._nestedRenders = 0; this._passNested = 0; this._aborted = false;
+    // stream state: where the next pass goes, whether the host has zeroed word 0 (it marks frames), offscreen passes
+    // written before the first frame
+    this._streamEnd = 2; this._hostFrames = false; this._lastScreen = false; this._bootEnd = 2;
+    if (this._tp) { this.u32[0] = MAGIC3; this.u32[1] = 2; } // an empty stream: a zero in word 0 is then the host's
+  }
+
+  /** where the next pass starts: a fresh stream at a frame boundary, else after the passes already in this frame */
+  _streamStart() {
+    const u = this.u32;
+    let w = this._streamEnd;
+    if (u[0] !== MAGIC3) {
+      // the host zeroed word 0: a new frame. The first time, keep what was written before it (offscreen passes at load)
+      w = this._hostFrames ? 2 : this._bootEnd;
+      this._hostFrames = true;
+    } else if (!this._hostFrames && this._lastScreen) w = 2; // a host that never zeroes: one frame per screen render
+    if (w > (u.length >> 1)) { this._unsupported('stream overflow (offscreen passes dropped)'); w = 2; }
+    return w;
+  }
+
+  /** commit the stream after a pass ending at w */
+  _commit(w, rendered) {
+    const u = this.u32;
+    u[0] = MAGIC3; u[1] = w;
+    this._streamEnd = w;
+    this._lastScreen = rendered && this._rt === null;
+    if (!this._hostFrames && this._rt !== null) this._bootEnd = w;
+  }
+
+  /** the clear colour as three hands it to gl.clearColor: in the target's colour space, premultiplied (into _clearOut) */
+  _clearRGBA(c, a) {
+    const rt = this._rt;
+    const space = rt === null ? this.outputColorSpace : rt.isXRRenderTarget === true ? rt.texture.colorSpace : 'srgb-linear';
+    const o = this._clearOut;
+    if (c.getRGB) { c.getRGB(this._clearRGB, space); o[0] = this._clearRGB.r; o[1] = this._clearRGB.g; o[2] = this._clearRGB.b; }
+    else { o[0] = c.r; o[1] = c.g; o[2] = c.b; }
+    o[0] *= a; o[1] *= a; o[2] *= a; o[3] = a; // premultipliedAlpha (WebGLRenderer's default)
+  }
+
+  /** PASS op at the stream's next position for the current target; returns the word after it */
+  _beginPass(flags) {
+    const u = this.u32, f = this.f32, rt = this._rt;
+    let w = this._streamStart();
+    let target = 0, vx, vy, vw, vh, sx, sy, sw, sh, scissor;
+    if (rt !== null) {
+      target = this._renderTarget(rt);
+      const v = rt.viewport, s = rt.scissor;
+      vx = v.x; vy = v.y; vw = v.z; vh = v.w; sx = s.x; sy = s.y; sw = s.z; sh = s.w; scissor = rt.scissorTest;
+      if ((flags & PASS_FLAG.RENDER) && this._level === 0 && targetNeedsMipmaps(rt)) flags |= PASS_FLAG.GEN_MIPMAPS;
+    } else {
+      const v = this._viewport, s = this._scissor, r = this._pixelRatio;
+      vx = Math.floor(v[0] * r); vy = Math.floor(v[1] * r); vw = Math.floor(v[2] * r); vh = Math.floor(v[3] * r);
+      sx = Math.floor(s[0] * r); sy = Math.floor(s[1] * r); sw = Math.floor(s[2] * r); sh = Math.floor(s[3] * r);
+      scissor = this._scissorTest;
+    }
+    if (scissor) flags |= PASS_FLAG.SCISSOR;
+    if (w + PASS_WORDS + 2 > u.length) throw new Error('fastrender-three: command buffer too small for another pass');
+    u[w++] = OP.PASS; u[w++] = PASS_WORDS;
+    u[w++] = target; u[w++] = this._face; u[w++] = this._level; u[w++] = flags;
+    f[w++] = vx; f[w++] = vy; f[w++] = vw; f[w++] = vh;
+    f[w++] = sx; f[w++] = sy; f[w++] = sw; f[w++] = sh;
+    const c = this._clearOut;
+    f[w++] = c[0]; f[w++] = c[1]; f[w++] = c[2]; f[w++] = c[3];
+    f[w++] = Math.floor(this._size.w * this._pixelRatio); f[w++] = Math.floor(this._size.h * this._pixelRatio);
+    for (let i = 0; i < 6; i++) u[w++] = 0;
+    return w;
+  }
+
+  /** render target -> id; (re)uploads its description when its size, attachments or formats change */
+  _renderTarget(rt) {
+    let rec = this._rtRec.get(rt);
+    if (rec === undefined) rec = this._newTarget(rt);
+    const texs = rt.textures || [rt.texture];
+    if (targetChanged(rec.sig, rt, texs)) this._uploadTarget(rt, rec, texs);
+    return rec.id;
+  }
+
+  // (kept out of _renderTarget: a function that creates a closure allocates its context on every call)
+  _newTarget(rt) {
+    const rec = { id: this._nextId++, sig: [] };
+    this._rtRec.set(rt, rec);
+    rt.addEventListener('dispose', () => {
+      if (this.host.release) this.host.release(KIND.RENDER_TARGET, rec.id);
+      this._rtRec.delete(rt);
+    });
+    return rec;
+  }
+
+  _uploadTarget(rt, rec, texs) {
+    const meta = {
+      width: rt.width, height: rt.height, depth: rt.depth || 1, cube: !!rt.isWebGLCubeRenderTarget,
+      dim: rt.isWebGL3DRenderTarget ? 3 : rt.isWebGLArrayRenderTarget ? 2 : 0, samples: rt.samples | 0,
+      depthBuffer: rt.depthBuffer !== false, stencilBuffer: !!rt.stencilBuffer,
+      colors: texs.map((t) => this._targetTextureMeta(t, rt)),
+      depthTexture: rt.depthTexture ? this._targetTextureMeta(rt.depthTexture, rt) : null,
+    };
+    if (meta.samples > 0) this._unsupported('MSAA render target (rendered without samples)');
+    this.host.upload(KIND.RENDER_TARGET, rec.id, meta);
+  }
+
+  _targetTextureMeta(t, rt) {
+    this._texTarget.set(t, rt);
+    const levels = t.mipmaps && t.mipmaps.length > 0 ? t.mipmaps.length
+      : t.generateMipmaps && isMipmapFilter(t.minFilter) ? Math.floor(Math.log2(Math.max(rt.width, rt.height, 1))) + 1 : 1;
+    return {
+      id: this._id(t), format: t.format, type: t.type, srgb: t.colorSpace === 'srgb', levels,
+      magFilter: t.magFilter, minFilter: t.minFilter, wrap: [t.wrapS, t.wrapT], anisotropy: t.anisotropy || 1,
+      compare: t.compareFunction ?? null,
+    };
+  }
+
+  /** a render target's texture (colour or depth) or a FramebufferTexture -> id */
+  _targetTexture(t) {
+    if (!this._tp) { this._unsupported('render target texture (programs: native)'); return 0; }
+    if (t.isFramebufferTexture) {
+      const id = this._id(t), img = t.image;
+      if (this._fbTex.get(t) !== img.width * 65536 + img.height) {
+        this._fbTex.set(t, img.width * 65536 + img.height);
+        this.host.upload(KIND.TEXTURE, id, { width: img.width, height: img.height, framebuffer: true, format: t.format, type: t.type, srgb: t.colorSpace === 'srgb', magFilter: t.magFilter, minFilter: t.minFilter, wrap: [t.wrapS, t.wrapT], mipmaps: false });
+      }
+      return id;
+    }
+    const rt = t.renderTarget || this._texTarget.get(t);
+    if (!rt) { this._unsupported(t.isDepthTexture ? 'depth texture outside a render target' : 'render target texture never bound'); return 0; }
+    this._renderTarget(rt);
+    return this._id(t);
+  }
+
+  /** WebGLRenderer.copyFramebufferToTexture: copies from the bound target (COPY op, in stream order) */
+  copyFramebufferToTexture(texture, position = null, level = 0) {
+    if (!this._tp) { this._unsupported('copyFramebufferToTexture'); return; }
+    if (this._rt === null) this._unsupported('copyFramebufferToTexture from the screen');
+    const id = this._targetTexture(texture);
+    const s = Math.pow(2, -level), wd = Math.floor(texture.image.width * s), ht = Math.floor(texture.image.height * s);
+    const u = this.u32;
+    let w = this._streamStart();
+    u[w++] = OP.COPY; u[w++] = COPY_WORDS;
+    u[w++] = id; u[w++] = level; u[w++] = 0; u[w++] = 0;
+    u[w++] = this._rt ? this._renderTarget(this._rt) : 0; u[w++] = this._face; u[w++] = this._level;
+    u[w++] = position ? position.x : 0; u[w++] = position ? position.y : 0; u[w++] = wd; u[w++] = ht; u[w++] = 0;
+    this._commit(w, false);
+  }
+
+  /**
+   * readRenderTargetPixels: the native side renders asynchronously, so this hands back what the host has: a host
+   * with `readRenderTarget(id, x, y, w, h, buffer, face, textureIndex)` fills `buffer` from the last completed frame
+   * (one frame late); without it the buffer is left as is and the call is counted (docs/PROTOCOL.md).
+   */
+  readRenderTargetPixels(rt, x, y, width, height, buffer, activeCubeFaceIndex = 0, textureIndex = 0) {
+    if (this._tp && this.host.readRenderTarget) { this.host.readRenderTarget(this._renderTarget(rt), x, y, width, height, buffer, activeCubeFaceIndex | 0, textureIndex | 0); return; }
+    this._unsupported('readRenderTargetPixels');
+  }
+  readRenderTargetPixelsAsync(rt, x, y, width, height, buffer, activeCubeFaceIndex, textureIndex) {
+    this.readRenderTargetPixels(rt, x, y, width, height, buffer, activeCubeFaceIndex, textureIndex);
+    return Promise.resolve(buffer);
+  }
+
   // ------------------------------------------------------------------ frame
 
   render(scene, camera) {
+    if (!this._tp) { this._render(scene, camera); return; }
+    // v3: render() may run inside render(): three converts an equirect / cube env map to PMREM (more render() calls)
+    // while picking a program. The inner passes go into the stream where this pass began; this pass stops writing
+    // at once and is rendered again after them (its programs are cached by then).
+    const nested0 = this._nestedRenders, outerPass = this._passNested;
+    this._renderDepth++;
+    try { this._render(scene, camera); } finally { this._renderDepth--; this._passNested = outerPass; }
+    if (this._renderDepth > 0) { this._nestedRenders++; return; }
+    for (let k = 0; k < 2 && this._nestedRenders !== nested0; k++) {
+      const n = this._nestedRenders;
+      this._renderDepth++;
+      try { this._render(scene, camera); } finally { this._renderDepth--; }
+      if (this._nestedRenders === n) break;
+    }
+  }
+
+  _render(scene, camera) {
     // three's hooks, in WebGLRenderer's order: scene.onBeforeRender, then per draw object/material.onBeforeRender
-    if (scene.onBeforeRender) scene.onBeforeRender(this, scene, camera, null);
+    if (scene.onBeforeRender) scene.onBeforeRender(this, scene, camera, this._rt);
     if (scene.matrixWorldAutoUpdate !== false) scene.updateMatrixWorld();
     if (camera.parent === null && camera.matrixWorldAutoUpdate !== false) camera.updateMatrixWorld();
     const u = this.u32, f = this.f32;
+    const tp0 = this._tp;
+    const nested0 = this._nestedRenders;
     let w = 2;
+    if (tp0) {
+      // the pass: target, viewport, scissor and the clear WebGLBackground.render would do (a colour background forces
+      // it; otherwise autoClear), with three's clear colour conversion
+      const bgc = scene.isScene === true && scene.background && scene.background.isColor ? scene.background : null;
+      if (bgc) this._clearRGBA(bgc, 1); else this._clearRGBA(this._clearColorC, this._clearAlpha);
+      const flags = this.autoClear || bgc ? (this.autoClearColor ? PASS_FLAG.CLEAR_COLOR : 0) | (this.autoClearDepth ? PASS_FLAG.CLEAR_DEPTH : 0) | (this.autoClearStencil ? PASS_FLAG.CLEAR_STENCIL : 0) : 0;
+      w = this._beginPass(PASS_FLAG.RENDER | flags);
+    }
     // camera: three's own view and projection (OpenGL clip space; native remaps z to [0,1])
     u[w++] = OP.CAMERA; u[w++] = 36;
     f.set(camera.matrixWorldInverse.elements, w); w += 16;
@@ -369,7 +615,9 @@ export class FastRenderer {
     // order-independent; DRAWS comes before the ops that depend on what the draws used (MATERIAL_UNIFORMS).
     u[w++] = OP.DRAWS; const drawsAt = w++; const countAt = w++;
     this._w = w; this._tris = 0; this._nDraws = 0;
-    for (let i = 0; i < meshes.length; i++) this._collect(meshes[i]);
+    this._passNested = nested0; this._aborted = false;
+    for (let i = 0; i < meshes.length && !this._aborted; i++) this._collect(meshes[i]);
+    if (this._aborted) { this._aborted = false; return; } // a render() ran inside this one: render() redoes this pass
     const nDraws = this._nDraws;
     setLength(this._drawObjects, nDraws); setLength(this._shadowRecs, nDraws);
     if (tp) setLength(this._used, this._nUsed);
@@ -411,7 +659,8 @@ export class FastRenderer {
     }
     if (tp) w = this._writePrograms(w);
     if (tp) w = writeShadowDraws(this, w, this._shadowRecs); // after DRAWS' count is known (three-programs.js, shadow section)
-    u[0] = tp ? MAGIC3 : MAGIC; u[1] = w;
+    if (tp) this._commit(w, true);
+    else { u[0] = MAGIC; u[1] = w; }
     this.info.render.calls = nDraws; this.info.render.triangles = this._tris | 0; this.info.render.frame++;
     if (tp) { this.info.uniformBlocks.total = tp.stats.blocks; this.info.uniformBlocks.changed = tp.stats.changed; }
     if (this.host.present) this.host.present(w);
@@ -519,7 +768,7 @@ export class FastRenderer {
 
   /** one DRAWS record at this._w */
   _draw(o, g, m, grp, geometry, inst, start, count, indexCount) {
-    if (!m || !m.visible) return;
+    if (!m || !m.visible || this._aborted) return;
     // WebGLRenderer.renderObject calls these right before the draw (games use them to set per-draw uniforms)
     o.onBeforeRender(this, this._scene, this._camera, g, m, grp);
     if (m.onBeforeRender) m.onBeforeRender(this, this._scene, this._camera, g, o, grp);
@@ -533,6 +782,7 @@ export class FastRenderer {
     if (o.frustumCulled === false) flags |= F.NO_CULL;
     if (inst) flags |= F.INSTANCED;
     const material = this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT));
+    if (this._tp && this._nestedRenders !== this._passNested) { this._aborted = true; return; } // see render()
     if (!material) return; // v3: the host could not translate this program
     if (this._tp) {
       // v3: how three would draw it into shadow maps; a reused record per draw index (read by writeShadowDraws)
@@ -605,6 +855,38 @@ function pipelineStateChanged(s, m) {
   s[10] = m.premultipliedAlpha; s[11] = m.depthTest; s[12] = m.depthWrite; s[13] = m.depthFunc; s[14] = m.colorWrite;
   s[15] = m.alphaToCoverage; s[16] = m.polygonOffset; s[17] = m.polygonOffsetFactor; s[18] = m.polygonOffsetUnits; s[19] = m.wireframe;
   return true;
+}
+
+/** whether a render target's description differs from sig (field-wise; stores it when it does). No allocation. */
+let _sigDiff = false;
+function sigPut(sig, k, v) { if (sig[k] !== v) { sig[k] = v; _sigDiff = true; } return k + 1; }
+function targetChanged(sig, rt, texs) {
+  _sigDiff = false;
+  const d = rt.depthTexture || null;
+  let k = 0;
+  k = sigPut(sig, k, rt.width); k = sigPut(sig, k, rt.height); k = sigPut(sig, k, rt.depth || 1); k = sigPut(sig, k, rt.samples | 0);
+  k = sigPut(sig, k, rt.depthBuffer); k = sigPut(sig, k, rt.stencilBuffer); k = sigPut(sig, k, d); k = sigPut(sig, k, d ? d.format : 0);
+  k = sigPut(sig, k, d ? d.type : 0); k = sigPut(sig, k, texs.length);
+  for (let i = 0; i < texs.length; i++) {
+    const t = texs[i];
+    k = sigPut(sig, k, t); k = sigPut(sig, k, t.format); k = sigPut(sig, k, t.type); k = sigPut(sig, k, t.colorSpace); k = sigPut(sig, k, t.generateMipmaps);
+    k = sigPut(sig, k, t.minFilter); k = sigPut(sig, k, t.magFilter); k = sigPut(sig, k, t.wrapS); k = sigPut(sig, k, t.wrapT); k = sigPut(sig, k, t.mipmaps ? t.mipmaps.length : 0);
+  }
+  if (sig.length !== k) { sig.length = k; _sigDiff = true; }
+  return _sigDiff;
+}
+
+/** three's NearestMipmap* / LinearMipmap* filters */
+function isMipmapFilter(f) { return f === 1004 || f === 1005 || f === 1007 || f === 1008; }
+
+/** WebGLTextures.updateRenderTargetMipmap's test: does a render into level 0 regenerate the mip chain */
+function targetNeedsMipmaps(rt) {
+  const texs = rt.textures || [rt.texture];
+  for (let i = 0; i < texs.length; i++) {
+    const t = texs[i];
+    if (t.generateMipmaps && isMipmapFilter(t.minFilter) && t.mipmapsAutoUpdate !== false) return true;
+  }
+  return false;
 }
 
 /** column-major 4x4 (three.js) -> 3 rows of 4 into dst */

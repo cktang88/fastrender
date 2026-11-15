@@ -23,6 +23,8 @@ import { WebGLProperties } from 'three/src/renderers/webgl/WebGLProperties.js';
 import { WebGLClipping } from 'three/src/renderers/webgl/WebGLClipping.js';
 import { WebGLMorphtargets } from 'three/src/renderers/webgl/WebGLMorphtargets.js';
 import { ShaderChunk } from 'three/src/renderers/shaders/ShaderChunk.js';
+import { PMREMGenerator } from 'three/src/extras/PMREMGenerator.js';
+import { WebGLCubeRenderTarget } from 'three/src/renderers/WebGLCubeRenderTarget.js';
 
 // r186+ removed PCFSoftShadowMap: WebGLShadowMap.render switches the renderer to PCFShadowMap (detected by feature)
 const HAS_PCF_SOFT = ShaderChunk.shadowmap_pars_fragment.includes('SHADOWMAP_TYPE_PCF_SOFT');
@@ -471,6 +473,91 @@ function materialNeedsLights(m) {
   return m.isMeshLambertMaterial || m.isMeshToonMaterial || m.isMeshPhongMaterial || m.isMeshStandardMaterial || m.isShadowMaterial || (m.isShaderMaterial && m.lights === true);
 }
 
+// ------------------------------------------------------------------ environment maps (PMREM)
+const CUBE_REFLECTION = 301, CUBE_REFRACTION = 302, EQUIRECT_REFLECTION = 303, EQUIRECT_REFRACTION = 304;
+
+/**
+ * three's environment-map conversions, driven through `renderer` (the FastRenderer: its render targets run natively):
+ * `get(texture, usePMREM)` as r187's WebGLEnvironments, `cubeuvmaps.get` / `cubemaps.get` as r170's WebGLCubeUVMaps /
+ * WebGLCubeMaps (the same logic; r170's PMREMGenerator makes a CubeUV atlas, r187's a mipmapped cube). An equirect or
+ * cube texture is turned into a PMREM by three's PMREMGenerator (its equirect / GGX / blur ShaderMaterials go through
+ * the translator like any program); a texture that already is one (scene.environment = pmrem.fromScene(...).texture)
+ * passes through.
+ */
+export function createEnvironments(renderer) {
+  let gen = null;
+  const pmremMaps = new WeakMap(), cubeMaps = new WeakMap();
+  const generator = () => gen || (gen = new PMREMGenerator(renderer));
+  const cubeComplete = (image) => { let n = 0; for (let i = 0; i < 6; i++) if (image[i] !== undefined) n++; return n === 6; };
+  function onPMREMDispose(e) {
+    const t = e.target; t.removeEventListener('dispose', onPMREMDispose);
+    const rt = pmremMaps.get(t); if (rt) { pmremMaps.delete(t); rt.dispose(); }
+  }
+  function onCubeDispose(e) {
+    const t = e.target; t.removeEventListener('dispose', onCubeDispose);
+    const rt = cubeMaps.get(t); if (rt) { cubeMaps.delete(t); rt.dispose(); }
+  }
+  function getPMREM(texture) {
+    if (!texture || !texture.isTexture || texture.isPMREMTexture === true) return texture || null;
+    const mapping = texture.mapping;
+    const equirect = mapping === EQUIRECT_REFLECTION || mapping === EQUIRECT_REFRACTION, cube = mapping === CUBE_REFLECTION || mapping === CUBE_REFRACTION;
+    if (!equirect && !cube) return texture; // r170's CubeUV atlas (and anything else) passes through
+    let rt = pmremMaps.get(texture);
+    const current = rt !== undefined ? rt.texture.pmremVersion : 0;
+    if (texture.isRenderTargetTexture && texture.pmremVersion !== current) {
+      rt = equirect ? generator().fromEquirectangular(texture, rt) : generator().fromCubemap(texture, rt);
+      rt.texture.pmremVersion = texture.pmremVersion;
+      pmremMaps.set(texture, rt);
+      return rt.texture;
+    }
+    if (rt !== undefined) return rt.texture;
+    const image = texture.image;
+    if ((equirect && image && image.height > 0) || (cube && image && cubeComplete(image))) {
+      rt = equirect ? generator().fromEquirectangular(texture) : generator().fromCubemap(texture);
+      rt.texture.pmremVersion = texture.pmremVersion;
+      pmremMaps.set(texture, rt);
+      texture.addEventListener('dispose', onPMREMDispose);
+      return rt.texture;
+    }
+    return null; // not loaded yet: try again next frame
+  }
+  function getCube(texture) {
+    if (!texture || !texture.isTexture) return texture || null;
+    const mapping = texture.mapping;
+    if (mapping !== EQUIRECT_REFLECTION && mapping !== EQUIRECT_REFRACTION) return texture;
+    const map = (t) => { t.mapping = mapping === EQUIRECT_REFLECTION ? CUBE_REFLECTION : CUBE_REFRACTION; return t; };
+    const known = cubeMaps.get(texture);
+    if (known) return map(known.texture);
+    const image = texture.image;
+    if (!image || !(image.height > 0)) return null;
+    const rt = new WebGLCubeRenderTarget(image.height);
+    rt.fromEquirectangularTexture(renderer, texture);
+    cubeMaps.set(texture, rt);
+    texture.addEventListener('dispose', onCubeDispose);
+    return map(rt.texture);
+  }
+  return {
+    get: (texture, usePMREM = false) => (texture === null || texture === undefined ? null : usePMREM ? getPMREM(texture) : getCube(texture)),
+    cubeuvmaps: { get: getPMREM, dispose() {} },
+    cubemaps: { get: getCube, dispose() {} },
+    dispose() { if (gen) gen.dispose(); gen = null; },
+  };
+}
+
+/**
+ * A RawShaderMaterial without glslVersion is GLSL ES 1.00, which WebGL2 compiles as is; the translator wants 3.00.
+ * Lift it with the defines three's own prefix gives every other material (WebGLProgram), nothing else.
+ */
+export function liftGlsl1(vs, fs) {
+  if (/^\s*#version/.test(vs) && /^\s*#version/.test(fs)) return [vs, fs];
+  const v = /^\s*#version/.test(vs) ? vs : '#version 300 es\n#define attribute in\n#define varying out\n#define texture2D texture\n' + vs;
+  const f = /^\s*#version/.test(fs) ? fs : ['#version 300 es', '#define varying in', 'layout(location = 0) out highp vec4 pc_fragColor;', '#define gl_FragColor pc_fragColor',
+    '#define gl_FragDepthEXT gl_FragDepth', '#define texture2D texture', '#define textureCube texture', '#define texture2DProj textureProj',
+    '#define texture2DLodEXT textureLod', '#define texture2DProjLodEXT textureProjLod', '#define textureCubeLodEXT textureLod',
+    '#define texture2DGradEXT textureGrad', '#define texture2DProjGradEXT textureProjGrad', '#define textureCubeGradEXT textureGrad', ''].join('\n') + fs;
+  return [v, f];
+}
+
 /**
  * Drives three's program/uniform machinery for one FastRenderer.
  *   const tp = new ThreePrograms({ renderer, host });
@@ -505,13 +592,15 @@ export class ThreePrograms {
     facade.capabilities = capabilities;
     facade.extensions = extensions;
     if (!facade.getRenderTarget) facade.getRenderTarget = () => null;
-    const envStub = { get: () => null }; // environment maps are not supported natively yet (counted)
+    // environment maps: three's own PMREMGenerator / cube conversion, rendering through the renderer's render targets
+    // (createEnvironments below mirrors WebGLEnvironments r187 / WebGLCubeMaps + WebGLCubeUVMaps r170)
+    const env = this.environments = createEnvironments(renderer);
     const bindingStates = { releaseStatesOfProgram() {} };
     // r170: (renderer, cubemaps, cubeuvmaps, extensions, capabilities, bindingStates, clipping)
     // r187: (renderer, environments, extensions, capabilities, bindingStates, clipping)
     this.programCache = WebGLPrograms.length >= 7
-      ? new WebGLPrograms(facade, envStub, envStub, extensions, capabilities, bindingStates, this.clipping)
-      : new WebGLPrograms(facade, envStub, extensions, capabilities, bindingStates, this.clipping);
+      ? new WebGLPrograms(facade, env.cubemaps, env.cubeuvmaps, extensions, capabilities, bindingStates, this.clipping)
+      : new WebGLPrograms(facade, env, extensions, capabilities, bindingStates, this.clipping);
     this.lights = new WebGLLights(extensions);
     this.materials = new WebGLMaterials(facade, this.properties);
     this.morphtargets = new WebGLMorphtargets(gl, capabilities, { allocateTextureUnit: () => 0, setTexture2D() {}, setTexture2DArray() {}, resetTextureUnits() {} });
@@ -628,7 +717,7 @@ export class ThreePrograms {
     if (ms.version !== material.version || ms.epoch !== this._epoch) {
       ms.version = material.version; ms.epoch = this._epoch; ms.variants.clear(); ms.lastVariant = null;
     }
-    const sig = objectSignature(material, object, this.clipping);
+    const sig = objectSignature(material, object, this.clipping, this.facade.getRenderTarget());
     // most materials are drawn with one object signature: remember the last variant
     let variant = ms.lastSig === sig && ms.lastVariant !== null ? ms.lastVariant : ms.variants.get(sig);
     if (variant === undefined) {
@@ -687,10 +776,15 @@ export class ThreePrograms {
   _getProgram(material, scene, object, ms) {
     const lights = this.lights;
     const mp = this.properties.get(material);
-    // WebGLMaterials reads these from the material properties
-    mp.environment = null; mp.fog = scene.fog; mp.envMap = null;
-    mp.envMapRotation = material.envMapRotation;
-    if (material.envMap || ((material.isMeshStandardMaterial || material.isMeshLambertMaterial || material.isMeshPhongMaterial) && scene.environment)) this.unsupported('environment map');
+    // WebGLMaterials reads these from the material properties (as WebGLRenderer.getProgram sets them); the env map
+    // goes through three's PMREM / cube conversion (createEnvironments), which renders into render targets
+    mp.environment = material.isMeshStandardMaterial || material.isMeshLambertMaterial || material.isMeshPhongMaterial ? scene.environment || null : null;
+    mp.fog = scene.fog;
+    const usePMREM = material.isMeshStandardMaterial || (material.isMeshLambertMaterial && !material.envMap) || (material.isMeshPhongMaterial && !material.envMap);
+    const envSrc = material.envMap || mp.environment;
+    mp.envMap = envSrc ? (WebGLPrograms.length >= 7 ? (material.isMeshStandardMaterial ? this.environments.cubeuvmaps : this.environments.cubemaps).get(envSrc) : this.environments.get(envSrc, usePMREM)) : null;
+    if (envSrc && !mp.envMap) this.unsupported('environment map not ready');
+    mp.envMapRotation = mp.environment !== null && !material.envMap ? scene.environmentRotation : material.envMapRotation;
     const parameters = this.programCache.getParameters(material, lights.state, this.shadows, scene, object, []);
     const key = this.programCache.getProgramCacheKey(parameters);
     let prog = ms.programs.get(key);
@@ -722,7 +816,10 @@ export class ThreePrograms {
     const fs = p.program.shaders.find((s) => s.type === GL.FRAGMENT_SHADER).source;
     // the native side refers to the program by this short id (material uploads carry it), not by three's long key
     const id = this.newId();
-    let layout = this.host && this.host.program ? this.host.program(key, vs, fs, id) : null;
+    // a RawShaderMaterial without glslVersion is GLSL ES 1.00 (WebGL2 accepts it): lift it to 3.00 with the defines
+    // three's own prefix uses for every other material (attribute/varying/texture2D/gl_FragColor), see liftGlsl1
+    const [hv, hf] = liftGlsl1(vs, fs);
+    let layout = this.host && this.host.program ? this.host.program(key, hv, hf, id) : null;
     if (typeof layout === 'string') layout = JSON.parse(layout);
     prog = { id, key, vertex: vs, fragment: fs, layout, webglProgram: p, usedTimes: 1, name: parameters.shaderName || parameters.shaderType };
     if (layout) {
@@ -930,8 +1027,12 @@ function updateShadow(light, camera) {
   } else s.updateMatrices(light, camera);
 }
 
-/** the object-dependent inputs of WebGLPrograms.getParameters (what WebGLRenderer.setProgram checks) */
-function objectSignature(material, object, clipping) {
+/**
+ * the object-dependent inputs of WebGLPrograms.getParameters (what WebGLRenderer.setProgram checks), and whether the
+ * draw goes into a render target (three then builds the program without tone mapping and with the working colour
+ * space: a separate material instance, so screen and render-target passes in one frame each have their program)
+ */
+function objectSignature(material, object, clipping, renderTarget) {
   const g = object.geometry, a = g.attributes, ma = g.morphAttributes;
   let s = 0;
   if (object.isInstancedMesh) { s |= 1; if (object.instanceColor !== null) s |= 2; if (object.morphTexture != null) s |= 4; }
@@ -947,9 +1048,11 @@ function objectSignature(material, object, clipping) {
   if (a.position) s |= 8192;
   const morph = ma.position || ma.normal || ma.color;
   const nm = morph ? morph.length : 0, np = clipping.numPlanes, ni = clipping.numIntersection;
+  // render target: as three, an XR target counts as the screen
+  const rt = renderTarget !== null && renderTarget !== undefined && renderTarget.isXRRenderTarget !== true ? 1 : 0;
   // a small integer (no heap number per draw) unless the counts are unusually large
-  if (nm < 256 && np < 16 && ni < 16) return s | (nm << 14) | (np << 22) | (ni << 26);
-  return s + nm * 16384 + np * 16384 * 1024 + ni * 16384 * 1024 * 256 + 2 ** 32;
+  if (nm < 128 && np < 16 && ni < 16) return s | (nm << 14) | (rt << 21) | (np << 22) | (ni << 26);
+  return s + nm * 16384 + rt * 2 ** 31 + np * 16384 * 1024 + ni * 16384 * 1024 * 256 + 2 ** 32;
 }
 
 // ================================================================== shadow pass (mirrors three's WebGLShadowMap)
