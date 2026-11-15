@@ -6,6 +6,17 @@ The game's JS and its real three.js scene graph stay as they are; only `WebGLRen
 for the stages and their status, [docs/PROTOCOL.md](docs/PROTOCOL.md) for the JS↔native protocol, and
 [docs/HOST.md](docs/HOST.md) for where the JS runs.
 
+> **Planned last step: move hot game logic to GPU compute.** The frame is CPU-bound: 14–25 ms of JS per frame in the
+> real game (Electron), against about 1–2 ms of native encode. Once everything else is done, profile each game's
+> per-frame JS and move the loops that profiling shows dominate onto the GPU as compute: crowd and traffic movement,
+> instance-matrix updates, particles, animation. The plan:
+> - Write them as three.js **TSL compute nodes**, so they also run on three's own WebGPURenderer.
+> - Add compute-node support to fastrender: WGSL → MSL via naga, and Metal compute dispatches writing the buffers
+>   the draws read, with no CPU round trip on unified memory.
+>
+> Porting the *shaders* to TSL alone would not make any renderer faster, because shader source language isn't the
+> bottleneck. Moving CPU work into GPU compute would. Tracked in [docs/PIPELINE.md](docs/PIPELINE.md#planned-last-gpu-compute-for-game-logic).
+
 ```bash
 (cd js && npm ci) && node js/build.mjs js/examples/three-city.entry.mjs js/dist/three-city.js
 cargo run --release -- run --three js/dist/three-city.js      # a real three.js city, rendered natively

@@ -58,3 +58,24 @@ cargo run --release -- run --three js/dist/game.js             # native window
 node js/golden/reference.mjs 1 ref.png 1280x800                # browser reference (adapt the scene import)
 node js/shader-port/port.mjs out/                              # translate the game's custom shaders
 ```
+
+## Planned last: GPU compute for game logic
+
+Deliberately the final item, after the Metal 4 port, caching, threading and the remaining fidelity work.
+
+1. **Profile.** Profile the real game's per-frame JS: a V8 CPU profile in Electron, plus the JSC sampling profiler.
+   Rank the game-logic loops by ms per frame. Expected candidates: crowd/pedestrian and vehicle updates, instance
+   matrix writes (`setMatrixAt` loops, then re-upload), particles, procedural animation, and possibly three's
+   `updateMatrixWorld` for static hierarchies.
+2. **Move the top loops onto the GPU.** Use three.js **TSL compute nodes** (`Fn`, `compute()`, `storage` buffers,
+   `instancedArray`). That makes the same code run on three's WebGPURenderer and on fastrender. Prefer
+   GPU-resident state, such as instance matrices written by compute and read by the draw, over per-frame uploads.
+3. **Support compute natively in fastrender.**
+   - WGSL → MSL with naga for TSL's compute output.
+   - `MTL4ComputeCommandEncoder` dispatches, scheduled before the passes that read their buffers.
+   - Shared-storage buffers on unified memory, so there is no copy back for the occasional CPU read.
+   - Barriers from the render graph.
+4. **Verify.** A golden image per moved system, plus JS ms/frame before and after, measured on the Air.
+
+Not planned: porting *shaders* to TSL for speed. It would not make any of the three renderers faster, because the
+bottleneck is CPU-side JS, not the shader language.
