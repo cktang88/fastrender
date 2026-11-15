@@ -71,6 +71,7 @@ its skeleton, morph-target mesh, flat-shaded, wireframe, tangent-less normal map
 |---|---:|---:|
 | parity, PCF (PCFSoft requested) | **0.96** | 1.2 % |
 | parity, VSM | **0.84** | 1.23 % |
+| parity, Basic (run 43695377923) | **0.83** | 1.22 % |
 | (browser with shadows off vs the PCF reference: what shadows weigh) | 2.51 | 2.45 % |
 | city (unchanged) | 0.97 | 2.2 % |
 

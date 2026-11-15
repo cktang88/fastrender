@@ -37,4 +37,4 @@ cargo run --release -- bench --three js/dist/parity.js --time 1 --scale 1 --upsc
   --frames 3 --warmup 2 --shot golden-parity-t1.png
 ```
 
-CI gates all three at MAE < 1.5 (Nov 2026: PCF 0.96, VSM 0.84).
+CI gates all three at MAE < 1.5 (Nov 2026: PCF 0.96, VSM 0.84, Basic 0.83).
