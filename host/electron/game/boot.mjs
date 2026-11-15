@@ -14,6 +14,10 @@
 // thread read its drawable back (<out>/<tag>-golden.png). The composited window (Metal + DOM) is a screencapture taken
 // by the main process (the Metal layer is not in capturePage): <tag>-<name>-screen.png. The page waits until the frame
 // was rendered (stats().lastFrameSeq >= the seq present() returned).
+//
+// Play mode (cfg.play, game/main.js --play): none of the above. The game runs as in a browser, on the real clock, the
+// real Math.random and the real requestAnimationFrame (the bundle has no deterministic driver: scripts/bundle-game.mjs
+// --play); see startPlay() below. With `--variant webgl` there is no addon and no host: stock WebGLRenderer.
 import { createHost } from '../host.js';
 
 const G = globalThis;
@@ -25,15 +29,129 @@ const realNow = performance.now.bind(performance);
 const realRaf = requestAnimationFrame.bind(G);
 const log = (...a) => { console.log('[fr]', ...a); };
 
-const params = Object.assign({ width: innerWidth, height: innerHeight, programs: 'three' }, cfg.params || {});
-const host = createHost(native, { shmName: cfg.shmName, subarray: cfg.isolated, typed: true, flush: true, now: realNow, params });
-host.now = realNow; // world-objects.drive.mjs: wall clock for measurements
-host.log = log;
-G.__fr = host;
-G.__frHost = host;
+const play = cfg.play || null;
+let host = null;
+if (native) {
+  const params = Object.assign({ width: innerWidth, height: innerHeight, programs: 'three' }, cfg.params || {});
+  host = createHost(native, { shmName: cfg.shmName, subarray: cfg.isolated, typed: true, flush: true, now: realNow, params });
+  host.now = realNow; // world-objects.drive.mjs: wall clock for measurements
+  host.log = log;
+  G.__fr = host;
+  G.__frHost = host;
+} else if (!play) throw new Error('fastrender: no addon (only play mode runs without it: --variant webgl)');
 // one frame per display frame (host.js flush): a game on the real rAF gets its frame sent after each callback.
 // (world-objects.drive.mjs replaces rAF with its virtual queue; the drivers below flush after each step.)
-G.requestAnimationFrame = (cb) => realRaf((t) => { try { cb(t); } finally { host.flush(); } });
+if (play) startPlay();
+else G.requestAnimationFrame = (cb) => realRaf((t) => { try { cb(t); } finally { host.flush(); } });
+
+/**
+ * Play mode: the game's own loop on the real requestAnimationFrame, one frame sent per display frame (host.flush()
+ * after each callback), paced by back-pressure: a display tick is skipped while the frame BEFORE the last one sent is
+ * not rendered yet (one frame may wait in the queue: the render thread, with vsync on, and the page's rAF tick at the
+ * same rate but not in phase). A skipped tick costs nothing (the game's callback is not run, so its clock simply sees
+ * a longer frame). The wait is capped at 250 ms: a render thread that stopped (renderer failed to start) must not
+ * freeze the game's UI. Also: the fps overlay (`--fps`, F3 toggles) and window.__frPlay.report() (CI smoke).
+ */
+function startPlay() {
+  G.__frPlayCfg = { dpr: play.dpr, aa: play.aa };
+  const fr = !!host;
+  const realCancel = cancelAnimationFrame.bind(G);
+  const sent = [0, 0]; // ring sequence of the last two frames sent
+  const acc = { frames: 0, js: 0, waited: 0, t: -1 };
+  const tick = { t: -1, go: true, waitFrom: 0 };
+  const gate = (t) => {
+    if (t === tick.t) return tick.go; // every callback of one display tick gets the same answer
+    tick.t = t;
+    tick.go = true;
+    if (fr && native.stats().lastFrameSeq < sent[0]) {
+      if (!tick.waitFrom) tick.waitFrom = realNow();
+      if (realNow() - tick.waitFrom < 250) { tick.go = false; acc.waited++; }
+    }
+    if (tick.go) tick.waitFrom = 0;
+    return tick.go;
+  };
+  const flush = () => {
+    const seq = host.flush();
+    if (seq !== sent[1]) { sent[0] = sent[1]; sent[1] = seq; }
+  };
+  let ids = 0;
+  const live = new Map(); // our id -> the real rAF id it is waiting on
+  G.requestAnimationFrame = (cb) => {
+    const id = ++ids;
+    const run = (t) => {
+      if (!gate(t)) { live.set(id, realRaf(run)); return; }
+      live.delete(id);
+      const t0 = realNow();
+      try { cb(t); } finally {
+        if (fr) flush();
+        acc.js += realNow() - t0;
+        if (acc.t !== t) { acc.t = t; acc.frames++; }
+      }
+    };
+    live.set(id, realRaf(run));
+    return id;
+  };
+  G.cancelAnimationFrame = (id) => { const r = live.get(id); if (r !== undefined) { realCancel(r); live.delete(id); } };
+
+  // what the last half second looked like (the overlay's line, and report())
+  const now = { fps: 0, js_ms: 0, gpu_ms: null, shown_fps: null, skipped: 0, waited: 0, draws: 0, size: '' };
+  const lock = { changes: 0, errors: 0 };
+  let last = { t: realNow(), frames: 0, js: 0, waited: 0, s: fr ? native.stats() : null };
+  let el = null, shown = !!play.fps;
+  const sample = () => {
+    const t = realNow(), dt = (t - last.t) / 1000, n = acc.frames - last.frames;
+    if (dt <= 0) return;
+    now.fps = n / dt;
+    now.js_ms = n ? (acc.js - last.js) / n : 0;
+    now.waited = acc.waited - last.waited;
+    const r = G.__frPlayRenderer;
+    let s = null;
+    if (fr) {
+      s = native.stats();
+      const g = s.gpuFrames - last.s.gpuFrames;
+      now.gpu_ms = g > 0 ? (s.avgGpuMs * s.gpuFrames - last.s.avgGpuMs * last.s.gpuFrames) / g : null;
+      now.shown_fps = (s.framesRendered - last.s.framesRendered) / dt;
+      now.skipped = s.framesSkipped - last.s.framesSkipped;
+      now.draws = s.lastDrawCount;
+      now.size = `${s.drawableWidth}x${s.drawableHeight}`;
+    } else if (r) {
+      now.draws = r.info.render.calls;
+      now.size = `${r.domElement.width}x${r.domElement.height}`;
+    }
+    last = { t, frames: acc.frames, js: acc.js, waited: acc.waited, s };
+    if (!shown || !document.body) { if (el) el.style.display = 'none'; return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'fr-fps';
+      el.style.cssText = 'position:fixed;left:8px;top:8px;z-index:2147483647;pointer-events:none;padding:4px 8px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre';
+      document.body.appendChild(el);
+    }
+    el.style.display = '';
+    el.textContent = fr
+      ? `fastrender  ${now.fps.toFixed(0)} fps  JS ${now.js_ms.toFixed(1)} ms  GPU ${now.gpu_ms === null ? '-' : now.gpu_ms.toFixed(1)} ms\n${now.draws} draws  ${now.size} px  shown ${now.shown_fps.toFixed(0)}/s  skipped ${now.skipped}  waited ${now.waited}`
+      : `WebGL  ${now.fps.toFixed(0)} fps  JS+GL calls ${now.js_ms.toFixed(1)} ms  GPU n/a\n${now.draws} draws  ${now.size} px`;
+  };
+  setInterval(sample, 500);
+  addEventListener('keydown', (e) => { if (e.code === 'F3') { shown = !shown; sample(); e.preventDefault(); } });
+  document.addEventListener('pointerlockchange', () => { lock.changes++; log(`pointer lock ${document.pointerLockElement ? 'on' : 'off'}`); });
+  document.addEventListener('pointerlockerror', () => { lock.errors++; log('pointer lock error (click the view; the window must be focused)'); });
+  G.__frPlay = {
+    /** JSON-able state for the main process (game/main.js --play-seconds) */
+    report() {
+      const W = G.__world;
+      const s = fr ? native.stats() : null;
+      const q1 = (v) => (typeof v === 'number' ? +v.toFixed(2) : v);
+      return {
+        variant: fr ? 'fastrender' : 'webgl', started: !!(W && W.started), frames: acc.frames,
+        inner: `${innerWidth}x${innerHeight}`, dpr: devicePixelRatio, focused: document.hasFocus(),
+        ...Object.fromEntries(Object.entries(now).map(([k, v]) => [k, q1(v)])),
+        pointer_locked: !!document.pointerLockElement, pointer_lock_changes: lock.changes, pointer_lock_errors: lock.errors,
+        native: s && { rendered: s.framesRendered, skipped: s.framesSkipped, programs: s.programs, gpu_errors: s.gpuErrors, drawable: `${s.drawableWidth}x${s.drawableHeight}`, last_frame_seq: s.lastFrameSeq, sent: sent[1] },
+      };
+    },
+  };
+  log(`play mode: ${fr ? 'fastrender' : 'stock WebGLRenderer'}, pixel ratio ${play.dpr || devicePixelRatio}${play.fps ? ', fps overlay on (F3)' : ' (F3: fps overlay)'}`);
+}
 
 // fetch accounting (the golden waits for in-flight requests before its last frames)
 const net = { inflight: 0, done: 0, failed: 0 };
@@ -148,6 +266,7 @@ async function runCity() {
 }
 
 addEventListener('load', async () => {
+  if (play) return; // the game runs itself
   try {
     const r = cfg.kind === 'city' ? await runCity() : await runWorld();
     ipc.send('done', r);
