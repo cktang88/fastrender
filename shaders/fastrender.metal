@@ -99,13 +99,13 @@ static half sun_shadow(float3 wpos, depth2d<float> sm, constant Frame& f) {
 }
 
 static half3 sky(half3 n) {
-    return mix(half3(0.30h, 0.28h, 0.26h), half3(0.45h, 0.55h, 0.75h), n.y * 0.5h + 0.5h);
+    return mix(half3(0.22h, 0.20h, 0.18h), half3(0.40h, 0.50h, 0.72h), n.y * 0.5h + 0.5h);
 }
 
 static half3 sun_light(float3 wpos, half3 n, half3 albedo, half sh, constant Frame& f) {
     half3 l = half3(f.sun_dir.xyz);
     half ndl = saturate(dot(n, l));
-    half3 c = albedo * (sky(n) * 0.6h + half3(1.0h, 0.92h, 0.8h) * half(f.sun_dir.w) * ndl * sh);
+    half3 c = albedo * (sky(n) * 0.45h + half3(1.0h, 0.92h, 0.8h) * half(f.sun_dir.w) * ndl * sh);
     return c;
 }
 

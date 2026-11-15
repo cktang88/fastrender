@@ -519,7 +519,7 @@ impl Renderer {
             inv_view_proj: vp.inverse().to_cols_array_2d(),
             shadow_vp: self.shadow_vp.to_cols_array_2d(),
             cam_pos: [eye.x, eye.y, eye.z, t],
-            sun_dir: [sun.x, sun.y, sun.z, 3.2],
+            sun_dir: [sun.x, sun.y, sun.z, 1.8],
             fog: [0.62, 0.68, 0.76, 0.0035],
             frustum: planes.map(|p| p.to_array()),
             counts: [self.n_instances as u32, self.n_lights as u32, 0, 0],
