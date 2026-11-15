@@ -805,3 +805,18 @@ else {
   assert.equal(st.point.length, 0, 'released after the hold');
   console.log(`[three r${REV}] trimLights: dark point / spot lights leave the light state (10 point + 3 spot -> 1 + 0, no dark shadow lookup); counts step up at once and are held 120 frames`);
 }
+
+// ------------------------------------------------------------------ 14. userData.frInstanceCull travels with the instance upload
+{
+  const h = makeHost();
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20 });
+  r.setSize(SIZE.width, SIZE.height);
+  const scene = new THREE.Scene();
+  const mk = (hint) => { const m = new THREE.InstancedMesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial(), 4); if (hint !== undefined) m.userData.frInstanceCull = hint; scene.add(m); return m; };
+  mk(undefined); mk(true); mk(2.5); mk(false);
+  const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 0, 8);
+  r.render(scene, camera);
+  const metas = h.uploads.filter((x) => x.kind === KIND.INSTANCES).map((x) => x.meta.cull);
+  assert.deepEqual(metas, [undefined, 0, 2.5, undefined], 'true -> 0 (the geometry sphere), a number -> that radius, otherwise absent');
+  console.log(`[three r${REV}] userData.frInstanceCull: sent with the instance upload (true -> 0, radius -> radius)`);
+}
