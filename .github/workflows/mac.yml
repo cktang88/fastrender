@@ -43,7 +43,8 @@ jobs:
           FASTRENDER_LOG_PROGRAMS: "1"
         run: |
           set -o pipefail
-          ./target/release/fastrender selftest --three js/dist/three-city.js --upscale bilinear --scale 1 --size 640x400 | tee three-programs-selftest.txt
+          ./target/release/fastrender selftest --three js/dist/three-city.js --upscale bilinear --scale 1 --size 640x400 2>&1 | tee three-programs-selftest.txt || true
+          bash .github/annotate.sh notice "three-programs selftest" three-programs-selftest.txt 25
           grep -q "three-programs selftest: PASS" three-programs-selftest.txt
           grep "3 frame: output" three-programs-selftest.txt | grep -v "mean rgba = 0 0 0 0"
       - name: selftest
@@ -68,7 +69,8 @@ jobs:
           # 2. screenshots with --upscale temporal (city forward, three.js). Where the device lacks the
           #    temporal scaler (this runner) the renderer must say so and fall back to MetalFX spatial.
           ./target/release/fastrender bench --path forward --upscale temporal --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --props 60000 --lights 16 --shot shot-forward-temporal.png | tee temporal-bench.txt
-          ./target/release/fastrender bench --three js/dist/three-city.js --upscale temporal --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --shot shot-three-temporal.png | tee -a temporal-bench.txt
+          ./target/release/fastrender bench --three js/dist/three-city.js --upscale temporal --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --shot shot-three-temporal.png > three-temporal.txt 2>&1 || { bash .github/annotate.sh error "three temporal bench" three-temporal.txt 40; exit 1; }
+          cat three-temporal.txt | tee -a temporal-bench.txt
           test -s shot-forward-temporal.png && test -s shot-three-temporal.png
           if ./target/release/fastrender probe | grep -q "metalfx_temporal: false"; then
             grep -q "MetalFX temporal scaler not supported on this device: falling back to MetalFX spatial" temporal-bench.txt
@@ -98,13 +100,17 @@ jobs:
           ./target/release/fastrender bench --three js/dist/three-city.js --programs native --time 1 --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 2 --shot golden-native-t1.png
           node js/golden/diff.mjs js/golden/ref-t1.png golden-native-t1.png golden-diff-native-t1.png | tee golden-native.json
           echo "golden native path (fs_three): $(cat golden-native.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=golden native path (fs_three)::$(cat golden-native.json)"
       - name: golden three-programs (three.js's own shaders)
         if: always()
         run: |
           set -o pipefail
-          ./target/release/fastrender bench --three js/dist/three-city.js --programs three --time 1 --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 2 --shot golden-three-t1.png | tee golden-three-bench.txt
+          rc=0; ./target/release/fastrender bench --three js/dist/three-city.js --programs three --time 1 --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 2 --shot golden-three-t1.png > golden-three-bench.txt 2>&1 || rc=$?
+          bash .github/annotate.sh notice "golden three-programs bench (exit $rc)" golden-three-bench.txt 30
+          [ "$rc" = 0 ]
           node js/golden/diff.mjs js/golden/ref-t1.png golden-three-t1.png golden-diff-three-t1.png | tee golden-three.json
           echo "golden three-programs: $(cat golden-three.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=golden three-programs::$(cat golden-three.json)"
           grep "three frame cost\|three programs:" golden-three-bench.txt >> "$GITHUB_STEP_SUMMARY" || true
       - name: golden three-programs MAE<4
         if: always()

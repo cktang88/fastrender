@@ -41,9 +41,11 @@ sources (what `WebGLRenderer` would pass to `gl.shaderSource`, produced at runti
 WebGL) and, each frame, the uniform values three's own code computes, packed into the layout the native translator
 (`src/xlat.rs`: glslang → SPIR-V → SPIRV-Cross → MSL) reflected. See `docs/notes/three-programs.md`.
 
-### PROGRAM: `host.program(key, vertexGlsl, fragmentGlsl) -> layout`
+### PROGRAM: `host.program(key, vertexGlsl, fragmentGlsl, id) -> layout`
 
-Called synchronously, once per new three program cache key (three's `WebGLPrograms.getProgramCacheKey`). The sources are
+Called synchronously, once per new three program cache key (three's `WebGLPrograms.getProgramCacheKey`); `id` is a
+short number material uploads refer to the program by (`meta.program`). The host returns `null` when translation
+fails (logged natively; JS then skips the draws that need that program and counts them). The sources are
 GLSL ES 3.00 exactly as three builds them; the host applies `normalizeGlsl` (same rules in `js/three-programs.js` and
 `xlat::normalize_glsl`, checked against `tests/fixtures/xlat/normalize`), translates, and returns the layout (object or
 JSON string):
@@ -52,13 +54,16 @@ JSON string):
 {
   size: 416,                       // bytes of the default uniform block (multiple of 16); buffer(1) in both stages
   members: [                       // only members of the merged default block; offsets are MSL byte offsets
-    { name: "projectionMatrix", offset: 0, type: "mat4", count: 1, stride: 0, matrixStride: 16 },
+    { name: "isOrthographic", offset: 0, type: "uint", count: 1, stride: 0, matrixStride: 0 },
     { name: "directionalLights[0].direction", offset: 352, type: "vec3", count: 1, stride: 0, matrixStride: 0 },
     { name: "morphTargetInfluences", offset: 96, type: "float", count: 8, stride: 16, matrixStride: 0 },
   ],
-  textures: [ { name: "map", index: 0 }, { name: "directionalShadowMap[0]", index: 2 } ],  // texture(i) + sampler(i)
-  attributes: [ { name: "position", location: 0 }, { name: "instanceMatrix", location: 3 } ],  // mat4: 4 locations
-  objectBlock: { size: 176, members: [...] } | null   // FrObject, buffer(2)
+  textures: [ { name: "map", index: 0, kind: "2d", shadow: false },                 // texture(i) + sampler(i)
+              { name: "directionalShadowMap[0]", index: 2, kind: "2d", shadow: true } ], // kind: 2d|2dArray|3d|cube
+  attributes: [ { name: "instanceMatrix", type: "mat4", location: 0 },             // mat4: 4 locations
+                { name: "position", type: "vec3", location: 4 } ],                // locations are per program
+  objectBlock: { size: 176, members: [...] } | null,  // FrObject, buffer(2)
+  frameBlock: { size: 144, members: [...] } | null    // FrFrame, buffer(3)
 }
 ```
 
@@ -68,11 +73,13 @@ JSON string):
 - Texture indices are program-wide (fragment textures first, then vertex-only); a sampler array is listed per element.
 - `FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; }` (offsets 0/64/128) replaces those three
   uniforms; the native side fills it per draw from the DRAWS 3×4 rows and the camera. JS never packs them.
-- buffer(3) is reserved for a per-frame shared block (see "per-frame block" below); vertex buffers use indices ≥ 4.
-- `projectionMatrix` is three's (OpenGL clip space); the translator's `fixup_clipspace` remaps z. A temporal upscaler's
-  jitter is applied by JS when packing: `host.projectionJitter()` (or `renderer.projectionJitter`) returns `[jx, jy]`
-  in NDC units and JS adds `j × row 3` to rows 0/1 of the projection (both camera types). It must equal the native
-  jitter of that frame (`core::jittered`).
+- `FrFrame { mat4 projectionMatrix; mat4 viewMatrix; vec3 cameraPosition; }` (offsets 0/64/128, 144 bytes,
+  buffer(3)) replaces the camera uniforms; the native side fills it per pass from the CAMERA op: three's projection
+  (OpenGL clip space; the translator's `fixup_clipspace` remaps z) with this frame's MetalFX jitter applied natively
+  (`core::jittered`), three's view matrix, the camera position. JS never packs them, so a material block holds no
+  camera state. Vertex buffers use indices ≥ 4 (attribute at location L: buffer 4 + L).
+- `normalizeGlsl` moves the object and camera uniforms (also from comma declarations such as
+  `uniform mat4 modelViewMatrix, projectionMatrix;` and lines with a trailing `// comment`).
 - `host.releaseProgram(key)` (optional) when three would release the program.
 
 ### MATERIAL (kind 3) in v3
@@ -81,10 +88,15 @@ A native material id is a **material instance**: one three material × the objec
 (instanced / skinned / morphed / batched / vertex alpha / tangents...) × `receiveShadow` (only when the program reads
 it; it is a per-object uniform in three) × the object itself for skinned / morphed / batched meshes (their bone and
 morph uniforms are per object). The id stays the same when three picks another program for it (lights added, fog or
-tone mapping changed): the material is re-uploaded with the new `programKey`. Meta:
+tone mapping changed): the material is re-uploaded with the new `program` id. Meta:
 
-`{ programKey, name, type, side, transparent, opacity, blending, blendSrc, blendDst, blendEquation, premultipliedAlpha,
-depthTest, depthWrite, depthFunc, colorWrite, alphaToCoverage, polygonOffset: [factor, units] | null, wireframe }`
+`{ program, name, type, side, shadowSide, transparent, opacity, blending, blendSrc, blendDst, blendEquation,
+blendSrcAlpha, blendDstAlpha, blendEquationAlpha, premultipliedAlpha, depthTest, depthWrite, depthFunc, colorWrite,
+alphaToCoverage, polygonOffset: [factor, units] | null, wireframe }`
+
+The native side derives blending exactly as `WebGLState.setMaterial` (Normal + opaque = off; premultiplied tables;
+Custom from the factors), depth from `depthTest`/`depthFunc`/`depthWrite`, culling from `side` and the object's
+determinant, and the shadow pass side from `shadowSide` (else the opposite of `side`, as `WebGLShadowMap`).
 
 Re-sent when the program or any of these pipeline-state fields change (WebGLRenderer reads them every draw).
 `host.release(3, id)` when the three material is disposed.
@@ -92,7 +104,15 @@ Re-sent when the program or any of these pipeline-state fields change (WebGLRend
 ### TEXTURE (kind 2) additions
 
 meta gains `format`, `type` (three constants) and `depth`; the data is the raw bytes of `image.data` (Float32 for
-bone/morph textures, Uint16 half floats, ...).
+bone/morph textures, Uint16 half floats, ...), and `flipRows: true` when `texture.flipY` (WebGL flips rows at upload;
+three's shaders sample the texture as stored). Native formats: RGBA/RG/Red × UnsignedByte/HalfFloat/Float; 2D only.
+
+### GEOMETRY (kind 1) additions
+
+meta gains `attributes: [{ name, itemSize }]`: every attribute besides position/normal/uv/color (uv1.., tangent,
+skinIndex, skinWeight, ...), sent as dense f32 arrays after the index array, in that order. The native side binds each
+by NAME to the location the program reflected; an attribute the program reads but the geometry lacks reads a constant
+(0,0,0,1) (an identity matrix for `instanceMatrix`). `instanceMatrix` / `instanceColor` come from INSTANCES.
 
 ### Per frame
 

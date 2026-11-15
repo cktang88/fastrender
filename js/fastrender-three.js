@@ -99,8 +99,29 @@ export class FastRenderer {
   setRenderTarget(rt) { if (rt) this._unsupported('render targets (post-processing)'); }
   getRenderTarget() { return null; }
   clear() {} clearDepth() {} clearColor() {}
-  compile() { return new Set(); }
-  compileAsync() { return Promise.resolve(); }
+  /**
+   * WebGLRenderer.compile: with three's own programs (v3), get every program the scene needs translated (and compiled
+   * natively) now, at load, instead of on the frame an object first appears. Returns the materials, as three does.
+   */
+  compile(scene, camera) {
+    const out = new Set();
+    if (!this._tp) return out;
+    scene.updateMatrixWorld();
+    if (camera.parent === null) camera.updateMatrixWorld();
+    const lights = [], meshes = [];
+    scene.traverseVisible((o) => { if (o.isLight) lights.push(o); else if (o.isMesh) meshes.push(o); });
+    this._tp.beginFrame(scene, camera, lights);
+    for (const o of meshes) {
+      if (!o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) continue;
+      for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+        if (!m || !m.visible || out.has(m)) continue;
+        this._tp.instance(m, o);
+        out.add(m);
+      }
+    }
+    return out;
+  }
+  compileAsync(scene, camera) { return Promise.resolve(this.compile(scene, camera)); }
   initTexture(t) { this._texture(t); }
   dispose() {}
   forceContextLoss() {}

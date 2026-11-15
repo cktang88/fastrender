@@ -83,11 +83,15 @@ the same as v2: the scene walk dominates. Per material instance the cost is thre
 pays the per-draw instance lookup (object signature + Map). Blocks are 400–800 bytes (Standard with one shadowed light:
 416 B).
 
-## Per-frame shared block (buffer(3), proposed; not implemented)
+## Per-frame shared block (buffer(3))
+
+**Done for the camera** (Nov 2026): `normalizeGlsl` moves `projectionMatrix`, `viewMatrix` and `cameraPosition` into
+`FrFrame` (buffer(3)), which the native side fills per pass (main pass: with the MetalFX jitter, applied natively, so
+JS needs no jitter hook). The rest below is still packed per material block.
 
 Every block is repacked every frame because camera and light values live in it. The names below come from the camera
 or from `WebGLLights` state and are **identical for every program in a frame**; moving them into a per-frame block
-(`FrFrame`, buffer(3)) would make material blocks static between material edits:
+would make material blocks static between material edits:
 
 - camera: `projectionMatrix`, `viewMatrix`, `cameraPosition`, `logDepthBufFC`, `toneMappingExposure`;
 - lights (wired from `lights.state`): `ambientLightColor`, `lightProbe`, `directionalLights`, `directionalLightShadows`,

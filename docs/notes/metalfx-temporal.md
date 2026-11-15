@@ -27,7 +27,8 @@ main pass (jittered VP) ── colour (BGRA8, tone-mapped) ───────
   projection after `gl_to_metal`, so `mac_three.rs` needed no change.
 - **Culling** uses the unjittered planes. **Shadow passes** are not jittered.
 - **Future uniform-block path** (three's own shaders reading `projectionMatrix`): pack
-  `jittered(projectionMatrix, renderer.jitter(), content_size)`. Leave `viewMatrix`, `modelViewMatrix`
+  `jittered(projectionMatrix, renderer.jitter(), content_size)`. three's own programs read it from `FrFrame`
+  (buffer(3)), which `mac_three.rs` fills with exactly that, so the JS side needs no jitter hook. Leave `viewMatrix`, `modelViewMatrix`
   and `cameraPosition` unjittered. `Renderer::jitter()` exposes the frame's value.
 - **Sign convention** is the FSR2/DLSS one, which MetalFX integrations pass straight through (Godot's
   `metal_fx.cpp` and the D3DMetal DLSS bridge, for example). The image is shifted by +j (x right, y down),

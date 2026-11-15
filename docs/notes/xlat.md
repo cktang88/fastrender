@@ -42,9 +42,12 @@ derives from) cannot be configured out through these crates. LTO might trim some
   1. A line whose trimmed text starts with `#version` becomes `#version 450`.
   2. A line whose trimmed text starts with `#extension` becomes empty.
   3. A `precision <lowp|mediump|highp> <type>;` statement alone on its line becomes empty.
-  4. `uniform [<precision>] mat4 modelMatrix;`, `… mat4 modelViewMatrix;` and `… mat3 normalMatrix;`, each alone on its
-     line, become empty. "Alone on its line" means: after trimming, the line ends in `;` and the whitespace-split tokens
-     before the `;` are exactly those words. A line with a trailing comment or the wrong type is kept unchanged.
+  4. In a `uniform [<precision>] <type> a, b, …;` declaration alone on its line (a trailing `// comment` is ignored and
+     dropped), the object uniforms (`mat4 modelMatrix`, `mat4 modelViewMatrix`, `mat3 normalMatrix`) and the camera
+     uniforms (`mat4 projectionMatrix`, `mat4 viewMatrix`, `vec3 cameraPosition`) are removed: the line becomes empty,
+     or `uniform [<precision> ]<type> <the other names, ", ">;`. Wrong types, arrays and initialisers are kept.
+     (Rule 5 then inserts `FrObject` and/or `FrFrame` — `layout(std140) uniform FrFrame { mat4 projectionMatrix; mat4
+     viewMatrix; vec3 cameraPosition; };`, 144 bytes, buffer(3) — on ONE line, object block first.)
   5. If rule 4 matched at least once, `layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; };`
      is inserted as its own line. It goes before the first line that is not blank, not a `//` comment, not a `#`
      directive and not inside `#if`/`#ifdef`/`#ifndef`…`#endif`; if there is no such line, it goes at the end.
@@ -73,11 +76,13 @@ derives from) cannot be configured out through these crates. LTO might trim some
 |---|---|
 | `gl_DefaultUniformBlock`: all loose uniforms | `buffer(1)` in both stages. Vertex and fragment are linked in one glslang program, so its relaxed-rules cross-stage merge (`mergeGlobalUniformBlocks`) gives **one identical struct in both stages**. Fill one buffer and bind it to both. The fragment struct also contains vertex-only uniforms, and vice versa. |
 | `FrObject` | `buffer(2)`: `modelMatrix` @0, `modelViewMatrix` @64, `normalMatrix` @128 (3 columns × 16 B), size 176. Filled natively per draw. |
-| per-frame shared block | `buffer(3)`, reserved and not emitted yet |
+| `FrFrame` | `buffer(3)`: `projectionMatrix` @0, `viewMatrix` @64, `cameraPosition` @128, size 144. Filled natively per pass (main pass: three's projection with the MetalFX jitter). |
 | vertex attributes | `[[stage_in]]` with `attribute(location)` from `layout.attributes`. A `mat4` attribute (`instanceMatrix`) takes 4 consecutive locations, as columns `instanceMatrix_0..3`. Vertex buffers must use buffer indices ≥ 4. Only attributes the shader actually reads are listed. |
 | `sampler2D`/`samplerCube`/… | Each combined sampler is split into `texture(i)` + `sampler(i)` with the same `i`. Indices are program-wide: textures the fragment stage uses come first from 0, in glslang binding order, then vertex-only textures. A texture used in both stages has the same `i` in both. An array `sampler2D s[N]` (shadow maps) takes N consecutive indices and is listed as `s[0]`…`s[N-1]`; a length-1 array is still `s[0]`, as in WebGL. |
 | entry points | `fr_vertex` and `fr_fragment`. Each stage is a separate MSL source, so compile them as two `MTLLibrary`s: both declare `struct _RESERVED_IDENTIFIER_FIXUP_gl_DefaultUniformBlock`. |
 | clip space | `fixup_clipspace` is on. Feed three's OpenGL-convention `projectionMatrix` unchanged; the vertex shader remaps z to [0, w]. There is no y flip (GL and Metal NDC are both y-up). |
+| derivatives | Metal's window y points down, so `dfdy` has the opposite sign of GLSL's `dFdy`; every `dfdy(` in the MSL is routed through `fr_gl_dfdy` (= `-dfdy`), which keeps three's flat shading (`cross(dFdx, dFdy)`) and tangent-less normal maps (`getTangentFrame`) facing the right way. `gl_FragCoord.y` stays top-down (only three's dithering / shadow noise reads it). |
+| layout extras | `textures[i].kind` (`2d`/`2dArray`/`3d`/`cube`) and `.shadow` (depth-compare sampler), `attributes[i].type`, from SPIR-V reflection: the binder picks neutral textures, compare samplers and vertex formats from them. |
 
 Argument buffers are off. The target is MSL 3.0, platform macOS.
 

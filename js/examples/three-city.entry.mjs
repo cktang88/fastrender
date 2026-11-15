@@ -9,6 +9,7 @@ const { scene, camera, update, configure, stats } = createCity({ blocks });
 const programs = globalThis.__fr?.params?.programs === 'native' ? undefined : 'three';
 const renderer = new FastRenderer({ programs });
 configure(renderer);
+renderer.compile(scene, camera); // three's programs translated + compiled at load, not on the first frame
 console.log(`three-city: ${stats.buildings} buildings, ${stats.windows} instanced windows, programs: ${programs || 'native'}`);
 let frames = 0;
 globalThis.frame = (t) => {
