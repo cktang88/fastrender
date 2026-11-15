@@ -219,7 +219,8 @@ impl Manifest {
 
 /// `$FASTRENDER_PIPELINE_CACHE` (`off` / `0` / empty: nothing is persisted or prewarmed), else
 /// `~/Library/Caches/fastrender/pipelines` (macOS), `$XDG_CACHE_HOME/fastrender/pipelines` or
-/// `~/.cache/fastrender/pipelines`. One directory per user: a host that ships several games can give each its own.
+/// `~/.cache/fastrender/pipelines`. The base directory: `mac_programs` keeps one sub-directory per game (a
+/// manifest prewarms everything in it, so it should hold one game's pipelines).
 pub fn default_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("FASTRENDER_PIPELINE_CACHE") {
         return (!matches!(d.as_str(), "" | "0" | "off")).then(|| PathBuf::from(d));
@@ -764,6 +765,15 @@ impl<B: PipelineBackend> Compiler<B> {
         }
     }
 
+    /// Blocks until everything added / requested is compiled and no persist is under way. The manifest's own
+    /// queue (prewarm work nothing asked for yet) may still be running.
+    pub fn wait_demand(&self) {
+        let mut st = self.shared.lock();
+        while st.stats.pending_programs + st.stats.pending_pipelines > 0 || st.persisting {
+            st = self.shared.wait(st);
+        }
+    }
+
     /// Blocks until nothing is queued or compiling: everything added / requested and the whole manifest.
     pub fn wait_idle(&self) {
         let mut st = self.shared.lock();
@@ -911,6 +921,7 @@ mod tests {
             assert!(ev.iter().any(|e| matches!(e, Event::Persisted(Ok(Some(_))))));
             assert!(!c.dirty());
             assert_eq!(fake.persists.load(Ordering::SeqCst), 1);
+            c.wait_demand(); // nothing pending, no persist running: returns at once
         }
         // second launch: everything compiles before the game adds a program, from the stored MSL
         let fake = Arc::new(Fake::default());

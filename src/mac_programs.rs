@@ -133,7 +133,7 @@ pub struct CompileStats {
     pub first_complete_frame_ms: Option<f64>,
     /// the end of the last frame that skipped a draw
     pub last_incomplete_frame_ms: Option<f64>,
-    /// the last time the pending count fell to zero
+    /// the last time the render thread took a compile result and nothing was left pending
     pub all_ready_ms: Option<f64>,
     /// frame-to-frame gaps over 50 ms (the first frame aside), and the longest
     pub long_frames: u64,
@@ -172,7 +172,6 @@ pub struct Programs {
     skipped_at_poll: u64,
     stats: CompileStats,
     last_poll: Option<Instant>,
-    was_pending: bool,
     last_persist: Instant,
     /// what the last persist said (the binary archive's line, or its error)
     archive_note: Option<String>,
@@ -215,20 +214,26 @@ fn worker_qos() {
     unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0) };
 }
 
-fn start_compiler(dev: &Device) -> (usize, Compiler<Metal3>) {
+/// `game`: what identifies the game across launches (the JavaScriptCore host: its bundle path). Each game has its
+/// own manifest, stages and archive (`<cache>/game-<hash>`), so a launch prewarms that game's pipelines only; a
+/// host without an identity (Electron: one game per app) uses `<cache>/default`.
+fn start_compiler(dev: &Device, game: Option<&str>) -> (usize, Compiler<Metal3>) {
     mark_start();
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
     let workers = std::env::var("FASTRENDER_COMPILE_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or((cores / 2).clamp(2, 4));
-    let dir = pm::default_dir();
+    let dir = pm::default_dir().map(|d| match game {
+        Some(g) => d.join(format!("game-{:016x}", pm::hash128(&[g.as_bytes()]) as u64)),
+        None => d.join("default"),
+    });
     (workers, Compiler::new(Metal3::new(dev, dir.as_deref()), dir, workers, worker_qos))
 }
 
 /// Start compiling last launch's pipelines now (the manifest and the stored MSL: no JS needed), before the game's
 /// bundle is even read. The `Programs` created next for the same device takes this compiler over.
-pub fn prewarm(dev: &Device) {
+pub fn prewarm(dev: &Device, game: &str) {
     let mut early = EARLY.lock().unwrap_or_else(|e| e.into_inner());
     if early.is_none() {
-        let (workers, c) = start_compiler(dev);
+        let (workers, c) = start_compiler(dev, Some(game));
         *early = Some((dev as *const Device as usize, workers, c));
     }
 }
@@ -321,7 +326,7 @@ impl Programs {
         let nearest_clamp = sampler_with(dev, clamp);
         let defaults: [f32; 20] = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
         let early = EARLY.lock().unwrap_or_else(|e| e.into_inner()).take().filter(|e| e.0 == dev as *const Device as usize);
-        let (workers, compiler) = early.map(|e| (e.1, e.2)).unwrap_or_else(|| start_compiler(dev));
+        let (workers, compiler) = early.map(|e| (e.1, e.2)).unwrap_or_else(|| start_compiler(dev, None));
         let blocking = blocking_mode();
         Ok(Programs {
             names: HashMap::new(),
@@ -349,7 +354,6 @@ impl Programs {
             skipped_at_poll: 0,
             stats: CompileStats { blocking, workers, ..Default::default() },
             last_poll: None,
-            was_pending: false,
             last_persist: Instant::now(),
             archive_note: None,
         })
@@ -408,7 +412,9 @@ impl Programs {
 
     /// Apply what the workers finished: programs compiled (or failed), pipeline slots filled.
     fn drain(&mut self) {
+        let mut finished = false;
         for ev in self.compiler.poll() {
+            finished |= !matches!(ev, Event::Persisted(_));
             match ev {
                 Event::Program { hash, result } => {
                     for name in self.waiting_progs.remove(&hash).unwrap_or_default() {
@@ -453,6 +459,10 @@ impl Programs {
         }
         let q = self.compiler.stats();
         (self.compile_ms, self.pipeline_ms) = (q.library_ms, q.pipeline_ms);
+        if finished && q.pending_programs + q.pending_pipelines == 0 {
+            // as the render thread sees it: when it took the last result
+            self.stats.all_ready_ms = Some(since_start());
+        }
     }
 
     /// Once per frame, before anything else: take the workers' results, count the frame, and write the manifest
@@ -482,10 +492,6 @@ impl Programs {
             }
         }
         self.skipped_at_poll = skipped;
-        if pending == 0 && self.was_pending {
-            st.all_ready_ms = Some(since_start());
-        }
-        self.was_pending = pending > 0;
         if pending == 0 && q.prewarm_queued == 0 && self.last_persist.elapsed().as_secs_f32() > 1.0 && self.unsaved() {
             self.last_persist = now;
             self.compiler.persist();
@@ -500,16 +506,16 @@ impl Programs {
     /// Pipelines requested and not ready yet (their draws are skipped).
     pub fn pending_pipelines(&self) -> usize { self.compiler.stats().pending_pipelines }
 
-    /// Wait until everything queued is compiled (this launch's programs and pipelines and the manifest's), fill
-    /// the slots and persist the manifest + archive. True when the frame encoded last skipped draws: a harness
-    /// that captures renders one more frame.
+    /// Wait until every program added and every pipeline requested is compiled, fill the slots and persist the
+    /// manifest + archive (what is left of the manifest's prewarm queue is not waited for). True when the frame
+    /// encoded last skipped draws: a harness that captures renders one more frame.
     pub fn settle(&mut self) -> bool {
-        self.compiler.wait_idle();
+        self.compiler.wait_demand();
         self.drain();
         if self.unsaved() {
             self.last_persist = Instant::now();
             self.compiler.persist();
-            self.compiler.wait_idle();
+            self.compiler.wait_demand();
             self.drain();
         }
         self.skipped.get() != self.skipped_at_poll

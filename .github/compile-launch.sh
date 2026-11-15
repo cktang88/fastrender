@@ -28,7 +28,7 @@ rm -rf "$pc" "$sc"; clear_os_cache
 run "2 blocking (harness), cold" FASTRENDER_COMPILE=blocking FASTRENDER_PIPELINE_CACHE=off
 rm -rf "$pc" "$sc"; clear_os_cache
 run "3 async, cold" FASTRENDER_COMPILE=async
-echo "pipeline cache after the cold launch: $(ls "$pc" 2>/dev/null | tr '\n' ' ') $(du -sk "$pc" 2>/dev/null | cut -f1) KB, $(ls "$pc/stages" 2>/dev/null | wc -l | tr -d ' ') stages" | tee -a "$out"
+echo "pipeline cache after the cold launch: $(du -sk "$pc" 2>/dev/null | cut -f1) KB, $(find "$pc" -name '*.metal' 2>/dev/null | wc -l | tr -d ' ') stages, $(find "$pc" -name '*.binarchive' -exec du -k {} \; 2>/dev/null | cut -f1 | tr '\n' ' ')KB archive, manifest $(find "$pc" -name manifest.json -exec wc -c {} \; 2>/dev/null | awk '{print $1}') bytes" | tee -a "$out"
 run "4 async, warm (manifest+archive)" FASTRENDER_COMPILE=async
 clear_os_cache
 run "5 async, warm, OS cache removed" FASTRENDER_COMPILE=async

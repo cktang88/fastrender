@@ -326,7 +326,8 @@ type Sampler = Retained<ProtocolObject<dyn MTLSamplerState>>;
 impl ThreeScene {
     pub fn new(dev: &Device, shader_src: &str, bundle_path: &str, params_json: &str) -> Result<Self, String> {
         // last launch's pipelines start compiling now, on the workers, while the bundle loads
-        crate::mac_programs::prewarm(dev);
+        let game = std::fs::canonicalize(bundle_path).map_or(bundle_path.to_string(), |p| p.to_string_lossy().into_owned());
+        crate::mac_programs::prewarm(dev, &game);
         let game = std::fs::read_to_string(bundle_path).map_err(|e| format!("bundle {bundle_path}: {e}"))?;
         // the shared command buffer is native memory here (JavaScriptCore can expose it without a copy)
         // glslang's one-time setup off the first host.program call's path
