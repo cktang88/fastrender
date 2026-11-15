@@ -19,8 +19,9 @@ on:
     branches: [main]
   workflow_dispatch:
 concurrency:
+  # many pushes land on this branch: a started run finishes, only the newest waiting one is kept
   group: metal4-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   plan:
     runs-on: ubuntu-latest
