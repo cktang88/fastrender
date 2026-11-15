@@ -30,15 +30,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: play-smoke - fastrender (PARAVIRTUAL GPU - fps is not an Air's)
+        id: fr
         continue-on-error: true
         timeout-minutes: 40
         run: |
           sw_vers; sysctl -n machdep.cpu.brand_string
           rc=0; bash host/electron/scripts/play-world.sh --fps --play-seconds 15 --out "$GITHUB_WORKSPACE/play-out" --timeout 900 > play-fastrender.log 2>&1 || rc=$?
-          echo "play-world.sh exit $rc"
-          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE)|^\[fastrender\]|pointer lock|MISSING|^== " play-fastrender.log | cut -c1-900; } > play-fastrender-summary.txt
+          echo "play-world.sh exit $rc"; echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE)|^\[fastrender\]|pointer lock|MISSING|Assertion|signal|^== " play-fastrender.log | cut -c1-900; } > play-fastrender-summary.txt
           bash .github/annotate.sh notice "play-smoke fastrender (exit $rc)" play-fastrender-summary.txt 40
           grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" play-fastrender.log | tail -80
+      # which of play mode's differences from the golden run the failure depends on (the runner's paravirtual GPU
+      # driver has its own assertions: a crash here need not be one on real hardware)
+      - name: play-smoke - fastrender again, one change at a time (only when the run above failed)
+        if: ${{ always() && steps.fr.outputs.rc != '0' }}
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          try() { name=$1; shift; rc=0; "$@" --tag "play-fr-$name" > "play-fr-$name.log" 2>&1 || rc=$?; { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|DONE)|Assertion|signal|failed assertion" "play-fr-$name.log" | cut -c1-400; } > play-try.txt; bash .github/annotate.sh notice "play-smoke fastrender, $name (exit $rc)" play-try.txt 20; echo "== $name"; cat play-try.txt; }
+          P="bash host/electron/scripts/play-world.sh --no-build --play-seconds 5 --out $GITHUB_WORKSPACE/play-out --timeout 300"
+          try again $P
+          try golden-params $P --search '?mode=world&quality=low&weather=clear&tod=noon&seamless=0'
+          try vsync-off $P --renderer '{"vsync":0}'
+          try frameless $P --frame off
+          try fixed-size $P --size 800x500
+          try validation env MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog $P
       - name: play-smoke - the same game copy on stock WebGLRenderer, second run of the script (nothing to rebuild)
         if: always()
         continue-on-error: true

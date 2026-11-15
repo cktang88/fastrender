@@ -56,6 +56,8 @@ function startPlay() {
   G.__frPlayCfg = { dpr: play.dpr, aa: play.aa };
   const fr = !!host;
   const realCancel = cancelAnimationFrame.bind(G);
+  // the addon's stats() throws until FastRenderer attached its command buffer (the game creates its renderer later)
+  const stats = () => { try { return native.stats(); } catch { return null; } };
   const sent = [0, 0]; // ring sequence of the last two frames sent
   const acc = { frames: 0, js: 0, waited: 0, t: -1 };
   const tick = { t: -1, go: true, waitFrom: 0 };
@@ -63,7 +65,8 @@ function startPlay() {
     if (t === tick.t) return tick.go; // every callback of one display tick gets the same answer
     tick.t = t;
     tick.go = true;
-    if (fr && native.stats().lastFrameSeq < sent[0]) {
+    const s = fr && sent[0] ? stats() : null;
+    if (s && s.lastFrameSeq < sent[0]) {
       if (!tick.waitFrom) tick.waitFrom = realNow();
       if (realNow() - tick.waitFrom < 250) { tick.go = false; acc.waited++; }
     }
@@ -96,7 +99,7 @@ function startPlay() {
   // what the last half second looked like (the overlay's line, and report())
   const now = { fps: 0, js_ms: 0, gpu_ms: null, shown_fps: null, skipped: 0, waited: 0, draws: 0, size: '' };
   const lock = { changes: 0, errors: 0 };
-  let last = { t: realNow(), frames: 0, js: 0, waited: 0, s: fr ? native.stats() : null };
+  let last = { t: realNow(), frames: 0, js: 0, waited: 0, s: fr ? stats() : null };
   let el = null, shown = !!play.fps;
   const sample = () => {
     const t = realNow(), dt = (t - last.t) / 1000, n = acc.frames - last.frames;
@@ -107,11 +110,13 @@ function startPlay() {
     const r = G.__frPlayRenderer;
     let s = null;
     if (fr) {
-      s = native.stats();
-      const g = s.gpuFrames - last.s.gpuFrames;
-      now.gpu_ms = g > 0 ? (s.avgGpuMs * s.gpuFrames - last.s.avgGpuMs * last.s.gpuFrames) / g : null;
-      now.shown_fps = (s.framesRendered - last.s.framesRendered) / dt;
-      now.skipped = s.framesSkipped - last.s.framesSkipped;
+      s = stats();
+      const p = last.s || { gpuFrames: 0, avgGpuMs: 0, framesRendered: 0, framesSkipped: 0 };
+      if (!s) s = { ...p, lastDrawCount: 0, drawableWidth: 0, drawableHeight: 0 };
+      const g = s.gpuFrames - p.gpuFrames;
+      now.gpu_ms = g > 0 ? (s.avgGpuMs * s.gpuFrames - p.avgGpuMs * p.gpuFrames) / g : null;
+      now.shown_fps = (s.framesRendered - p.framesRendered) / dt;
+      now.skipped = s.framesSkipped - p.framesSkipped;
       now.draws = s.lastDrawCount;
       now.size = `${s.drawableWidth}x${s.drawableHeight}`;
     } else if (r) {
@@ -140,7 +145,7 @@ function startPlay() {
     /** JSON-able state for the main process (game/main.js --play-seconds) */
     report() {
       const W = G.__world;
-      const s = fr ? native.stats() : null;
+      const s = fr ? stats() : null;
       const q1 = (v) => (typeof v === 'number' ? +v.toFixed(2) : v);
       return {
         variant: fr ? 'fastrender' : 'webgl', started: !!(W && W.started), frames: acc.frames,
