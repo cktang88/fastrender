@@ -228,6 +228,13 @@ jobs:
           rc=0; FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 --shot golden-native-world-objects.png > world-objects-bench.txt 2>&1 || rc=$?
           grep -E "world-objects:|three frame cost|three programs:|error|Error" world-objects-bench.txt | cut -c1-1500 | tee world-objects-summary.txt
           bash .github/annotate.sh notice "world-objects bench (exit $rc)" world-objects-summary.txt 20
+          grep -v "ERR_FAILED\|fetch blocked" world-objects-bench.txt > world-objects-tail.txt; bash .github/annotate.sh notice "world-objects bench log tail" world-objects-tail.txt 45
+          if [ "$rc" != 0 ]; then  # bisect a crash: without the game's files (no models / images), then with a few draws only
+            rc2=0; ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 > wo-noassets.txt 2>&1 || rc2=$?
+            bash .github/annotate.sh notice "world-objects without assets (exit $rc2)" wo-noassets.txt 25
+            rc3=0; FASTRENDER_V3_MAX_DRAWS=1 FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 > wo-maxdraws.txt 2>&1 || rc3=$?
+            bash .github/annotate.sh notice "world-objects 1 draw (exit $rc3)" wo-maxdraws.txt 25
+          fi
           node js/golden/diff.mjs js/golden/world-objects-ref.png golden-native-world-objects.png golden-diff-world-objects.png | tee world-objects-golden.json
           echo "::notice title=world-objects golden (MAE vs browser r170)::$(cat world-objects-golden.json)"
           { echo "world-objects golden: $(cat world-objects-golden.json)"; cat world-objects-summary.txt; } >> "$GITHUB_STEP_SUMMARY"
