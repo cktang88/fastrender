@@ -415,29 +415,51 @@ jobs:
   jsc-profile:
     runs-on: macos-26
     continue-on-error: true
+    timeout-minutes: 75
+    env:
+      WO_BUNDLE: js/dist/world-objects.js
     steps:
       - uses: actions/checkout@v4
-      - name: build
+      - name: build + the game's JavaScriptCore bundle
         run: |
           brew install glslang spirv-cross
           cargo build --release
           (cd js && npm ci --silent)
-      - name: 3d-world-objects JS cost per engine configuration (JavaScriptCore options, signing, node, bun)
-        run: |
           WO_BASE=073aa9eae0ba86cecb16970162593281714214e3
-          if ! { git init -q ../3d-world-objects && git -C ../3d-world-objects fetch -q --depth 1 https://github.com/cktang88/3d-world-objects "$WO_BASE" && git -C ../3d-world-objects checkout -q FETCH_HEAD; } > wo-clone.txt 2>&1; then
-            bash .github/annotate.sh warning "jsc-profile: skipped (game fetch failed)" wo-clone.txt 5; exit 0
-          fi
-          for p in patches/3d-world-objects-000*.patch; do
-            git -C ../3d-world-objects -c user.name=ci -c user.email=ci@localhost am -q "$PWD/$p" || { echo "::error title=jsc-profile::$p does not apply"; exit 1; }
-          done
-          node js/examples/world-objects.build.mjs ../3d-world-objects js/dist/world-objects.js --target jsc --three three
-          bash .github/jsc-profile.sh js/dist/world-objects.js "$GITHUB_WORKSPACE/../3d-world-objects" || true
-          cat jsc-profile/summary.txt >> "$GITHUB_STEP_SUMMARY"
-          split -l 10 jsc-profile/summary.txt jsc-profile/summary-part-
-          i=0; for f in jsc-profile/summary-part-*; do i=$((i+1)); bash .github/annotate.sh notice "jsc-profile $i" "$f" 10; done
-          bash .github/annotate.sh notice "jsc-profile sampling profiler" jsc-profile/sampling-top.txt 60
+          git init -q ../3d-world-objects && git -C ../3d-world-objects fetch -q --depth 1 https://github.com/cktang88/3d-world-objects "$WO_BASE" && git -C ../3d-world-objects checkout -q FETCH_HEAD
+          for p in patches/3d-world-objects-000*.patch; do git -C ../3d-world-objects -c user.name=ci -c user.email=ci@localhost am -q "$PWD/$p"; done
+          node js/examples/world-objects.build.mjs ../3d-world-objects $WO_BUNDLE --target jsc --three three
+      - name: JS ms/frame per JIT tier (system JavaScriptCore, JSC_* options)
+        timeout-minutes: 30
+        run: |
+          bash .github/jsc-profile.sh tiers $WO_BUNDLE "$GITHUB_WORKSPACE/../3d-world-objects"
+          bash .github/annotate.sh notice "jsc-profile tiers" jsc-profile/summary-tiers.txt 40
           bash .github/annotate.sh notice "jsc-profile frame windows" jsc-profile/windows.txt 40
+      - name: JS ms/frame per code signature (ad hoc, hardened runtime, allow-jit entitlement)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: |
+          bash .github/jsc-profile.sh signing $WO_BUNDLE "$GITHUB_WORKSPACE/../3d-world-objects"
+          bash .github/annotate.sh notice "jsc-profile signing" jsc-profile/summary-signing.txt 40
+      - name: same bundle in node (V8) and bun (its own JavaScriptCore)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 45
+        run: |
+          bash .github/jsc-profile.sh engines $WO_BUNDLE "$GITHUB_WORKSPACE/../3d-world-objects"
+          bash .github/annotate.sh notice "jsc-profile engines" jsc-profile/summary-engines.txt 40
+      - name: with Metal (bench --three)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: |
+          bash .github/jsc-profile.sh metal $WO_BUNDLE "$GITHUB_WORKSPACE/../3d-world-objects"
+          bash .github/annotate.sh notice "jsc-profile metal" jsc-profile/summary-metal.txt 40
+      - name: options, compiles per tier, GC, sampling profiler
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          bash .github/jsc-profile.sh diagnostics $WO_BUNDLE "$GITHUB_WORKSPACE/../3d-world-objects"
+          bash .github/annotate.sh notice "jsc-profile diagnostics" jsc-profile/summary-diagnostics.txt 40
+          bash .github/annotate.sh notice "jsc-profile sampling profiler" jsc-profile/sampling-top.txt 60
       - uses: actions/upload-artifact@v4
         if: always()
         with:
