@@ -245,10 +245,12 @@ jobs:
       - name: real game 3d-world-objects - every program translates (src/xlat.rs) and compiles (Apple metal)
         if: ${{ !cancelled() }}
         continue-on-error: true
+        timeout-minutes: 20
         run: |
           test -d ../3d-world-objects || { echo "no game checkout: skipped"; exit 0; }
           # every program the game compiles, dumped by the node run (mock host, glslang CLI) -> xlat-dump -> metal
-          (cd js && timeout 900 node test/world-objects.node.mjs "$GITHUB_WORKSPACE/../3d-world-objects" --frames 3 --dump-programs "$GITHUB_WORKSPACE/wo-programs" > "$GITHUB_WORKSPACE/wo-node.txt" 2>&1) || true
+          (cd js && node test/world-objects.node.mjs "$GITHUB_WORKSPACE/../3d-world-objects" --frames 3 --dump-programs "$GITHUB_WORKSPACE/wo-programs" > "$GITHUB_WORKSPACE/wo-node.txt" 2>&1) || true
+          ls wo-programs/*.glsl > /dev/null 2>&1 || { tail -40 wo-node.txt > wo-node-tail.txt; bash .github/annotate.sh error "world-objects node run dumped no programs" wo-node-tail.txt 40; exit 1; }
           ./target/release/fastrender xlat-dump wo-programs wo-xlat > wo-xlat.txt 2>&1 || true
           for f in wo-xlat/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /tmp/x.air >> wo-metal.txt 2>&1 || echo "METAL FAIL $f" >> wo-xlat.txt; done
           echo "world-objects: $(grep 'programs translated' wo-xlat.txt), $(grep -c '^METAL FAIL' wo-xlat.txt) fail Apple metal; node: $(grep -c 'program failed' wo-node.txt) failed in the mock host" | tee wo-xlat-summary.txt
