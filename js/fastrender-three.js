@@ -186,9 +186,9 @@ export class FastRenderer {
       for (const name in a) {
         if (name === 'position' || name === 'normal' || name === 'uv' || name === 'color') continue;
         const at = a[name];
-        // per-instance attributes (InstancedBufferAttribute, e.g. a game's per-window size) need a per-instance vertex
-        // step natively: skipped (counted) so the geometry upload doesn't fail on its length
-        if (!at || !at.count || at.itemSize > 4 || at.isInstancedBufferAttribute) { this._unsupported(at && at.isInstancedBufferAttribute ? `instanced attribute ${name}` : `attribute ${name}`); continue; }
+        // per-instance attributes (InstancedBufferAttribute: a game's per-window size, a crowd's animation state) go
+        // along too, flagged perInstance: the native side steps them per instance and binds them by name
+        if (!at || !at.count || at.itemSize > 4) { this._unsupported(at && at.isInstancedBufferAttribute ? `instanced attribute ${name}` : `attribute ${name}`); continue; }
         (extra || (extra = [])).push(name);
       }
     }
@@ -206,8 +206,8 @@ export class FastRenderer {
       const meta = { vertices: a.position.count, indexed: !!g.index, colorSize: streams.color ? (a.color.itemSize >= 4 ? 4 : 3) : 0, sphere: [s.center.x, s.center.y, s.center.z, s.radius] };
       const arrays = [streams.position, streams.normal, streams.uv, streams.color, streams.index];
       if (extra) {
-        meta.attributes = extra.map((name) => ({ name, itemSize: a[name].itemSize }));
-        for (const name of extra) arrays.push(dense(a[name], a[name].itemSize));
+        meta.attributes = extra.map((name) => (a[name].isInstancedBufferAttribute ? { name, itemSize: a[name].itemSize, perInstance: true } : { name, itemSize: a[name].itemSize }));
+        for (const name of extra) arrays.push(a[name].isInstancedBufferAttribute ? perInstance(a[name]) : dense(a[name], a[name].itemSize));
       }
       this.host.upload(KIND.GEOMETRY, id, meta, ...arrays);
       geometryCurrent(rec, g, !!this._tp, true); // record the versions as uploaded (normals may have been computed)
@@ -536,7 +536,7 @@ function geometryCurrent(rec, g, v3, store = false) {
     for (const name in a) {
       if (name === 'position' || name === 'normal' || name === 'uv' || name === 'color') continue;
       const at = a[name];
-      if (!at || !at.count || at.itemSize > 4 || at.isInstancedBufferAttribute) continue;
+      if (!at || !at.count || at.itemSize > 4) continue;
       if (store) { x[k] = name; x[k + 1] = at; x[k + 2] = at.version; x[k + 3] = at.itemSize; }
       else if (x[k] !== name || x[k + 1] !== at || x[k + 2] !== at.version || x[k + 3] !== at.itemSize) return false;
       k += 4;
@@ -545,6 +545,19 @@ function geometryCurrent(rec, g, v3, store = false) {
     else if (k !== x.length) return false;
   }
   return same;
+}
+
+/**
+ * an InstancedBufferAttribute as dense f32, one element per instance: meshPerAttribute > 1 (an element shared by n
+ * consecutive instances) is expanded, so the native per-instance step is always 1
+ */
+function perInstance(at) {
+  const n = at.itemSize, k = at.meshPerAttribute || 1;
+  const src = dense(at, n);
+  if (k === 1) return src;
+  const out = new Float32Array(src.length * k);
+  for (let i = 0; i < at.count; i++) for (let j = 0; j < k; j++) out.set(src.subarray(i * n, i * n + n), (i * k + j) * n);
+  return out;
 }
 
 /** WebGLRenderer re-reads these material fields every draw: compare them with the copy in s, then store them */

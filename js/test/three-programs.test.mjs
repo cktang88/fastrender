@@ -283,6 +283,36 @@ function decode(buf) {
   assert.ok(h.releases.slice(relBefore).some((x) => x.kind === KIND.MATERIAL), 'material dispose -> host.release(MATERIAL, instance id)');
   scene.remove(cm, pm);
 
+  // per-instance attributes (InstancedBufferAttribute) go with the geometry, flagged perInstance, one element per
+  // instance (meshPerAttribute expanded); the program reflects them as vertex inputs the native side steps per instance
+  {
+    const g = new THREE.BoxGeometry();
+    g.setAttribute('aSize', new THREE.InstancedBufferAttribute(new Float32Array([1, 2, 3, 4, 5, 6]), 2));
+    const shared2 = new THREE.InstancedBufferAttribute(new Float32Array([7, 8]), 1); shared2.meshPerAttribute = 2;
+    g.setAttribute('aTone', shared2);
+    const wm = new THREE.MeshLambertMaterial();
+    wm.onBeforeCompile = (sh) => { sh.vertexShader = 'attribute vec2 aSize;\nattribute float aTone;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.xy *= aSize * aTone;'); };
+    const windows = new THREE.InstancedMesh(g, wm, 3);
+    scene.add(windows);
+    r.render(scene, camera);
+    const up = h.uploads.filter((x) => x.kind === KIND.GEOMETRY && x.meta.attributes && x.meta.attributes.some((a) => a.name === 'aSize')).at(-1);
+    assert.ok(up, 'the geometry upload carries the per-instance attributes');
+    const at = (n) => up.meta.attributes.findIndex((a) => a.name === n);
+    assert.deepEqual(up.meta.attributes[at('aSize')], { name: 'aSize', itemSize: 2, perInstance: true });
+    assert.deepEqual([...up.data[5 + at('aSize')]], [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual([...up.data[5 + at('aTone')]], [7, 7, 8, 8], 'meshPerAttribute 2: each element repeated for 2 instances');
+    const wid = decode(h.cmd).draws.find((d, i) => r._drawObjects[i] === windows).material;
+    const key = h.programIds.get(h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.id === wid).at(-1).meta.program);
+    assert.ok(['aSize', 'aTone', 'instanceMatrix'].every((n) => h.programs.get(key).layout.attributes.some((a) => a.name === n)), 'program reads them as attributes');
+    assert.ok(!Object.keys(r.info.unsupported).some((k) => k.startsWith('instanced attribute')), 'nothing skipped');
+    // an edit re-uploads
+    const n0 = h.uploads.length;
+    g.attributes.aSize.array[0] = 9; g.attributes.aSize.needsUpdate = true;
+    r.render(scene, camera);
+    assert.ok(h.uploads.slice(n0).some((x) => x.kind === KIND.GEOMETRY), 'InstancedBufferAttribute edit -> geometry re-upload');
+    scene.remove(windows);
+  }
+
   // ---------------------------------------------------------------- 5. per-frame cost: the 5000-mesh scene of three-renderer.test.mjs
   const big = new THREE.Scene();
   big.add(new THREE.DirectionalLight(0xffffff, 2), new THREE.AmbientLight(0x404040));

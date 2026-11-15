@@ -494,6 +494,9 @@ pub struct MaterialMeta {
 pub struct AttributeMeta {
     pub name: String,
     pub item_size: u32,
+    /// three's InstancedBufferAttribute: one element per instance (stepped per instance, not per vertex)
+    #[serde(default)]
+    pub per_instance: bool,
 }
 
 /// MATERIAL meta in v3: a material instance running three's program `program_key` with WebGLRenderer's pipeline state.
@@ -693,8 +696,9 @@ mod tests {
         assert_eq!(blend_of(&opaque), None);
         let add = ProgramMaterialMeta { blending: 2, premultiplied_alpha: true, ..m.clone() };
         assert_eq!(blend_of(&add), Some([201, 201, 201, 201, 100, 100]));
-        let g: GeometryMeta = serde_json::from_str(r#"{"vertices":3,"indexed":false,"sphere":[0,0,0,1],"attributes":[{"name":"skinIndex","itemSize":4}]}"#).unwrap();
-        assert_eq!((g.attributes[0].name.as_str(), g.attributes[0].item_size), ("skinIndex", 4));
+        let g: GeometryMeta = serde_json::from_str(r#"{"vertices":3,"indexed":false,"sphere":[0,0,0,1],"attributes":[{"name":"skinIndex","itemSize":4},{"name":"aSize","itemSize":2,"perInstance":true}]}"#).unwrap();
+        assert_eq!((g.attributes[0].name.as_str(), g.attributes[0].item_size, g.attributes[0].per_instance), ("skinIndex", 4, false));
+        assert_eq!((g.attributes[1].name.as_str(), g.attributes[1].item_size, g.attributes[1].per_instance), ("aSize", 2, true));
         let t: TextureMeta = serde_json::from_str(r#"{"width":16,"height":16,"format":1030,"type":1016,"flipRows":true}"#).unwrap();
         assert_eq!((t.texel(), t.flip_rows), (Some((2, 2)), true));
     }

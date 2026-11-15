@@ -104,6 +104,11 @@ struct ThreeMat {
 struct Geo {
     /// v3: every attribute by interned name: (name, buffer, floats per vertex)
     attrs: Vec<(u32, Buffer, u32)>,
+    /// v3: per-instance attributes (three's InstancedBufferAttribute, e.g. a building's per-window size or a crowd's
+    /// animation state), by interned name: (name, buffer, floats per instance), stepped per instance natively
+    inst_attrs: Vec<(u32, Buffer, u32)>,
+    /// the fewest instances any per-instance attribute holds (draws never step past it)
+    inst_cap: Option<usize>,
     pos: Buffer,
     nrm: Buffer,
     uv: Option<Buffer>,
@@ -730,8 +735,19 @@ impl ThreeScene {
         if let Some(b) = &col {
             attrs.push((self.progs.name_id("color"), b.clone(), m.color_size.clamp(3, 4)));
         }
+        let (mut inst_attrs, mut inst_cap) = (Vec::new(), None::<usize>);
         for (k, am) in m.attributes.iter().enumerate() {
             let data = f32s(a.get(5 + k).unwrap_or(&None)).ok_or_else(|| format!("attribute {}: no f32 data", am.name))?;
+            if am.per_instance {
+                // one element per instance (meshPerAttribute > 1 is expanded by the JS side)
+                let n = data.len() / am.item_size.max(1) as usize;
+                if !(1..=4).contains(&am.item_size) || n == 0 {
+                    return Err(format!("instanced attribute {}: {} floats of {}", am.name, data.len(), am.item_size));
+                }
+                inst_attrs.push((self.progs.name_id(&am.name), buffer_with(dev, data), am.item_size));
+                inst_cap = Some(inst_cap.map_or(n, |c| c.min(n)));
+                continue;
+            }
             if !(1..=4).contains(&am.item_size) || data.len() < m.vertices * am.item_size as usize {
                 return Err(format!("attribute {}: {} floats for {} vertices of {}", am.name, data.len(), m.vertices, am.item_size));
             }
@@ -741,6 +757,8 @@ impl ThreeScene {
             id,
             Geo {
                 attrs,
+                inst_attrs,
+                inst_cap,
                 pos,
                 nrm,
                 uv,
@@ -1125,7 +1143,10 @@ impl ThreeScene {
             } else if Some(a.name) == inst_names.1 {
                 if inst.is_some_and(|x| x.colors.is_some()) { SIG_INSTANCE | 3 } else { 0 }
             } else {
-                geo.attrs.iter().find(|g| g.0 == a.name).map_or(0, |g| g.2 as u64)
+                match geo.attrs.iter().find(|g| g.0 == a.name) {
+                    Some(g) => g.2 as u64,
+                    None => geo.inst_attrs.iter().find(|g| g.0 == a.name).map_or(0, |g| SIG_INSTANCE | g.2 as u64),
+                }
             };
             sig |= s << (4 * a_i);
         }
@@ -1403,7 +1424,10 @@ impl ThreeScene {
                 } else if Some(a.name) == inst_names.1 {
                     inst.and_then(|x| x.colors.as_ref()).map_or((&self.progs.defaults, 0), |c| (c, 0))
                 } else {
-                    g.attrs.iter().find(|x| x.0 == a.name).map_or((&self.progs.defaults, if a.cols == 4 { 16 } else { 0 }), |x| (&x.1, 0))
+                    match g.attrs.iter().chain(g.inst_attrs.iter()).find(|x| x.0 == a.name) {
+                        Some(x) => (&x.1, 0),
+                        None => (&self.progs.defaults, if a.cols == 4 { 16 } else { 0 }),
+                    }
                 };
                 enc.setVertexBuffer_offset_atIndex(Some(buf), off, b);
             }
@@ -1447,6 +1471,9 @@ impl ThreeScene {
 
     fn draw(&self, enc: &RenderEnc, d: &Draw, g: &Geo) {
         let n = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances).map(|_| d.instance_count as usize).unwrap_or(0) } else { 1 };
+        // per-instance attribute streams hold this many instances: never step past them (a short stream would read
+        // past its buffer)
+        let n = g.inst_cap.map_or(n, |c| n.min(c));
         if n == 0 {
             return;
         }
