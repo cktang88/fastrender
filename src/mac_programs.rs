@@ -907,14 +907,17 @@ fn descriptor(job: &PipelineJob<'_, Mt<Library>>) -> Result<Retained<MTLRenderPi
 
 /// The persisted binary form of the pipelines, Metal 3: one `MTLBinaryArchive` file per GPU. Last launch's
 /// archive is only looked up (`binaryArchives` on the descriptor, `FailOnBinaryArchiveMiss` to tell a hit from a
-/// compile); what the lookups missed is added to a second archive object on `persist` and serialised over the
-/// file, so lookups on other workers never race an archive that is being written.
+/// compile). `persist` builds a new archive from every pipeline this launch made, hit or compiled, and writes it
+/// over the file, so lookups on other workers never race an archive that is being written. It never adds to an
+/// archive opened from a file: Metal then fails to serialise once a new pipeline shares a stage function with one
+/// from the file ("missing 'vertex' stage in pipeline no. N", "expecting 'fragment' stage"; M2 Air, 2026-11-15).
 struct Archive {
     path: PathBuf,
     /// last launch's archive, opened on first use by a worker (None: no file, or Metal refused it)
     loaded: OnceLock<Option<Mt<Retained<NSArray<ProtocolObject<dyn MTLBinaryArchive>>>>>>,
-    missed: Mutex<Vec<Mt<Retained<MTLRenderPipelineDescriptor>>>>,
-    writer: Mutex<Option<Mt<BinaryArchive>>>,
+    /// every archived pipeline this launch made (a hit or a compile): the next file's contents
+    used: Mutex<Vec<Mt<Retained<MTLRenderPipelineDescriptor>>>>,
+    /// compiles since the last persist (pipelines the file does not have yet)
     unsaved: AtomicUsize,
 }
 
@@ -971,7 +974,7 @@ impl Metal3 {
         let archive = dir.filter(|_| on).map(|dir| {
             // per GPU: Metal rejects (or misses in) an archive built for another device or OS build by itself
             let gpu: String = dev.name().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-            Archive { path: dir.join(format!("metal3-{gpu}.binarchive")), loaded: OnceLock::new(), missed: Mutex::new(Vec::new()), writer: Mutex::new(None), unsaved: AtomicUsize::new(0) }
+            Archive { path: dir.join(format!("metal3-{gpu}.binarchive")), loaded: OnceLock::new(), used: Mutex::new(Vec::new()), unsaved: AtomicUsize::new(0) }
         });
         Metal3 { dev: Mt(dev.retain()), archive }
     }
@@ -1025,6 +1028,8 @@ impl PipelineBackend for Metal3 {
                 if let Some(list) = loaded {
                     d.setBinaryArchives(Some(&list.0));
                     if let Ok(p) = dev.newRenderPipelineStateWithDescriptor_options_reflection_error(&d, MTLPipelineOption::FailOnBinaryArchiveMiss, None) {
+                        d.setBinaryArchives(None);
+                        a.used.lock().unwrap_or_else(|e| e.into_inner()).push(Mt(d));
                         return Ok((Mt(p), true));
                     }
                     // a miss (new pipeline, another OS build, another GPU): compile, and add it at the next persist
@@ -1033,7 +1038,7 @@ impl PipelineBackend for Metal3 {
             }
             let p = dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string())?;
             if let Some(a) = archive {
-                a.missed.lock().unwrap_or_else(|e| e.into_inner()).push(Mt(d));
+                a.used.lock().unwrap_or_else(|e| e.into_inner()).push(Mt(d));
                 a.unsaved.fetch_add(1, Ordering::Relaxed);
             }
             Ok((Mt(p), false))
@@ -1042,79 +1047,35 @@ impl PipelineBackend for Metal3 {
 
     fn persist(&self) -> Result<Option<String>, String> {
         let Some(a) = &self.archive else { return Ok(None) };
-        let missed = std::mem::take(&mut *a.missed.lock().unwrap_or_else(|e| e.into_inner()));
-        a.unsaved.fetch_sub(missed.len(), Ordering::Relaxed);
-        if missed.is_empty() {
+        let new = a.unsaved.swap(0, Ordering::Relaxed);
+        if new == 0 {
             return Ok(None);
         }
+        let used = a.used.lock().unwrap_or_else(|e| e.into_inner()).clone();
         autoreleasepool(|_| {
             let t = Instant::now();
-            let dev = &self.dev.0;
-            let mut w = a.writer.lock().unwrap_or_else(|e| e.into_inner());
-            if w.is_none() {
-                // on top of last launch's file when Metal still accepts it, else from empty
-                let from_file = a.path.exists().then(|| open_archive(dev, Some(&a.path)).ok()).flatten();
-                *w = Some(Mt(match from_file {
-                    Some(ar) => ar,
-                    None => open_archive(dev, None).map_err(|e| format!("binary archive not created: {e}"))?,
-                }));
-            }
-            let ar = &w.as_ref().unwrap().0;
-            let (mut added, mut failed) = (0, None);
-            for d in &missed {
-                match ar.addRenderPipelineFunctionsWithDescriptor_error(&d.0) {
-                    Ok(()) => added += 1,
-                    Err(e) => failed = Some(e.localizedDescription().to_string()),
+            let ar = open_archive(&self.dev.0, None).map_err(|e| format!("binary archive not created: {e}"))?;
+            let mut failed = None;
+            for d in &used {
+                if let Err(e) = ar.addRenderPipelineFunctionsWithDescriptor_error(&d.0) {
+                    failed = Some(e.localizedDescription().to_string());
                 }
-            }
-            if added == 0 {
-                return Err(format!("binary archive: none of {} pipelines could be added: {}", missed.len(), failed.unwrap_or_default()));
             }
             if let Some(dir) = a.path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             }
             let tmp = a.path.with_extension(format!("{}.tmp", std::process::id()));
-            let _ = std::fs::remove_file(&tmp);
             let url = NSURL::from_file_path(&tmp).ok_or("archive path is not a file URL")?;
-            if let Err(why) = serialise(ar, &url) {
-                // one pipeline Metal cannot serialise must not cost the whole archive: add the new ones in halves on
-                // top of the last file that serialised, splitting a half that breaks it down to the single pipeline
-                // (about 2 log2(n) serialisations per bad pipeline, not one per pipeline: 533 s for ~300 on an M2 Air)
+            if let Err(e) = serialise(&ar, &url) {
                 let _ = std::fs::remove_file(&tmp);
-                let good = a.path.with_extension(format!("{}.good.tmp", std::process::id()));
-                let _ = std::fs::remove_file(&good);
-                let reopen = |good: &std::path::Path| {
-                    let base = [good, a.path.as_path()].into_iter().find(|p| p.exists());
-                    base.and_then(|p| open_archive(dev, Some(p)).ok()).map_or_else(|| open_archive(dev, None), Ok)
-                };
-                added = 0;
-                let mut todo = vec![&missed[..]];
-                while let Some(part) = todo.pop() {
-                    let cand = reopen(&good).map_err(|e| format!("binary archive not created: {e}"))?;
-                    let ok = part.iter().all(|d| cand.addRenderPipelineFunctionsWithDescriptor_error(&d.0).is_ok()) && serialise(&cand, &url).is_ok();
-                    if ok && std::fs::rename(&tmp, &good).is_ok() {
-                        added += part.len();
-                    } else {
-                        let _ = std::fs::remove_file(&tmp);
-                        if part.len() > 1 {
-                            let (a, b) = part.split_at(part.len() / 2);
-                            todo.extend([b, a]);
-                        }
-                    }
-                }
-                *w = Some(Mt(reopen(&good).map_err(|e| format!("binary archive not created: {e}"))?));
-                if added == 0 {
-                    return Err(format!("binary archive not serialised: {why} (none of {} pipelines could be kept)", missed.len()));
-                }
-                std::fs::rename(&good, &a.path).map_err(|e| format!("binary archive not moved into place: {e}"))?;
-                failed = Some(why);
-            } else {
-                std::fs::rename(&tmp, &a.path).map_err(|e| format!("binary archive not moved into place: {e}"))?;
+                return Err(format!("binary archive not serialised ({} pipelines, {new} new): {e}", used.len()));
             }
+            std::fs::rename(&tmp, &a.path).map_err(|e| format!("binary archive not moved into place: {e}"))?;
             let bytes = std::fs::metadata(&a.path).map_or(0, |m| m.len());
             Ok(Some(format!(
-                "{added} pipelines added{} in {:.0} ms, {} KB at {}",
-                failed.map_or(String::new(), |e| format!(" ({} left out: {e})", missed.len() - added)),
+                "{} pipelines ({new} new){} in {:.0} ms, {} KB at {}",
+                used.len(),
+                failed.map_or(String::new(), |e| format!(", some not added: {e}")),
                 t.elapsed().as_secs_f64() * 1000.0,
                 bytes >> 10,
                 a.path.display()
