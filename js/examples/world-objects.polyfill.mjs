@@ -88,7 +88,15 @@ if (typeof G.URL === 'undefined') {
     toString() { return this.href; }
   };
 }
-G.AbortController ||= class { constructor() { this.signal = { aborted: false, addEventListener: noop, removeEventListener: noop }; } abort() { this.signal.aborted = true; } };
+// three r187's FileLoader / ImageBitmapLoader read the AbortSignal global (AbortSignal.any)
+G.AbortSignal ||= class AbortSignal {
+  constructor() { this.aborted = false; this.reason = undefined; this.onabort = null; }
+  addEventListener() {} removeEventListener() {} throwIfAborted() { if (this.aborted) throw this.reason; }
+  static abort(reason) { const s = new G.AbortSignal(); s.aborted = true; s.reason = reason; return s; }
+  static timeout() { return new G.AbortSignal(); }
+  static any(signals) { const s = new G.AbortSignal(); for (const x of signals || []) if (x && x.aborted) { s.aborted = true; s.reason = x.reason; } return s; }
+};
+G.AbortController ||= class { constructor() { this.signal = new G.AbortSignal(); } abort(reason) { this.signal.aborted = true; this.signal.reason = reason; } };
 G.WeakRef ||= class { constructor(t) { this.t = t; } deref() { return this.t; } };
 G.FinalizationRegistry ||= class { register() {} unregister() {} };
 G.structuredClone ||= (v) => JSON.parse(JSON.stringify(v));
