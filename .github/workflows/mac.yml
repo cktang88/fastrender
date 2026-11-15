@@ -242,6 +242,20 @@ jobs:
           node js/golden/diff.mjs js/golden/world-objects-ref.png golden-native-world-objects.png golden-diff-world-objects.png | tee world-objects-golden.json
           echo "::notice title=world-objects golden (MAE vs browser r170)::$(cat world-objects-golden.json)"
           { echo "world-objects golden: $(cat world-objects-golden.json)"; cat world-objects-summary.txt; } >> "$GITHUB_STEP_SUMMARY"
+      - name: real game 3d-world-objects - every program translates (src/xlat.rs) and compiles (Apple metal)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          test -d ../3d-world-objects || { echo "no game checkout: skipped"; exit 0; }
+          # every program the game compiles, dumped by the node run (mock host, glslang CLI) -> xlat-dump -> metal
+          (cd js && timeout 900 node test/world-objects.node.mjs "$GITHUB_WORKSPACE/../3d-world-objects" --frames 3 --dump-programs "$GITHUB_WORKSPACE/wo-programs" > "$GITHUB_WORKSPACE/wo-node.txt" 2>&1) || true
+          ./target/release/fastrender xlat-dump wo-programs wo-xlat > wo-xlat.txt 2>&1 || true
+          for f in wo-xlat/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /tmp/x.air >> wo-metal.txt 2>&1 || echo "METAL FAIL $f" >> wo-xlat.txt; done
+          echo "world-objects: $(grep 'programs translated' wo-xlat.txt), $(grep -c '^METAL FAIL' wo-xlat.txt) fail Apple metal; node: $(grep -c 'program failed' wo-node.txt) failed in the mock host" | tee wo-xlat-summary.txt
+          grep "^FAIL\|^METAL FAIL" wo-xlat.txt | head -30 >> wo-xlat-summary.txt || true
+          bash .github/annotate.sh notice "world-objects programs (xlat + metal)" wo-xlat-summary.txt 32
+          cat wo-xlat-summary.txt >> "$GITHUB_STEP_SUMMARY"
+          ! grep -q "^FAIL\|^METAL FAIL" wo-xlat.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

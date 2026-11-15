@@ -68,6 +68,78 @@ function splitUniform(body) {
 }
 
 /**
+ * Keywords of Vulkan GLSL 4.50 that GLSL ES 3.00 leaves free as identifiers (src/xlat.rs VULKAN_RESERVED, same list):
+ * normalizeGlsl prefixes them with RESERVED_PREFIX; reflected names are mapped back (demangle).
+ */
+export const VULKAN_RESERVED = new Set([
+  'attachmentEXT', 'buffer', 'iimage2DMS', 'iimage2DMSArray', 'iimageCubeArray', 'image2DMS', 'image2DMSArray',
+  'imageCubeArray', 'isubpassInput', 'isubpassInputMS', 'itexture1D', 'itexture1DArray', 'itexture2D',
+  'itexture2DArray', 'itexture2DMS', 'itexture2DMSArray', 'itexture2DRect', 'itexture3D', 'itextureBuffer',
+  'itextureCube', 'itextureCubeArray', 'pervertexNV', 'precise', 'sampler', 'samplerShadow', 'shared',
+  'subpassInput', 'subpassInputMS', 'texture1D', 'texture1DArray', 'texture2D', 'texture2DArray', 'texture2DMS',
+  'texture2DMSArray', 'texture2DRect', 'texture3D', 'textureBuffer', 'textureCube', 'textureCubeArray',
+  'uimage2DMS', 'uimage2DMSArray', 'uimageCubeArray', 'usubpassInput', 'usubpassInputMS', 'utexture1D',
+  'utexture1DArray', 'utexture2D', 'utexture2DArray', 'utexture2DMS', 'utexture2DMSArray', 'utexture2DRect',
+  'utexture3D', 'utextureBuffer', 'utextureCube', 'utextureCubeArray',
+]);
+export const RESERVED_PREFIX = 'fr_kw_';
+
+const isWordCode = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+
+/** names the source #defines */
+function definedMacros(src) {
+  const out = new Set();
+  for (const l of src.split('\n')) {
+    const m = /^\s*#\s*define[ \t]\s*([A-Za-z0-9_]+)/.exec(l);
+    if (m) out.add(m[1]);
+  }
+  return out;
+}
+
+/** rule 6: `#define SHADER_NAME <name>` with characters glslang rejects -> sanitised line (null: unchanged) */
+function shaderName(line) {
+  const m = /^(\s*)#(\s*)define([ \t]+)SHADER_NAME([ \t][^]*)$/.exec(line);
+  if (!m || /^[A-Za-z0-9_ \t\-.,:;+*=<>!&|^%~?()[\]{}']*$/.test(m[4])) return null;
+  let v = '';
+  for (const ch of m[4].trim()) v += /^[A-Za-z0-9_\-.,:;+*=<>!&|^%~?()[\]{}']$/.test(ch) ? ch : '_';
+  return `${m[1]}#${m[2]}define${m[3]}SHADER_NAME ${v}`;
+}
+
+/** rule 7 on one line (null: unchanged); st.c: inside a block comment at the line's start (updated) */
+function renameReserved(line, st, macros) {
+  let out = null, copied = 0, i = 0;
+  const n = line.length;
+  while (i < n) {
+    if (st.c) {
+      const p = line.indexOf('*/', i);
+      if (p < 0) break;
+      i = p + 2; st.c = false;
+      continue;
+    }
+    const c = line.charCodeAt(i);
+    if (c === 47 && line.charCodeAt(i + 1) === 47) break;
+    if (c === 47 && line.charCodeAt(i + 1) === 42) { st.c = true; i += 2; continue; }
+    if (isWordCode(c)) {
+      const start = i;
+      while (i < n && isWordCode(line.charCodeAt(i))) i++;
+      const w = line.slice(start, i);
+      if (!(c >= 48 && c <= 57) && VULKAN_RESERVED.has(w) && !macros.has(w)) {
+        out = (out === null ? '' : out) + line.slice(copied, start) + RESERVED_PREFIX + w;
+        copied = i;
+      }
+      continue;
+    }
+    i++;
+  }
+  return out === null ? null : out + line.slice(copied);
+}
+
+/** a reflected name without the prefixes normalizeGlsl added (`a.fr_kw_buffer` -> `a.buffer`) */
+export function demangle(name) {
+  return name.includes(RESERVED_PREFIX) ? name.replace(/(^|[^A-Za-z0-9_])fr_kw_/g, '$1') : name;
+}
+
+/**
  * GLSL ES 3.00 exactly as three emits it -> GLSL 4.50 for glslang's Vulkan target. A line-for-line port of
  * `normalize_glsl` in src/xlat.rs (tests/fixtures/xlat/normalize/*.in.glsl -> *.out.glsl check both):
  *  1. a line whose trimmed text starts with `#version` becomes `#version 450`;
@@ -78,7 +150,12 @@ function splitUniform(body) {
  *     vec3 cameraPosition) are removed: the line becomes empty, or `uniform [<q> ]<type> <rest, ", ">;`;
  *  5. if any object uniform was removed OBJECT_BLOCK, and if any camera uniform was removed FRAME_BLOCK, is inserted
  *     (both on ONE line, separated by a space) before the first line that is not blank, not a `//` comment, not a
- *     preprocessor directive and not inside #if/#ifdef/#ifndef (else at the end).
+ *     preprocessor directive and not inside #if/#ifdef/#ifndef (else at the end);
+ *  6. `#define SHADER_NAME <name>` (three writes material.name there unescaped: `painted_metal #414234`) with a
+ *     character outside [A-Za-z0-9_] and -.,:;+*=<>!&|^%~?()[]{}' : the name is trimmed and each such character (code
+ *     point) becomes `_` (glslang rejects `#` and `"` there; `/` could open a comment, `\` continue the line);
+ *  7. a whole identifier in VULKAN_RESERVED (e.g. three's `textureBicubic( sampler2D sampler, ... )`) that the source
+ *     does not #define becomes RESERVED_PREFIX + word, outside // and block comments, on lines rules 1-2 keep.
  * A trailing `// comment` is ignored (and dropped from a line rules 3/4 change).
  * Line endings become `\n`; the output always ends with `\n`. Idempotent.
  */
@@ -87,12 +164,18 @@ export function normalizeGlsl(src) {
   if (segs[segs.length - 1] === '') segs.pop();
   const out = [];
   let foundObject = false, foundFrame = false;
+  const macros = definedMacros(src), st = { c: false };
   for (let i = 0; i < segs.length; i++) {
     let line = segs[i];
     if ((i < segs.length - 1 || src.endsWith('\n')) && line.endsWith('\r')) line = line.slice(0, -1); // Rust str::lines
-    const t = line.trim();
+    let t = line.trim();
     if (t.startsWith('#version')) { out.push('#version 450'); continue; }
     if (t.startsWith('#extension')) { out.push(''); continue; }
+    const named = shaderName(line);
+    if (named !== null) line = named;
+    const renamed = renameReserved(line, st, macros);
+    if (renamed !== null) line = renamed;
+    t = line.trim();
     const c = t.indexOf('//');
     const code = c >= 0 ? t.slice(0, c).trimEnd() : t;
     if (!code.endsWith(';')) { out.push(line); continue; }

@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 /// Bumped whenever the translation output (MSL or layout) can change, so stale cache entries are never used.
 /// The `xlat-N` part is bumped by hand when this module's output changes; the crate versions are checked against
 /// Cargo.lock by the `translator_version_matches_lockfile` test.
-pub const TRANSLATOR_VERSION: &str = "xlat-5 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
+pub const TRANSLATOR_VERSION: &str = "xlat-6 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
 
 pub const DEFAULT_BLOCK_BUFFER: u32 = 1;
 pub const OBJECT_BLOCK_BUFFER: u32 = 2;
@@ -71,12 +71,23 @@ pub const FRAME_BLOCK_SIZE: u32 = 144;
 ///    inserted (both on ONE line, object block first, separated by a space) before the first line that is not
 ///    blank, not a `//` comment, not a preprocessor directive and not inside `#if`/`#ifdef`/`#ifndef` (end of file
 ///    if none). Each block always declares all its members, so it is identical in both stages.
+/// 6. a `#define SHADER_NAME <name>` line (three writes `material.name` there, unescaped: `painted_metal #414234`)
+///    and a character glslang cannot take there (`#`, `"`; also `/`, `\\`, `` ` ``, `@`, `$`, non-ASCII, controls:
+///    anything but `[A-Za-z0-9_]` and ``-.,:;+*=<>!&|^%~?()[]{}'``) gets the name trimmed and each such character
+///    (Unicode scalar) replaced by `_`; other lines are kept as they are. WebGL accepts the `#`, glslang does not;
+/// 7. every whole identifier in [`VULKAN_RESERVED`] (keywords of Vulkan GLSL 4.50 that are plain identifiers in
+///    GLSL ES 3.00, e.g. three's `textureBicubic( sampler2D sampler, ... )`) that is not a macro the source `#define`s
+///    (three's `#define texture2D texture`: never seen by the parser) becomes [`RESERVED_PREFIX`]`<word>`, outside
+///    `//` and `/* */` comments (tracked across lines), on every line rules 1-2 do not replace. Reflected names are
+///    mapped back ([`demangle`]), so the layout keeps the game's names.
 /// "Alone on its line": a trailing `// comment` is ignored (and dropped from a line rule 3 or 4 changes); after
 /// trimming whitespace the statement ends in `;`; the part before it is split on whitespace (names also on `,`).
 /// Line endings are normalised to `\n`.
 pub fn normalize_glsl(src: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let (mut found_object, mut found_frame) = (false, false);
+    let macros = defined_macros(src);
+    let mut in_comment = false;
     for line in src.lines() {
         let t = line.trim();
         if t.starts_with("#version") {
@@ -86,6 +97,10 @@ pub fn normalize_glsl(src: &str) -> String {
             out.push(String::new());
             continue;
         }
+        let named = shader_name(line);
+        let renamed = rename_reserved(named.as_deref().unwrap_or(line), &mut in_comment, &macros);
+        let line: &str = renamed.as_deref().or(named.as_deref()).unwrap_or(line);
+        let t = line.trim();
         let code = match t.find("//") {
             Some(i) => t[..i].trim_end(),
             None => t,
@@ -153,6 +168,140 @@ pub fn normalize_glsl(src: &str) -> String {
     let mut s = out.join("\n");
     s.push('\n');
     s
+}
+
+/// Keywords (or reserved words) of GLSL 4.50 with GL_KHR_vulkan_glsl, as glslang 15 parses `#version 450` for
+/// Vulkan, that GLSL ES 3.00 (WebGL 2) leaves free as identifiers. Found by compiling `float f(float W)` for every
+/// GLSL 4.50 / Vulkan GLSL keyword under both (`#version 300 es` passes, `#version 450 -V` fails), plus `shared`
+/// (a keyword from ES 3.10; ANGLE reserves it in ES 3.00 but older drivers did not) and the
+/// `pervertexNV` / `attachmentEXT` extension keywords glslang always reserves. Kept sorted (binary search; the JS
+/// list in js/three-programs.js is the same).
+pub const VULKAN_RESERVED: &[&str] = &[
+    "attachmentEXT", "buffer", "iimage2DMS", "iimage2DMSArray", "iimageCubeArray", "image2DMS", "image2DMSArray",
+    "imageCubeArray", "isubpassInput", "isubpassInputMS", "itexture1D", "itexture1DArray", "itexture2D",
+    "itexture2DArray", "itexture2DMS", "itexture2DMSArray", "itexture2DRect", "itexture3D", "itextureBuffer",
+    "itextureCube", "itextureCubeArray", "pervertexNV", "precise", "sampler", "samplerShadow", "shared",
+    "subpassInput", "subpassInputMS", "texture1D", "texture1DArray", "texture2D", "texture2DArray", "texture2DMS",
+    "texture2DMSArray", "texture2DRect", "texture3D", "textureBuffer", "textureCube", "textureCubeArray",
+    "uimage2DMS", "uimage2DMSArray", "uimageCubeArray", "usubpassInput", "usubpassInputMS", "utexture1D",
+    "utexture1DArray", "utexture2D", "utexture2DArray", "utexture2DMS", "utexture2DMSArray", "utexture2DRect",
+    "utexture3D", "utextureBuffer", "utextureCube", "utextureCubeArray",
+];
+/// What [`normalize_glsl`] puts before a [`VULKAN_RESERVED`] identifier.
+pub const RESERVED_PREFIX: &str = "fr_kw_";
+
+/// Names the source `#define`s (object- or function-like).
+fn defined_macros(src: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for l in src.lines() {
+        let Some(d) = l.trim_start().strip_prefix('#') else { continue };
+        let Some(rest) = d.trim_start().strip_prefix("define") else { continue };
+        if !rest.starts_with(|c: char| c == ' ' || c == '\t') {
+            continue;
+        }
+        let rest = rest.trim_start();
+        let n = rest.bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').count();
+        if n > 0 {
+            out.push(&rest[..n]);
+        }
+    }
+    out
+}
+
+/// Rule 6: `#define SHADER_NAME <name>` with a name glslang can't take -> the sanitised line (None: unchanged).
+fn shader_name(line: &str) -> Option<String> {
+    let lead = line.len() - line.trim_start().len();
+    let d = line[lead..].strip_prefix('#')?;
+    let pad = d.len() - d.trim_start().len();
+    let rest = d[pad..].strip_prefix("define")?;
+    let pad2 = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    if pad2 == 0 {
+        return None;
+    }
+    let name = rest[pad2..].strip_prefix("SHADER_NAME")?;
+    if !name.starts_with([' ', '\t']) {
+        return None;
+    }
+    if name.chars().all(|c| c == ' ' || c == '\t' || shader_name_char(c)) {
+        return None;
+    }
+    let value: String = name.trim().chars().map(|c| if shader_name_char(c) { c } else { '_' }).collect();
+    Some(format!("{}#{}define{}SHADER_NAME {value}", &line[..lead], &d[..pad], &rest[..pad2]))
+}
+
+/// A character rule 6 keeps in a SHADER_NAME (glslang takes it in a macro body; `#` and `"` it rejects, `/` could
+/// open a comment, `\\` continue the line).
+fn shader_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "_-.,:;+*=<>!&|^%~?()[]{}'".contains(c)
+}
+
+/// Rule 7 on one line (None: unchanged). `in_comment`: inside a `/* */` comment at the line's start (updated).
+fn rename_reserved(line: &str, in_comment: &mut bool, macros: &[&str]) -> Option<String> {
+    let b = line.as_bytes();
+    let mut out: Option<String> = None;
+    let mut copied = 0; // bytes of `line` already in `out`
+    let mut i = 0;
+    while i < b.len() {
+        if *in_comment {
+            match line[i..].find("*/") {
+                Some(p) => {
+                    i += p + 2;
+                    *in_comment = false;
+                }
+                None => break,
+            }
+            continue;
+        }
+        let c = b[i];
+        if c == b'/' && b.get(i + 1) == Some(&b'/') {
+            break;
+        }
+        if c == b'/' && b.get(i + 1) == Some(&b'*') {
+            *in_comment = true;
+            i += 2;
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let w = &line[start..i];
+            if !c.is_ascii_digit() && VULKAN_RESERVED.binary_search(&w).is_ok() && !macros.contains(&w) {
+                let o = out.get_or_insert_with(|| String::with_capacity(line.len() + 16));
+                o.push_str(&line[copied..start]);
+                o.push_str(RESERVED_PREFIX);
+                o.push_str(w);
+                copied = i;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out.map(|mut o| {
+        o.push_str(&line[copied..]);
+        o
+    })
+}
+
+/// A reflected name with every [`RESERVED_PREFIX`] [`normalize_glsl`] added removed (`a.fr_kw_buffer` -> `a.buffer`).
+pub fn demangle(name: &str) -> String {
+    if !name.contains(RESERVED_PREFIX) {
+        return name.to_string();
+    }
+    let b = name.as_bytes();
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    while i < name.len() {
+        if name[i..].starts_with(RESERVED_PREFIX) && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')) {
+            i += RESERVED_PREFIX.len();
+            continue;
+        }
+        let ch = name[i..].chars().next().unwrap_or('_');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// `uniform [<precision>] <type> a, b , c` (no `;`) -> (precision, type, [a, b, c]); None for anything else
@@ -948,9 +1097,9 @@ fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String>
         fragment_entry: FRAGMENT_ENTRY.into(),
         layout: Layout {
             size: default_block.size,
-            members: default_block.members,
-            textures,
-            attributes: vi.attributes,
+            members: default_block.members.into_iter().map(|m| Member { name: demangle(&m.name), ..m }).collect(),
+            textures: textures.into_iter().map(|t| Texture { name: demangle(&t.name), ..t }).collect(),
+            attributes: vi.attributes.into_iter().map(|a| Attribute { name: demangle(&a.name), ..a }).collect(),
             object_block,
             frame_block,
         },
@@ -1214,6 +1363,26 @@ mod tests {
                 assert!(!n.contains("precision highp float;"), "{name}");
             }
         }
+    }
+
+    #[test]
+    fn reserved_words_and_shader_names() {
+        assert!(VULKAN_RESERVED.windows(2).all(|w| w[0] < w[1]), "VULKAN_RESERVED must stay sorted (binary search)");
+        assert_eq!(demangle("fr_kw_buffer"), "buffer");
+        assert_eq!(demangle("u.fr_kw_shared[2].x"), "u.shared[2].x");
+        assert_eq!(demangle("my_fr_kw_x"), "my_fr_kw_x");
+        assert_eq!(demangle("plain"), "plain");
+        // a material name with `#`, a uniform, a struct member and a function parameter named like Vulkan keywords:
+        // translates, and the layout keeps the game's names
+        let vs = "#version 300 es\n#define SHADER_NAME painted_metal #414234\nuniform mat4 modelViewMatrix;\nuniform mat4 projectionMatrix;\nin vec3 position;\nin float buffer;\nout float vB;\nvoid main() { vB = buffer; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }\n";
+        let fs = "#version 300 es\n#define SHADER_NAME painted_metal #414234\nprecision highp float;\n#define texture2D texture\nstruct S { float shared; vec3 precise; };\nuniform S u;\nuniform float sampler;\nuniform sampler2D map;\nin float vB;\nout vec4 o;\nvec4 bicubic(sampler2D sampler, vec2 uv) { return texture2D(sampler, uv); }\nvoid main() { o = bicubic(map, vec2(0.5)) + vec4(u.precise, u.shared + sampler + vB); }\n";
+        let p = translate(vs, fs).expect("translates");
+        let names: Vec<&str> = p.layout.members.iter().map(|m| m.name.as_str()).collect();
+        for n in ["u.shared", "u.precise", "sampler"] {
+            assert!(names.contains(&n), "{n} in {names:?}");
+        }
+        assert!(p.layout.attributes.iter().any(|a| a.name == "buffer"));
+        assert!(p.layout.textures.iter().any(|t| t.name == "map"));
     }
 
     // ---- translate + layout invariants ----

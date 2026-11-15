@@ -1152,13 +1152,13 @@ float computeSpecularOcclusion( const in float dotNV, const in float ambientOccl
 		return g0( fuv.y ) * ( g0x * textureLod( tex, p0, lod ) + g1x * textureLod( tex, p1, lod ) ) +
 			g1( fuv.y ) * ( g0x * textureLod( tex, p2, lod ) + g1x * textureLod( tex, p3, lod ) );
 	}
-	vec4 textureBicubic( sampler2D sampler, vec2 uv, float lod ) {
-		vec2 fLodSize = vec2( textureSize( sampler, int( lod ) ) );
-		vec2 cLodSize = vec2( textureSize( sampler, int( lod + 1.0 ) ) );
+	vec4 textureBicubic( sampler2D fr_kw_sampler, vec2 uv, float lod ) {
+		vec2 fLodSize = vec2( textureSize( fr_kw_sampler, int( lod ) ) );
+		vec2 cLodSize = vec2( textureSize( fr_kw_sampler, int( lod + 1.0 ) ) );
 		vec2 fLodSizeInv = 1.0 / fLodSize;
 		vec2 cLodSizeInv = 1.0 / cLodSize;
-		vec4 fSample = bicubic( sampler, uv, vec4( fLodSizeInv, fLodSize ), floor( lod ) );
-		vec4 cSample = bicubic( sampler, uv, vec4( cLodSizeInv, cLodSize ), ceil( lod ) );
+		vec4 fSample = bicubic( fr_kw_sampler, uv, vec4( fLodSizeInv, fLodSize ), floor( lod ) );
+		vec4 cSample = bicubic( fr_kw_sampler, uv, vec4( cLodSizeInv, cLodSize ), ceil( lod ) );
 		return mix( fSample, cSample, fract( lod ) );
 	}
 	vec3 getVolumeTransmissionRay( const in vec3 n, const in vec3 v, const in float thickness, const in float ior, const in mat4 modelMatrix ) {

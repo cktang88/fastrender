@@ -4,7 +4,7 @@
 // draw / program / material-instance counts and per-frame JS cost.
 //
 //   node js/test/world-objects.node.mjs <game dir> [--three three|three-r170] [--frames 120] [--search '?mode=world...']
-//        [--json out.json] [--view x,y,z,yaw,pitch]
+//        [--json out.json] [--view x,y,z,yaw,pitch] [--dump-programs dir]
 //
 // Canvas 2D (the game paints many textures on canvases) comes from @napi-rs/canvas when it is installed
 // (`npm i --no-save @napi-rs/canvas` in js/, or FR_CANVAS=<dir containing node_modules/@napi-rs/canvas>); without it
@@ -24,6 +24,7 @@ const pkg = opt('--three', 'three-r170'); // the version the game pins (r187 bre
 const frames = Number(opt('--frames', '120'));
 const search = opt('--search', '?mode=world&quality=low&weather=clear&tod=noon&seamless=0');
 const jsonOut = opt('--json', '');
+const dumpDir = opt('--dump-programs', '');
 const viewArg = opt('--view', '');
 const size = opt('--size', '1280x800').split('x').map(Number);
 const gameDir = resolve(args[0] || process.env.WORLD_OBJECTS_DIR || '../3d-world-objects');
@@ -50,11 +51,12 @@ host.upload = (kind, id, meta, ...arrays) => { hstats.uploads[kind]++; for (cons
 host.release = () => {};
 host.present = (w) => { hstats.presents++; hstats.words = w; };
 const program0x = host.program;
-// --fix-shader-name: emulate the translator fix for '#' in material names (three's `#define SHADER_NAME <name>`;
-// WebGL accepts it, glslang does not)
+// --fix-shader-name: drop three's `#define SHADER_NAME <material.name>` line (no longer needed: normalizeGlsl /
+// src/xlat.rs sanitise names with '#' now; kept to compare)
 const fixName = args.includes('--fix-shader-name');
 const program0 = fixName ? (k, vs, fs, id) => program0x(k, vs.replace(/^#define SHADER_NAME .*$/m, ''), fs.replace(/^#define SHADER_NAME .*$/m, ''), id) : program0x;
-host.program = (...a) => { const t = hrNow(); try { return program0(...a); } catch (e) { hstats.failed = (hstats.failed || 0) + 1; console.log('program failed:', String(e.message).slice(0, 300)); return null; } finally { hstats.programs++; hstats.programMs += hrNow() - t; } };
+const allPrograms = new Map(); // every program asked for (also the ones that fail): --dump-programs
+host.program = (...a) => { allPrograms.set(a[0], { vertex: a[1], fragment: a[2] }); const t = hrNow(); try { return program0(...a); } catch (e) { hstats.failed = (hstats.failed || 0) + 1; console.log('program failed:', String(e.message).slice(0, 300)); return null; } finally { hstats.programs++; hstats.programMs += hrNow() - t; } };
 // pixels of a real 2D canvas (napi) for FastRenderer's texture upload
 host.imagePixels = (img) => {
   if (!napi || !img || typeof img.getContext !== 'function' || !img.width) return null;
@@ -173,4 +175,15 @@ const result = {
 };
 console.log(JSON.stringify(result, null, 2));
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify(result, null, 2));
+// --dump-programs <dir>: every program the game compiled, as NAME.vert.glsl / NAME.frag.glsl for `fastrender xlat-dump`
+if (dumpDir) {
+  mkdirSync(dumpDir, { recursive: true });
+  let i = 0;
+  for (const [, p] of allPrograms) {
+    const name = `wo-${String(i++).padStart(3, '0')}-${(/#define SHADER_TYPE (\w+)/.exec(p.vertex) || /#define SHADER_NAME (\w+)/.exec(p.vertex) || [, 'program'])[1]}`;
+    writeFileSync(join(dumpDir, `${name}.vert.glsl`), p.vertex);
+    writeFileSync(join(dumpDir, `${name}.frag.glsl`), p.fragment);
+  }
+  console.log(`${i} programs -> ${dumpDir}`);
+}
 process.exit(0);

@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { normalizeGlsl } from '../three-programs.js';
+import { normalizeGlsl, demangle } from '../three-programs.js';
 
 const CACHE = join(process.env.FR_GLSL_CACHE || tmpdir(), 'fastrender-glsl-cache');
 mkdirSync(CACHE, { recursive: true });
@@ -127,6 +127,9 @@ export function buildLayout(vertexGlsl, fragmentGlsl) {
     }
   }
   const attributes = (r.vert.inputs || []).map((a) => ({ name: a.name, location: a.location })).sort((a, b) => a.location - b.location);
+  for (const m of def.members) m.name = demangle(m.name);
+  for (const t of textures) t.name = demangle(t.name);
+  for (const a of attributes) a.name = demangle(a.name);
   return { size: def.size, members: def.members, textures, attributes, objectBlock: block(r.vert, 'FrObject') || block(r.frag, 'FrObject'), frameBlock: block(r.vert, 'FrFrame') || block(r.frag, 'FrFrame') };
 }
 
