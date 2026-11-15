@@ -16,6 +16,9 @@ options: --scene city|voxel|script|three --script game.js (props = box count) --
          --warmup n --seconds s --warmup-seconds s --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
 
 fn main() {
+    // JavaScriptCore only JITs in a process signed with the allow-jit entitlement; a fresh `cargo build` is not
+    #[cfg(target_os = "macos")]
+    fastrender::jsc::ensure_jit();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mode, rest) = match args.first().map(String::as_str) {
         Some("run" | "bench" | "matrix" | "probe" | "selftest" | "voxel-mesh" | "xlat-dump" | "jsbench") => (args[0].clone(), &args[1..]),

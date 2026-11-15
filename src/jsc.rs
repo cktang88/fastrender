@@ -57,6 +57,82 @@ unsafe extern "C" {
     fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef);
 }
 
+// ---------------------------------------------------------------- the JIT entitlement
+//
+// The system JavaScriptCore.framework only turns its JIT on in a process whose code signature carries
+// `com.apple.security.cs.allow-jit` (hardened runtime or not). A binary straight out of `cargo build` is ad hoc
+// "linker-signed" with no entitlements, so JavaScriptCore silently runs everything in its interpreter: measured on
+// macOS 26 CI with the real game, 84 ms of JS per frame instead of 14 (docs/research/jsc-vs-v8.md).
+
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    fn SecTaskCreateFromSelf(allocator: *const c_void) -> *const c_void;
+    fn SecTaskCopyValueForEntitlement(task: *const c_void, entitlement: *const c_void, error: *mut *const c_void) -> *const c_void;
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFStringCreateWithCString(allocator: *const c_void, s: *const c_char, encoding: u32) -> *const c_void;
+    fn CFBooleanGetValue(b: *const c_void) -> bool;
+    fn CFGetTypeID(v: *const c_void) -> usize;
+    fn CFBooleanGetTypeID() -> usize;
+    fn CFRelease(v: *const c_void);
+}
+
+/// The entitlements a signed `fastrender` needs (also `macos/sign.sh`).
+pub const ENTITLEMENTS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/macos/fastrender.entitlements"));
+
+/// Does this process's code signature carry `com.apple.security.cs.allow-jit`, i.e. will JavaScriptCore JIT?
+pub fn has_jit_entitlement() -> bool {
+    unsafe {
+        let task = SecTaskCreateFromSelf(null());
+        if task.is_null() {
+            return false;
+        }
+        let name = CFStringCreateWithCString(null(), c"com.apple.security.cs.allow-jit".as_ptr(), 0x0800_0100); // UTF-8
+        let v = SecTaskCopyValueForEntitlement(task, name, null_mut());
+        let yes = !v.is_null() && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v);
+        if !v.is_null() {
+            CFRelease(v);
+        }
+        CFRelease(name);
+        CFRelease(task);
+        yes
+    }
+}
+
+/// Call first thing in `main`: when the executable lacks the JIT entitlement (every fresh `cargo build`), sign it ad
+/// hoc with [`ENTITLEMENTS`] and start it again, so JavaScriptCore runs with its JIT. `FASTRENDER_NO_RESIGN=1` skips
+/// this (to measure the interpreter, or when the binary must not be touched); a failed signing only warns.
+pub fn ensure_jit() {
+    if has_jit_entitlement() {
+        return;
+    }
+    let warn = |why: &str| eprintln!("fastrender: JavaScriptCore will run WITHOUT its JIT (JS about 6x slower): {why}. Fix: macos/sign.sh <binary>");
+    if std::env::var_os("FASTRENDER_NO_RESIGN").is_some() {
+        return warn("no com.apple.security.cs.allow-jit entitlement, FASTRENDER_NO_RESIGN is set");
+    }
+    if std::env::var_os("FASTRENDER_RESIGNED").is_some() {
+        return warn("signed with the entitlement, but the restarted process still lacks it");
+    }
+    let Ok(exe) = std::env::current_exe() else { return warn("no path to the executable") };
+    let plist = std::env::temp_dir().join(format!("fastrender-{}.entitlements", std::process::id()));
+    if std::fs::write(&plist, ENTITLEMENTS).is_err() {
+        return warn("cannot write the entitlements file");
+    }
+    let signed = std::process::Command::new("/usr/bin/codesign").args(["-f", "-s", "-", "--entitlements"]).arg(&plist).arg(&exe).output();
+    let _ = std::fs::remove_file(&plist);
+    match signed {
+        Ok(o) if o.status.success() => {
+            eprintln!("fastrender: signed {} with the allow-jit entitlement (JavaScriptCore's JIT needs it), restarting", exe.display());
+            use std::os::unix::process::CommandExt;
+            let e = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).env("FASTRENDER_RESIGNED", "1").exec();
+            warn(&format!("restart failed: {e}"));
+        }
+        Ok(o) => warn(&format!("codesign failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => warn(&format!("codesign: {e}")),
+    }
+}
+
 /// Owned JSStringRef from a Rust str.
 struct JsStr(JSStringRef);
 impl JsStr {
@@ -230,6 +306,10 @@ pub struct ScriptHost {
 impl ScriptHost {
     /// `params_json` becomes `__fr.params` (e.g. `{"boxes": 20000}`).
     pub fn new(shim: &str, game: &str, game_name: &str, params_json: &str, words: usize) -> Result<Self, String> {
+        if !has_jit_entitlement() && std::env::var_os("FASTRENDER_NO_RESIGN").is_none() {
+            // an embedder that did not call ensure_jit(): say why its JS is slow
+            eprintln!("fastrender: this process has no com.apple.security.cs.allow-jit entitlement: JavaScriptCore runs without its JIT (macos/sign.sh)");
+        }
         unsafe {
             let ctx = JSGlobalContextCreate(null_mut());
             let buf = Box::into_raw(vec![0u32; words].into_boxed_slice()) as *mut u32;
@@ -352,7 +432,7 @@ impl crate::host::FrameSource for ScriptHost {
 
 /// What the engine is doing, measured from inside it: a hot integer loop (a JIT runs it in a few ns per iteration,
 /// the interpreter in ~10x that) and, where `$vm` exists (JSC_useDollarVM=1), which tiers ran a hot function.
-const PROBE: &str = "(function () { var r = {}, now = __fr.now; function hot(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + i * i) % 1000003; return s; } hot(1e5); var t = now(); hot(2e7); r.loop_ns_per_iter = +((now() - t) * 1e6 / 2e7).toFixed(2); var a = new Float32Array(4096); function fill(k) { for (var i = 0; i < 4096; i++) a[i] = i * k; return a[7]; } for (var j = 0; j < 200; j++) fill(j); t = now(); for (j = 0; j < 4000; j++) fill(j); r.f32_write_ns = +((now() - t) * 1e6 / (4000 * 4096)).toFixed(2); if (typeof $vm !== 'undefined') { var f = function () { return ($vm.ftlTrue() ? 4 : 0) | ($vm.dfgTrue() ? 2 : 0); }; var m = 0; for (var i = 0; i < 3e6; i++) m |= f(); r.tiers = (m & 4 ? 'FTL ' : '') + (m & 2 ? 'DFG' : '') || 'none above baseline'; } r.wasm = typeof WebAssembly; return JSON.stringify(r); })()";
+const PROBE: &str = "(function () { var r = {}, now = __fr.now; function hot(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + (i ^ (s >> 3))) & 0xfffff; return s; } hot(1e5); var t = now(); hot(2e7); r.loop_ns_per_iter = +((now() - t) * 1e6 / 2e7).toFixed(2); var a = new Float32Array(4096); function fill(k) { for (var i = 0; i < 4096; i++) a[i] = i * k; return a[7]; } for (var j = 0; j < 200; j++) fill(j); t = now(); for (j = 0; j < 4000; j++) fill(j); r.f32_write_ns = +((now() - t) * 1e6 / (4000 * 4096)).toFixed(2); if (typeof $vm !== 'undefined') { var f = function () { return ($vm.ftlTrue() ? 4 : 0) | ($vm.dfgTrue() ? 2 : 0); }; var m = 0; for (var i = 0; i < 3e6; i++) m |= f(); r.tiers = (m & 4 ? 'FTL ' : '') + (m & 2 ? 'DFG' : '') || 'none above baseline'; } r.wasm = typeof WebAssembly; return JSON.stringify(r); })()";
 
 /// `fastrender jsbench <bundle.js> [--warmup N] [--frames N] [--params JSON] [--window N]`: the game's JS alone in the
 /// JavaScriptCore host (no Metal, no window): `frame()` per frame exactly as the renderer calls it, uploads and
@@ -367,7 +447,7 @@ pub fn js_bench(args: &[String]) -> Result<(), String> {
     let params = opt("--params").unwrap_or_else(|| "{\"boxes\": 0, \"lights\": 0, \"programs\": \"three\", \"width\": 1280, \"height\": 800}".into());
     let game = std::fs::read_to_string(bundle).map_err(|e| format!("bundle {bundle}: {e}"))?;
     let jsc_env: Vec<String> = std::env::vars().filter(|(k, _)| k.starts_with("JSC_")).map(|(k, v)| format!("{k}={v}")).collect();
-    println!("jsbench: {bundle}, warmup {warmup}, frames {frames}, env [{}]", jsc_env.join(" "));
+    println!("jsbench: {bundle}, warmup {warmup}, frames {frames}, env [{}], allow-jit entitlement: {}", jsc_env.join(" "), has_jit_entitlement());
     ScriptHost::warm_up_translator();
     let t = Instant::now();
     let mut host = ScriptHost::new("", &game, bundle, &params, 4 << 20)?;

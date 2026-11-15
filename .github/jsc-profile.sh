@@ -21,6 +21,7 @@ run() {
   local rc=$?
   echo "[$name] exit $rc, $(( $(date +%s) - t0 )) s wall: $(grep -h 'jsbench result' $OUT/$name.out | sed 's/jsbench result: //' | cut -c1-270)" | tee -a $SUM
   echo "[$name] $(grep -h 'jsbench probe\|bundle evaluated' $OUT/$name.out | tr '\n' ' ' | cut -c1-270)" | tee -a $SUM
+  grep -h '^fastrender:' $OUT/$name.err | head -2 | cut -c1-270 | sed "s/^/[$name] /" | tee -a $SUM
   [ $rc -ne 0 ] && { tail -2 $OUT/$name.out; tail -2 $OUT/$name.err; } | cut -c1-270 | tee -a $SUM
   return 0
 }
@@ -33,23 +34,29 @@ tiers)
     echo "binary signature: $(codesign -dvv $B 2>&1 | grep -E 'flags|Signature|TeamIdentifier' | tr '\n' ' ')"
     echo "binary entitlements: $(codesign -d --entitlements - $B 2>&1 | grep -v Executable | tr '\n' ' ' | cut -c1-200)"
   } | tee -a $SUM
-  run default $B
-  run default-again $B
-  run dollarvm $B JSC_useDollarVM=1
-  run no-jit $B JSC_useJIT=0
-  run no-dfg $B JSC_useDFGJIT=0
-  run no-ftl $B JSC_useFTLJIT=0
-  run no-concurrent-jit $B JSC_useConcurrentJIT=0
-  grep -h 'jsbench frames' $OUT/default.out | sed "s/^/[default] /" | cut -c1-200 > $OUT/windows.txt
-  grep -h 'jsbench frames' $OUT/no-jit.out | sed "s/^/[no-jit] /" | cut -c1-200 >> $OUT/windows.txt
+  # before: the binary as cargo links it (ad hoc, no entitlements); FASTRENDER_NO_RESIGN keeps it that way
+  cp $B $OUT/fr-unsigned
+  run unsigned $OUT/fr-unsigned FASTRENDER_NO_RESIGN=1
+  run unsigned-no-jit $OUT/fr-unsigned FASTRENDER_NO_RESIGN=1 JSC_useJIT=0
+  # after: the first run signs itself with allow-jit and restarts (src/jsc.rs ensure_jit)
+  run self-signed $B
+  echo "binary entitlements after the first run: $(codesign -d --entitlements - $B 2>&1 | grep -o 'com.apple[a-z.-]*' | tr '\n' ' ')" | tee -a $SUM
+  run signed-again $B
+  run signed-dollarvm $B JSC_useDollarVM=1
+  run signed-no-ftl $B JSC_useFTLJIT=0
+  run signed-no-dfg $B JSC_useDFGJIT=0
+  run signed-no-jit $B JSC_useJIT=0
+  run signed-no-concurrent-jit $B JSC_useConcurrentJIT=0
+  grep -h 'jsbench frames' $OUT/self-signed.out | sed "s/^/[self-signed] /" | cut -c1-200 > $OUT/windows.txt
+  grep -h 'jsbench frames' $OUT/unsigned.out | sed "s/^/[unsigned] /" | cut -c1-200 >> $OUT/windows.txt
   ;;
 signing)
   # ad hoc (what the linker makes) vs hardened runtime without and with the JIT entitlement
   cp $B $OUT/fr-hardened && codesign -f -s - --options runtime $OUT/fr-hardened 2>&1 | tail -1
-  run signed-hardened-no-entitlement $OUT/fr-hardened
+  run signed-hardened-no-entitlement $OUT/fr-hardened FASTRENDER_NO_RESIGN=1
   cp $B $OUT/fr-hardened-jit && codesign -f -s - --options runtime --entitlements macos/fastrender.entitlements $OUT/fr-hardened-jit 2>&1 | tail -1
   run signed-hardened-allow-jit $OUT/fr-hardened-jit
-  cp $B $OUT/fr-jit && codesign -f -s - --entitlements macos/fastrender.entitlements $OUT/fr-jit 2>&1 | tail -1
+  cp $B $OUT/fr-jit && bash macos/sign.sh $OUT/fr-jit
   run signed-allow-jit $OUT/fr-jit
   ;;
 engines)
@@ -92,8 +99,13 @@ diagnostics)
   ;;
 metal)
   # with Metal: the full host, same frames (the JS figure of `three frame cost`)
-  env -u MTL_DEBUG_LAYER perl -e 'alarm shift; exec @ARGV' 600 $B bench --three "$BUNDLE" --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 71 > $OUT/bench.out 2>&1
-  echo "[bench --three, with Metal] exit $?: $(grep -h 'three frame cost' $OUT/bench.out | tail -1 | cut -c1-240)" | tee -a $SUM
+  metal() {
+    local name=$1 bin=$2; shift 2
+    env -u MTL_DEBUG_LAYER "$@" perl -e 'alarm shift; exec @ARGV' 600 $bin bench --three "$BUNDLE" --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 71 > $OUT/bench-$name.out 2>&1
+    echo "[bench --three, with Metal, $name] exit $?: $(grep -h 'three frame cost' $OUT/bench-$name.out | tail -1 | cut -c1-240)" | tee -a $SUM
+  }
+  metal signed $B
+  if [ -f $OUT/fr-unsigned ]; then metal unsigned $OUT/fr-unsigned FASTRENDER_NO_RESIGN=1; fi
   ;;
 esac
 cat $SUM >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
