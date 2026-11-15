@@ -61,6 +61,8 @@ pub fn prepare_layer(layer: &CAMetalLayer) {
 }
 
 pub fn spawn(slot: Arc<Slot>, shared: Arc<Shared>, layer: Retained<CAMetalLayer>, cfg: Config) -> JoinHandle<()> {
+    // `{"vsync": 0}`: present without waiting for the display (benchmarks, game/bench-main.js); the default is on
+    layer.setDisplaySyncEnabled(cfg.vsync);
     let pack = SendWrap(layer);
     std::thread::Builder::new()
         .name("fastrender-render".into())

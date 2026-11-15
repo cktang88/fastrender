@@ -7,3 +7,6 @@ app/dist/
 *.png
 spike-result*.json
 game/dist/
+# scripts/bench-3way.sh: results, and the fetched + patched game checkout
+bench-out/
+.bench/
