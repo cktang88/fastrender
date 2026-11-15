@@ -81,6 +81,9 @@ pub struct Config {
     /// frames-in-flight back-pressure: completion-handler counter (default) or an `MTLSharedEvent` the GPU signals
     /// (`--fence event`: the shape Metal 4's `MTL4CommandQueue.signalEvent` needs)
     pub fence: Fence,
+    /// `--backend metal4|metal3|auto`: the graphics API (src/gpu.rs; auto = Metal 3 for now, Metal 4 is opt-in).
+    /// `FASTRENDER_BACKEND` fills it in when the option is not given
+    pub backend: crate::gpu::BackendChoice,
     /// follow `NSProcessInfo.thermalState` / Low Power Mode: lower the scale ceiling and cap the frame rate
     /// (`--thermal 0` to ignore them, e.g. for benchmarks)
     pub thermal: bool,
@@ -128,6 +131,7 @@ impl Default for Config {
             programs: "three".into(),
             gpu_passes: false,
             fence: Fence::Cpu,
+            backend: crate::gpu::BackendChoice::Auto,
             thermal: true,
             display_link: true,
             run_seconds: 0.0,
@@ -188,6 +192,7 @@ impl Config {
                 "time" => self.fixed_t = Some(num(v)? as f32),
                 "programs" => self.programs = match v.as_str() { "three" | "native" => v.clone(), _ => return Err(format!("bad --programs {v} (three|native)")) },
                 "gpu-passes" => self.gpu_passes = num(v)? != 0.0,
+                "backend" => self.backend = crate::gpu::BackendChoice::parse(v)?,
                 "fence" => self.fence = match v.as_str() { "cpu" | "semaphore" => Fence::Cpu, "event" => Fence::Event, _ => return Err(format!("bad --fence {v} (cpu|event)")) },
                 "thermal" => self.thermal = num(v)? != 0.0,
                 "display-link" => self.display_link = num(v)? != 0.0,
@@ -836,6 +841,13 @@ mod tests {
         c.apply_args(&args).unwrap();
         assert!(c.gpu_passes && c.fence == Fence::Event && !c.thermal && !c.display_link && c.run_seconds == 2.5);
         assert!(c.apply_args(&["--fence".into(), "nope".into()]).is_err());
+        // the backend (src/gpu.rs): auto unless named
+        assert_eq!(c.backend, crate::gpu::BackendChoice::Auto);
+        c.apply_args(&["--backend".into(), "metal3".into()]).unwrap();
+        assert_eq!(c.backend, crate::gpu::BackendChoice::Metal3);
+        c.apply_args(&["--backend".into(), "metal4".into()]).unwrap();
+        assert_eq!(c.backend, crate::gpu::BackendChoice::Metal4);
+        assert!(c.apply_args(&["--backend".into(), "gl".into()]).is_err());
     }
 
     #[test]

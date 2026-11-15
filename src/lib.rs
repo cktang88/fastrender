@@ -17,6 +17,11 @@ pub mod image; // __fr.readFile / __fr.decodeImage for real web games (JavaScrip
 pub mod pipeline_manifest; // async compile queue, stage dedupe, persisted pipeline manifest (src/mac_programs.rs)
 pub mod host; // FrameSource (host -> renderer boundary) + the Electron wire codec
 pub mod qos; // thread QoS classes (render thread on P cores); a no-op off macOS
+pub mod gpu; // the backend seam: Metal 4 / Metal 3 choice, the frame-indexed graveyard; on macOS the encoder traits (src/gpu_encoder.rs)
+#[cfg(target_os = "macos")]
+pub mod gpu_metal3; // the Metal 3 backend: today's encoder behind the traits (CI's goldens)
+#[cfg(target_os = "macos")]
+pub mod gpu_metal4; // the Metal 4 backend: MTL4 queue / allocators / argument tables / residency set
 #[cfg(target_os = "macos")]
 pub mod jsc;
 #[cfg(target_os = "macos")]

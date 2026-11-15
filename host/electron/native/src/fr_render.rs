@@ -126,8 +126,10 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                 cfg.height = dh;
                 layer.setDrawableSize(CGSize { width: dw as f64, height: dh as f64 });
                 match Renderer::with_source(cfg, 2, Box::new(FeedSource::new(feed.clone()))) {
-                    Ok(nr) => {
-                        println!("[fastrender] renderer {}x{} {} on {}", dw, dh, nr.cfg.label(), fastrender::mac::device_name());
+                    Ok(mut nr) => {
+                        // Metal 4: the drawables are resident through the layer's residency set (a no-op on Metal 3)
+                        nr.attach_layer(layer);
+                        println!("[fastrender] renderer {}x{} {} on {}, backend {}", dw, dh, nr.cfg.label(), fastrender::mac::device_name(), nr.backend_label());
                         dynres = (nr.cfg.dynres_ms > 0.0).then(|| DynRes::new(nr.cfg.dynres_ms, nr.cfg.scale));
                         base_scale = nr.cfg.scale;
                         limit = nr.in_flight_limit();

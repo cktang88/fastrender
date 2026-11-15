@@ -2,6 +2,24 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: M-0, backend seam + graveyard; Metal 4 port paused (the real game is GPU-bound). CI goldens not yet seen
+
+Details: docs/notes/metal4-port.md.
+
+- **Seam** (`src/gpu.rs`, `src/gpu_encoder.rs`): `Frame` / `RenderPass` / `GpuBackend` traits, call sites generic over
+  them. Today's encoder is `src/gpu_metal3.rs` (same Metal calls, same order). `--backend metal4|metal3|auto`,
+  `FASTRENDER_BACKEND`; auto = Metal 3; `metal4` falls back to Metal 3 with a log line where unsupported.
+- **Graveyard**: every replaced / released buffer, texture and sampler of the three.js registry (material buffer,
+  re-uploads, ring / object-buffer growth, shadow maps, render targets) is freed only after the GPU completed the
+  frame it died in (the WP5 fence's counters). 8 unit tests on Linux. `Renderer` waits for idle in `Drop`.
+- **Metal 4 backend** (`src/gpu_metal4.rs`): implements every trait method (MTL4 queue, allocator per slot, argument
+  tables, residency set, conservative barriers, commit feedback). Type-checked only, never executed. No MetalFX.
+- **One intended difference on Metal 3**: texture mip chains are generated at the start of the frame's command
+  buffer instead of in a command buffer of their own committed from `update()`.
+- **Verified**: `cargo test --release` (76 pass), `cargo check --target aarch64-apple-darwin` for the crate and the
+  Electron addon. **Not verified**: the macOS goldens on this refactor (pushed before a CI run finished).
+- **Why paused**: M2 Air, real game: 57 ms GPU vs 8 ms JS per frame. Encode-side savings do not change fps.
+
 ## 2026-11-15: frame loop (WP5 + PC1): QoS, counter fence / shared event, per-pass GPU ms, display link, framebufferOnly, thermal policy. Not yet measured: CI queue
 
 Design and details: docs/notes/frame-loop.md. What changed:

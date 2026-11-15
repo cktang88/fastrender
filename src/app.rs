@@ -243,7 +243,7 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         self.cfg.width = size.width;
         self.cfg.height = size.height;
-        let r = match Renderer::new(self.cfg.clone(), IN_FLIGHT) {
+        let mut r = match Renderer::new(self.cfg.clone(), IN_FLIGHT) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("{e}");
@@ -253,6 +253,8 @@ impl ApplicationHandler for App {
         };
         let layer = CAMetalLayer::new();
         layer.setDevice(Some(&r.dev));
+        // Metal 4: the drawables are resident through the layer's residency set (a no-op on Metal 3)
+        r.attach_layer(&layer);
         layer.setPixelFormat(objc2_metal::MTLPixelFormat::BGRA8Unorm);
         // framebufferOnly unless a MetalFX scaler writes the drawable (it changes with the scale: `sync_layer`)
         self.fb_only = r.drawable_framebuffer_only();

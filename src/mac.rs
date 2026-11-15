@@ -9,14 +9,17 @@
 //! - `FrameRes`: per-frame-slot buffers (uniforms, cull lists), so nothing the CPU writes is still being
 //!   read by an in-flight frame.
 //! - `Renderer::render`: cull → shadow (only when due) → main pass → upscale, each in its own function.
+//!
+//! Everything that encodes goes through the backend seam (src/gpu.rs: `Frame`, `RenderPass`), generic over the
+//! backend chosen once at start-up: Metal 3 by default, Metal 4 on request where the device has it
+//! (docs/notes/metal4-port.md).
+//! `queue` is a Metal 3 queue on both: the Metal 3 backend's frames, and one-shot work that blocks (readbacks,
+//! selftest clears) on either.
 
-use std::ffi::c_void;
 use std::path::PathBuf;
-use std::ptr::NonNull;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Instant, SystemTime};
 
-use block2::RcBlock;
 use glam::{Mat4, Vec3, Vec4};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -26,6 +29,9 @@ use objc2_metal::*;
 use objc2_metal_fx::*;
 
 use crate::core::*;
+use crate::gpu::{self, Att, Backend, ComputeJob, Frame, FrameEnd, FrameSinks, GpuBackend, PassDesc, RenderPass};
+use crate::gpu_metal3::{Frame3, Gpu3};
+use crate::gpu_metal4::Gpu4;
 use crate::jsc::ScriptHost;
 use crate::mac_three::ThreeScene;
 use crate::script;
@@ -37,8 +43,6 @@ pub(crate) type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 type Tex = ProtocolObject<dyn MTLTexture>;
 type RenderPipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
 type DepthState = Retained<ProtocolObject<dyn MTLDepthStencilState>>;
-type CmdBuf = ProtocolObject<dyn MTLCommandBuffer>;
-type RenderEnc = ProtocolObject<dyn MTLRenderCommandEncoder>;
 type ComputePipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 
 // MetalFX + the internal-resolution targets (src/mac_fx.rs): a child module, it works on Renderer's state
@@ -49,8 +53,8 @@ use fx::{encode_motion, Targets, MOTION_FORMAT};
 // frame submission (src/mac_frame.rs): frames-in-flight fence, per-pass GPU timing, power state
 #[path = "mac_frame.rs"]
 mod frame;
-use frame::{FrameCmds, FrameFence};
-pub use frame::{power_state, PowerWatch};
+use frame::FrameFence;
+pub use frame::{power_state, FenceDone, PowerWatch};
 
 /// Size of the per-frame resource ring. The number of frames actually allowed in flight is
 /// the limit of `Renderer`'s `FrameFence` (2 when windowed for latency, 3 when benchmarking for throughput).
@@ -146,6 +150,13 @@ pub fn probe() {
         Err(e) => println!("pipelines: ERROR {e}"),
     }
     frame::probe_timers(&d);
+    let m4 = gpu::detect(&d);
+    let (choice, note) = gpu::BackendChoice::Auto.resolve(std::env::var("FASTRENDER_BACKEND").ok().as_deref());
+    if let Some(n) = note {
+        println!("backend: {n}");
+    }
+    let (backend, note) = gpu::select(choice, m4);
+    println!("backend: {} (choice {choice:?}; Metal4 family {}, MTL4CommandQueue {}){}", backend.label(), m4.family, m4.queue, note.map_or(String::new(), |n| format!("; {n}")));
     crate::mac_metal4_probe::probe(&d);
 }
 
@@ -179,7 +190,7 @@ struct Pipelines {
 }
 
 /// colour attachment spec: (format, write enabled, additive blend)
-type Att = (MTLPixelFormat, bool, bool);
+type AttSpec = (MTLPixelFormat, bool, bool);
 
 /// 0 hdr, 1 albedo, 2 normal, 3 depth copy (all transient), 4 output (stored)
 const DEFERRED_ATTS: [MTLPixelFormat; 5] = [
@@ -190,7 +201,7 @@ const DEFERRED_ATTS: [MTLPixelFormat; 5] = [
     OUT_FORMAT,
 ];
 
-fn deferred_atts(write: [bool; 5], additive0: bool) -> Vec<Att> {
+fn deferred_atts(write: [bool; 5], additive0: bool) -> Vec<AttSpec> {
     (0..5).map(|i| (DEFERRED_ATTS[i], write[i], i == 0 && additive0)).collect()
 }
 
@@ -199,7 +210,7 @@ impl Pipelines {
         // the metallib build.rs precompiled when `src` is the shipped source, else compiled here (hot reload)
         let lib = crate::mac_programs::builtin_library(dev, src)?;
         let func = |name: &str| lib.newFunctionWithName(&NSString::from_str(name)).ok_or_else(|| format!("missing shader function {name}"));
-        let render = |vs: &str, fs: Option<&str>, atts: &[Att], depth: MTLPixelFormat| -> Result<RenderPipeline, String> {
+        let render = |vs: &str, fs: Option<&str>, atts: &[AttSpec], depth: MTLPixelFormat| -> Result<RenderPipeline, String> {
             let d = MTLRenderPipelineDescriptor::new();
             d.setVertexFunction(Some(&*func(vs)?));
             if let Some(fs) = fs {
@@ -477,7 +488,7 @@ impl Content {
     fn visible_capacity(&self) -> usize { match self { Content::City { n, .. } => *n, _ => 1 } }
 
     /// GPU culling for the city (camera list every frame, shadow list when due). Voxel culls per chunk on the CPU.
-    fn encode_cull(&self, cb: &CmdBuf, pipes: &Pipelines, list: (&Buffer, &Buffer), planes: &[Vec4; 6], cam: Vec3, prop_dist: f32) {
+    fn encode_cull<F: Frame>(&self, frame: &mut F, pipes: &Pipelines, list: (&Buffer, &Buffer), planes: &[Vec4; 6], cam: Vec3, prop_dist: f32) {
         let Content::City { instances, n, .. } = self else { return };
         #[repr(C)]
         struct CullParams {
@@ -487,70 +498,61 @@ impl Content {
             _pad: [u32; 3],
         }
         let p = CullParams { planes: planes.map(|p| p.to_array()), cam_pos_prop_dist: [cam.x, cam.y, cam.z, prop_dist], count: *n as u32, _pad: [0; 3] };
-        let enc = cb.computeCommandEncoder().expect("compute encoder");
-        enc.setComputePipelineState(&pipes.cull);
-        unsafe {
-            enc.setBuffer_offset_atIndex(Some(instances), 0, 0);
-            enc.setBytes_length_atIndex(NonNull::new(&p as *const CullParams as *mut c_void).unwrap(), std::mem::size_of::<CullParams>(), 1);
-            enc.setBuffer_offset_atIndex(Some(list.0), 0, 2);
-            enc.setBuffer_offset_atIndex(Some(list.1), 0, 3);
-            enc.dispatchThreads_threadsPerThreadgroup(MTLSize { width: *n, height: 1, depth: 1 }, MTLSize { width: 256, height: 1, depth: 1 });
-        }
-        enc.endEncoding();
+        let bytes = unsafe { std::slice::from_raw_parts(&p as *const CullParams as *const u8, std::mem::size_of::<CullParams>()) };
+        frame.compute(&ComputeJob {
+            pipeline: &pipes.cull,
+            buffers: &[(0, &**instances, 0), (2, &**list.0, 0), (3, &**list.1, 0)],
+            textures: &[],
+            bytes: Some((1, bytes)),
+            threads: MTLSize { width: *n, height: 1, depth: 1 },
+            per_group: MTLSize { width: 256, height: 1, depth: 1 },
+        });
     }
 
     /// Draw the geometry (pipeline already set). `list` = (visible, args) for the GPU-culled city.
     /// Returns the number of draw calls issued.
-    fn encode_draw(&self, enc: &RenderEnc, cube: &Cube, f: &FrameRes, list: Option<(&Buffer, &Buffer)>, planes: &[Vec4; 6]) -> usize {
+    fn encode_draw<P: RenderPass>(&self, enc: &mut P, cube: &Cube, f: &FrameRes, list: Option<(&Buffer, &Buffer)>, planes: &[Vec4; 6]) -> usize {
         let uniforms = &f.uniforms;
-        unsafe {
-            enc.setVertexBuffer_offset_atIndex(Some(uniforms), 0, 3);
-            match self {
-                Content::City { instances, identity, n } => {
-                    enc.setVertexBuffer_offset_atIndex(Some(&cube.v), 0, 0);
-                    enc.setVertexBuffer_offset_atIndex(Some(instances), 0, 1);
-                    match list {
-                        Some((visible, args)) => {
-                            enc.setVertexBuffer_offset_atIndex(Some(visible), 0, 2);
-                            enc.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
-                                MTLPrimitiveType::Triangle, MTLIndexType::UInt16, &cube.i, 0, args, 0,
-                            );
-                        }
-                        None => {
-                            enc.setVertexBuffer_offset_atIndex(Some(identity), 0, 2);
-                            enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
-                                MTLPrimitiveType::Triangle, 36, MTLIndexType::UInt16, &cube.i, 0, *n,
-                            );
-                        }
+        enc.vertex_buffer(uniforms, 0, 3);
+        match self {
+            Content::City { instances, identity, n } => {
+                enc.vertex_buffer(&cube.v, 0, 0);
+                enc.vertex_buffer(instances, 0, 1);
+                match list {
+                    Some((visible, args)) => {
+                        enc.vertex_buffer(visible, 0, 2);
+                        enc.draw_indexed_indirect(MTLPrimitiveType::Triangle, MTLIndexType::UInt16, &cube.i, 0, args, 0);
                     }
-                    1
-                }
-                Content::Voxel { verts, indices, origins, chunks, .. } => {
-                    enc.setVertexBuffer_offset_atIndex(Some(verts), 0, 0);
-                    enc.setVertexBuffer_offset_atIndex(Some(origins), 0, 1);
-                    let half = voxel_core::CHUNK as f32 * 0.5;
-                    let radius = half * 3f32.sqrt();
-                    let mut draws = 0;
-                    for (i, c) in chunks.iter().enumerate() {
-                        let centre = Vec3::new(c.origin[0] as f32 + half, c.origin[1] as f32 + half, c.origin[2] as f32 + half);
-                        if list.is_some() && !sphere_visible(planes, centre, radius) { continue; }
-                        enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
-                            MTLPrimitiveType::Triangle, c.index_count as usize, MTLIndexType::UInt32, indices, c.first_index as usize * 4, 1, c.base_vertex as isize, i,
-                        );
-                        draws += 1;
+                    None => {
+                        enc.vertex_buffer(identity, 0, 2);
+                        enc.draw_indexed(MTLPrimitiveType::Triangle, 36, MTLIndexType::UInt16, &cube.i, 0, *n, 0, 0);
                     }
-                    draws
                 }
-                Content::Three(_) => 0, // drawn by ThreeScene::encode_main / encode_shadow
-                Content::Script { n, .. } => {
-                    if *n == 0 { return 0; }
-                    enc.setVertexBuffer_offset_atIndex(Some(&cube.v), 0, 0);
-                    enc.setVertexBuffer_offset_atIndex(f.script_inst.as_deref(), 0, 1);
-                    enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
-                        MTLPrimitiveType::Triangle, 36, MTLIndexType::UInt16, &cube.i, 0, *n,
-                    );
-                    1
+                1
+            }
+            Content::Voxel { verts, indices, origins, chunks, .. } => {
+                enc.vertex_buffer(verts, 0, 0);
+                enc.vertex_buffer(origins, 0, 1);
+                let half = voxel_core::CHUNK as f32 * 0.5;
+                let radius = half * 3f32.sqrt();
+                let mut draws = 0;
+                for (i, c) in chunks.iter().enumerate() {
+                    let centre = Vec3::new(c.origin[0] as f32 + half, c.origin[1] as f32 + half, c.origin[2] as f32 + half);
+                    if list.is_some() && !sphere_visible(planes, centre, radius) { continue; }
+                    enc.draw_indexed(MTLPrimitiveType::Triangle, c.index_count as usize, MTLIndexType::UInt32, indices, c.first_index as usize * 4, 1, c.base_vertex as isize, i);
+                    draws += 1;
                 }
+                draws
+            }
+            Content::Three(_) => 0, // drawn by ThreeScene::encode_main / encode_shadow
+            Content::Script { n, .. } => {
+                if *n == 0 { return 0; }
+                enc.vertex_buffer(&cube.v, 0, 0);
+                if let Some(inst) = f.script_inst.as_deref() {
+                    enc.vertex_buffer(inst, 0, 1);
+                }
+                enc.draw_indexed(MTLPrimitiveType::Triangle, 36, MTLIndexType::UInt16, &cube.i, 0, *n, 0, 0);
+                1
             }
         }
     }
@@ -562,7 +564,15 @@ pub struct Renderer {
     pub dev: Retained<Device>,
     pub caps: Caps,
     pub cfg: Config,
+    /// the Metal 3 queue: the Metal 3 backend's frames; blocking one-shot work (readbacks, selftest) on both backends
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    /// the backend of this run, chosen once (src/gpu.rs `select`)
+    backend: Backend,
+    /// why `backend` is what it is (the bench and the hosts print it)
+    backend_note: String,
+    gpu3: Gpu3,
+    /// Some while `backend` is Metal4 (taken out for the duration of a frame)
+    gpu4: Option<Box<Gpu4>>,
     pipes: Pipelines,
     cube: Cube,
     content: Content,
@@ -577,16 +587,12 @@ pub struct Renderer {
     fence: FrameFence,
     /// pipelining depth and waits of the frames since `take_loop_stats`
     loop_stats: LoopStats,
-    /// per-pass GPU ms of completed frames (`cfg.gpu_passes`)
-    pass_times: Arc<Mutex<Vec<[f64; 4]>>>,
     /// thermal frame cap: minimum on-screen time of a drawable, seconds (`set_present_cap`)
     present_min_s: Option<f64>,
-    /// GPU ms per completed command buffer (start..end; consecutive frames overlap on Apple GPUs,
-    /// so treat this as a relative cost, and wall-clock throughput as the frame cost)
-    gpu_times: Arc<Mutex<Vec<f64>>>,
-    last_gpu_end: Arc<Mutex<f64>>,
-    /// command buffers that completed with an error (hang, page fault, ...)
-    gpu_errors: Arc<std::sync::atomic::AtomicUsize>,
+    /// what completed frames report (src/gpu.rs): GPU ms per frame (start..end; consecutive frames overlap on Apple
+    /// GPUs, so treat it as a relative cost, and wall-clock throughput as the frame cost), per-pass GPU ms
+    /// (`cfg.gpu_passes`), and the count of frames that completed with an error (hang, page fault, ...)
+    sinks: FrameSinks,
     frame: u64,
     shadow_center: Option<Vec3>,
     shadow_vp: Mat4,
@@ -621,11 +627,36 @@ impl Renderer {
         let external = source.is_some();
         let dev = device();
         let caps = caps(&dev);
-        let cfg = Self::effective(cfg, caps)?;
+        let queue = dev.newCommandQueue().ok_or("no command queue")?;
+        // the backend, once per run: Metal 3 unless Metal 4 was asked for and the device has it
+        let (choice, env_note) = cfg.backend.resolve(std::env::var("FASTRENDER_BACKEND").ok().as_deref());
+        if let Some(n) = &env_note {
+            eprintln!("{n}");
+        }
+        let m4 = gpu::detect(&dev);
+        let (mut backend, mut note) = gpu::select(choice, m4);
+        let mut gpu4 = None;
+        if backend == Backend::Metal4 {
+            match Gpu4::new(&dev) {
+                Ok(g) => gpu4 = Some(Box::new(g)),
+                Err(e) => {
+                    backend = Backend::Metal3;
+                    note = Some(format!("backend metal4: {e}: falling back to metal3"));
+                }
+            }
+        }
+        if let Some(n) = &note {
+            eprintln!("{n}");
+        }
+        let backend_note = match (&note, choice) {
+            (Some(n), _) => n.clone(),
+            (None, gpu::BackendChoice::Auto) => format!("auto: Metal4 family {}, MTL4CommandQueue {}", m4.family, m4.queue),
+            (None, _) => "requested".to_string(),
+        };
+        let cfg = Self::effective(cfg, caps, backend)?;
         let shader_path = std::env::var("FASTRENDER_SHADERS").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("shaders/fastrender.metal"));
         let src = std::fs::read_to_string(&shader_path).unwrap_or_else(|_| SHADER_SRC.to_string());
         let pipes = Pipelines::new(&dev, &src, caps)?;
-        let queue = dev.newCommandQueue().ok_or("no command queue")?;
         let (content, lights) = Content::build(&dev, &cfg, source)?;
         let targets = Targets::new(&dev, &cfg, caps, (cfg.width as usize, cfg.height as usize), cfg.scale)?;
         let (cv, ci) = cube();
@@ -641,15 +672,16 @@ impl Renderer {
             shadow_map: texture(&dev, MTLPixelFormat::Depth32Float, SHADOW_SIZE, SHADOW_SIZE, MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead, MTLStorageMode::Private),
             content,
             targets,
+            gpu3: Gpu3::new(&queue),
+            gpu4,
+            backend,
+            backend_note,
             queue,
             pipes,
             fence: FrameFence::new(&dev, in_flight, cfg.fence),
             loop_stats: LoopStats::default(),
-            pass_times: Arc::new(Mutex::new(Vec::new())),
             present_min_s: None,
-            gpu_times: Arc::new(Mutex::new(Vec::new())),
-            last_gpu_end: Arc::new(Mutex::new(0.0)),
-            gpu_errors: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sinks: FrameSinks::new(),
             frame: 0,
             shadow_center: None,
             shadow_vp: Mat4::IDENTITY,
@@ -669,7 +701,13 @@ impl Renderer {
     }
 
     /// Adjust a requested config to what the device can do, or refuse.
-    fn effective(mut cfg: Config, caps: Caps) -> Result<Config, String> {
+    fn effective(mut cfg: Config, caps: Caps, backend: Backend) -> Result<Config, String> {
+        if backend == Backend::Metal4 && cfg.upscale != Upscale::Bilinear && cfg.scale < 1.0 {
+            // TODO(M-F): MTL4FXSpatialScaler / MTL4FXTemporalScaler (the MTLFX* scalers encode into Metal 3 command
+            // buffers only). Until then the Metal 4 backend upscales with the bilinear pass.
+            eprintln!("backend metal4: MetalFX is not ported yet (M-F): upscaling with the bilinear pass");
+            cfg.upscale = Upscale::Bilinear;
+        }
         if cfg.scene == SceneKind::Three {
             cfg.path = RenderPath::Forward; // three.js materials are forward-shaded (deferred: later)
         }
@@ -728,7 +766,7 @@ impl Renderer {
     /// Apply a new config, rebuilding only what it touches: content (scene/props/lights/seed),
     /// targets + scaler (size/path/memoryless/upscale/scale), or nothing (cull/shadow knobs).
     pub fn set_config(&mut self, cfg: Config) -> Result<(), String> {
-        let cfg = Self::effective(cfg, self.caps)?;
+        let cfg = Self::effective(cfg, self.caps, self.backend)?;
         // scripted scenes own their lights: changing the light count must not reload (and reset) the game
         let scripted = matches!(cfg.scene, SceneKind::Script | SceneKind::Three);
         let content_changed = cfg.scene != self.cfg.scene
@@ -776,7 +814,21 @@ impl Renderer {
     pub fn frame_count(&self) -> u64 { self.frame }
 
     /// Command buffers that completed with an error so far.
-    pub fn gpu_error_count(&self) -> usize { self.gpu_errors.load(std::sync::atomic::Ordering::Relaxed) }
+    pub fn gpu_error_count(&self) -> usize { self.sinks.gpu_errors.load(std::sync::atomic::Ordering::Relaxed) }
+
+    /// The backend this run encodes with (chosen once in `new`).
+    pub fn backend(&self) -> Backend { self.backend }
+
+    /// "metal3 (auto: Metal4 family false, MTL4CommandQueue false)"
+    pub fn backend_label(&self) -> String { format!("{} ({})", self.backend.label(), self.backend_note) }
+
+    /// The layer this renderer presents into. Metal 4: its drawables become resident through the layer's residency
+    /// set, added to the queue here (nothing to do on Metal 3). Hosts call it once after `layer.setDevice`.
+    pub fn attach_layer(&mut self, layer: &objc2_quartz_core::CAMetalLayer) {
+        if let Some(g) = &mut self.gpu4 {
+            g.attach_layer(layer);
+        }
+    }
 
     /// The three.js scene, when that is the content (hosts read its error / program counters).
     pub fn three(&self) -> Option<&ThreeScene> { match &self.content { Content::Three(s) => Some(s), _ => None } }
@@ -788,7 +840,7 @@ impl Renderer {
     pub fn jitter(&self) -> glam::Vec2 { self.jitter }
 
     /// Completed-frame GPU times since the last call.
-    pub fn take_gpu_times(&self) -> Vec<f64> { std::mem::take(&mut *self.gpu_times.lock().unwrap()) }
+    pub fn take_gpu_times(&self) -> Vec<f64> { std::mem::take(&mut *self.sinks.gpu_times.lock().unwrap()) }
 
     /// Hot reload: recompile when shaders/fastrender.metal changes. Errors keep the old pipelines.
     pub fn poll_shader_reload(&mut self) -> Option<String> {
@@ -892,15 +944,34 @@ impl Renderer {
     /// drawable is held as briefly as possible; return None to render offscreen.
     pub fn render<F>(&mut self, t: f32, drawable: F)
     where
-        F: FnOnce() -> Option<Retained<ProtocolObject<dyn objc2_quartz_core::CAMetalDrawable>>>,
+        F: FnOnce() -> Option<gpu::Drawable>,
+    {
+        // the backend was chosen once in `new`; the frame is the same code, monomorphised for each
+        match self.gpu4.take() {
+            Some(mut g) => {
+                self.render_on(&mut *g, t, drawable);
+                self.gpu4 = Some(g);
+            }
+            None => {
+                let mut g = self.gpu3.clone();
+                self.render_on(&mut g, t, drawable);
+            }
+        }
+    }
+
+    fn render_on<G: GpuBackend, F>(&mut self, gpu: &mut G, t: f32, drawable: F)
+    where
+        F: FnOnce() -> Option<gpu::Drawable>,
     {
         use objc2_quartz_core::CAMetalDrawable;
         // back-pressure: blocks only when `limit` frames are committed and unfinished (the GPU is behind)
         let fence_wait_ms = self.fence.begin();
         let slot = (self.frame % FRAME_SLOTS as u64) as usize;
+        // which frame this is and how far the GPU got: what the graveyard frees by (src/gpu.rs)
+        let clock = self.fence.clock();
         // scripts run here, once the slot's buffers are free to overwrite
         if let Content::Three(s) = &mut self.content {
-            s.update(&self.dev, &self.queue, slot, t);
+            s.update(&self.dev, &self.queue, slot, t, clock);
         }
         self.content.update(t, self.frames[slot].script_inst.as_ref());
         self.env = self.content.env();
@@ -927,8 +998,9 @@ impl Renderer {
         };
         self.prev_vp = Some((vp, eye));
         self.write_uniforms(slot, t, &vp_jittered, eye);
-        // one command buffer, or one per pass group when per-pass GPU times are wanted (src/mac_frame.rs)
-        let mut cmds = FrameCmds::new(&self.queue, self.cfg.gpu_passes);
+        // the frame's command stream (src/gpu.rs): one command buffer, or one per pass group when per-pass GPU times
+        // are wanted
+        let mut cmds = gpu.begin_frame(slot, self.cfg.gpu_passes);
         let planes = frustum_planes(&vp);
         let shadow_planes = frustum_planes(&self.shadow_vp);
         if let Content::Three(s) = &mut self.content {
@@ -940,24 +1012,26 @@ impl Renderer {
         // VSM blur), with three's depth programs where the native depth-only path would be wrong
         let three_v3 = matches!(&self.content, Content::Three(s) if s.view.v3);
         if let Content::Three(s) = &mut self.content {
+            // mip chains of the textures this frame's uploads created, before anything samples them
+            s.encode_uploads(&mut cmds);
             // render-target passes first (PMREM, post-processing, ...: src/mac_targets.rs), then the main pass's shadows
-            s.encode_offscreen(&self.dev, cmds.cb(), slot);
+            s.encode_offscreen(&self.dev, &mut cmds, slot);
         }
         cmds.end_group(PASS_TARGETS);
         if let Content::Three(s) = &mut self.content {
-            s.encode_shadows_v3(cmds.cb(), slot);
+            s.encode_shadows_v3(&mut cmds, slot);
         }
         if shadow && !three_v3 {
             if self.cfg.gpu_cull {
                 let f = &self.frames[slot];
-                self.content.encode_cull(cmds.cb(), &self.pipes, (&f.shadow_visible, &f.shadow_args), &shadow_planes, eye, SHADOW_HALF);
+                self.content.encode_cull(&mut cmds, &self.pipes, (&f.shadow_visible, &f.shadow_args), &shadow_planes, eye, SHADOW_HALF);
             }
-            self.encode_shadow(cmds.cb(), slot, &shadow_planes);
+            self.encode_shadow(&mut cmds, slot, &shadow_planes);
         }
         cmds.end_group(PASS_SHADOW);
         if self.cfg.gpu_cull {
             let f = &self.frames[slot];
-            self.content.encode_cull(cmds.cb(), &self.pipes, (&f.visible, &f.args), &planes, eye, PROP_CULL_M);
+            self.content.encode_cull(&mut cmds, &self.pipes, (&f.visible, &f.args), &planes, eye, PROP_CULL_M);
         }
         // the drawable is taken as late as possible: only the main pass (and the upscale) hold it
         let drawable_t = Instant::now();
@@ -967,12 +1041,15 @@ impl Renderer {
         // write a framebufferOnly drawable, so this one frame goes offscreen instead
         let d = d.filter(|d| self.drawable_framebuffer_only() || !d.texture().isFramebufferOnly());
         let out_tex: Option<Texture> = d.as_ref().map(|d| d.texture());
+        if let Some(t) = &out_tex {
+            cmds.note_drawable(t);
+        }
         let color_idx = (self.frame % 2) as usize;
         {
             let final_tex: Texture = match out_tex { Some(t) => t, None => self.targets.offscreen.clone() };
             // scale 1: render straight into the output, no upscale pass
             let color: Texture = if direct { final_tex.clone() } else { self.targets.color[color_idx].clone() };
-            self.encode_main(cmds.cb(), slot, &color, &planes);
+            self.encode_main(&mut cmds, slot, &color, &planes);
             if !direct {
                 cmds.end_group(PASS_MAIN);
                 // Motion vectors for MetalFX temporal, after the main pass: today always the depth-reprojection
@@ -980,174 +1057,100 @@ impl Renderer {
                 // will fill `targets.motion` there, and this pass then runs only for content without them.
                 if temporal {
                     if let Some(m) = &self.targets.motion {
-                        encode_motion(cmds.cb(), &self.pipes.motion, &self.targets.depth[color_idx], &m[color_idx], &vp_jittered, &vp, &prev_vp, (cw, ch));
+                        encode_motion(&mut cmds, &self.pipes.motion, &self.targets.depth[color_idx], &m[color_idx], &vp_jittered, &vp, &prev_vp, (cw, ch));
                     }
                 }
-                self.encode_upscale(cmds.cb(), &color, &final_tex);
+                self.encode_upscale(&mut cmds, &color, &final_tex);
             }
         }
-        let (cb, spans) = cmds.finish(if direct { PASS_MAIN } else { PASS_UPSCALE });
-        let (_, in_flight, done) = self.fence.submit(&cb);
+        let (in_flight, done) = self.fence.submit();
         self.loop_stats.commit(in_flight, fence_wait_ms, drawable_wait_ms);
-        if let Some(d) = &d {
-            let d: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&**d);
-            match self.present_min_s {
-                Some(s) => cb.presentDrawable_afterMinimumDuration(d, s),
-                None => cb.presentDrawable(d),
-            }
-        }
-        let pass_times = self.pass_times.clone();
-        let times = self.gpu_times.clone();
-        let last_end = self.last_gpu_end.clone();
-        let errors = self.gpu_errors.clone();
-        let handler = RcBlock::new(move |cb: NonNull<CmdBuf>| {
-            let cb = unsafe { cb.as_ref() };
-            let ok = cb.status() == MTLCommandBufferStatus::Completed;
-            if ok {
-                // this frame's own GPU time: from when it could start (after the previous frame
-                // ended) to its end, so cross-frame overlap and stalls don't inflate it
-                let mut prev = last_end.lock().unwrap();
-                let (start, end) = (cb.GPUStartTime(), cb.GPUEndTime());
-                match &spans {
-                    // per-pass: the earlier groups' command buffers completed (and recorded themselves) before this one
-                    Some((spans, group)) => {
-                        let mut sp = spans.lock().unwrap();
-                        sp.push(*group, start, end);
-                        let (ms, last) = sp.resolve(*prev);
-                        times.lock().unwrap().push(ms.iter().sum());
-                        let mut pt = pass_times.lock().unwrap();
-                        if pt.len() < 4096 {
-                            pt.push(ms);
-                        }
-                        *prev = last;
-                    }
-                    None => {
-                        times.lock().unwrap().push((end - start.max(*prev)).max(0.0) * 1000.0);
-                        *prev = end;
-                    }
-                }
-            } else if let Some(e) = cb.error() {
-                eprintln!("GPU error: {}", e.localizedDescription());
-                errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            done.signal(ok);
-        });
-        unsafe { cb.addCompletedHandler(RcBlock::as_ptr(&handler)) };
-        cb.commit();
+        // present + the fence's signal + the frame's GPU time: the backend's way of ending a frame
+        gpu.finish(cmds, FrameEnd { group: if direct { PASS_MAIN } else { PASS_UPSCALE }, drawable: d, present_min_s: self.present_min_s, done, sinks: self.sinks.clone() });
         self.frame += 1;
     }
 
-    fn encode_shadow(&self, cb: &CmdBuf, slot: usize, shadow_planes: &[Vec4; 6]) {
+    fn encode_shadow<F: Frame>(&self, frame: &mut F, slot: usize, shadow_planes: &[Vec4; 6]) {
         let f = &self.frames[slot];
-        let rp = MTLRenderPassDescriptor::new();
-        let da = rp.depthAttachment();
-        da.setTexture(Some(&self.shadow_map));
-        da.setLoadAction(MTLLoadAction::Clear);
-        da.setStoreAction(MTLStoreAction::Store);
-        da.setClearDepth(1.0);
-        let enc = cb.renderCommandEncoderWithDescriptor(&rp).expect("shadow encoder");
-        enc.setRenderPipelineState(&self.pipes.shadow[self.content.kind()]);
-        enc.setDepthStencilState(Some(&self.pipes.depth_less));
-        enc.setDepthBias_slopeScale_clamp(1.0, 2.0, 0.01);
-        enc.setCullMode(MTLCullMode::Back);
-        enc.setFrontFacingWinding(MTLWinding::CounterClockwise);
+        let rp = PassDesc::default().with_depth(Att::depth(&self.shadow_map, MTLLoadAction::Clear, MTLStoreAction::Store));
+        let mut enc = frame.render_pass(&rp).expect("shadow encoder");
+        enc.set_pipeline(&self.pipes.shadow[self.content.kind()]);
+        enc.set_depth_state(&self.pipes.depth_less);
+        enc.set_depth_bias(1.0, 2.0, 0.01);
+        enc.set_cull(MTLCullMode::Back);
+        enc.set_winding(MTLWinding::CounterClockwise);
         if let Content::Three(s) = &self.content {
-            s.encode_shadow(&enc, slot, &f.uniforms, shadow_planes);
-            enc.endEncoding();
+            s.encode_shadow(&mut enc, slot, &f.uniforms, shadow_planes);
+            enc.end();
             return;
         }
         let list = if self.cfg.gpu_cull { Some((&f.shadow_visible, &f.shadow_args)) } else { None };
-        self.content.encode_draw(&enc, &self.cube, f, list, shadow_planes);
-        enc.endEncoding();
+        self.content.encode_draw(&mut enc, &self.cube, f, list, shadow_planes);
+        enc.end();
     }
 
-    fn encode_main(&mut self, cb: &CmdBuf, slot: usize, color: &Tex, planes: &[Vec4; 6]) {
+    fn encode_main<F: Frame>(&mut self, frame: &mut F, slot: usize, color: &Tex, planes: &[Vec4; 6]) {
         let (cw, ch) = self.content_size();
         let deferred = self.cfg.path == RenderPath::Deferred;
         let transient_store = if self.targets.memoryless { MTLStoreAction::DontCare } else { MTLStoreAction::Store };
-        let rp = MTLRenderPassDescriptor::new();
-        rp.setRenderTargetWidth(cw);
-        rp.setRenderTargetHeight(ch);
-        let da = rp.depthAttachment();
-        da.setTexture(Some(&self.targets.depth[(self.frame % 2) as usize]));
-        da.setLoadAction(MTLLoadAction::Clear);
         // MetalFX temporal reads depth after the pass: the one extra DRAM write it costs
-        da.setStoreAction(if self.targets.temporal() { MTLStoreAction::Store } else { transient_store });
-        da.setClearDepth(1.0);
-        let cas = rp.colorAttachments();
-        unsafe {
-            if deferred {
-                for i in 0..4 {
-                    let a = cas.objectAtIndexedSubscript(i);
-                    a.setTexture(Some(&self.targets.gbuf[i]));
-                    a.setLoadAction(MTLLoadAction::Clear);
-                    a.setStoreAction(transient_store);
-                    a.setClearColor(match i {
-                        0 => MTLClearColor { red: self.env.fog[0] as f64, green: self.env.fog[1] as f64, blue: self.env.fog[2] as f64, alpha: 1.0 },
-                        3 => MTLClearColor { red: 1.0, green: 0.0, blue: 0.0, alpha: 0.0 },
-                        _ => MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0 },
-                    });
-                }
-                let a = cas.objectAtIndexedSubscript(4);
-                a.setTexture(Some(color));
-                a.setLoadAction(MTLLoadAction::DontCare);
-                a.setStoreAction(MTLStoreAction::Store);
-            } else {
-                let a = cas.objectAtIndexedSubscript(0);
-                a.setTexture(Some(color));
-                a.setLoadAction(MTLLoadAction::Clear);
-                // same sky as the deferred path: fog through the shader's tonemap curve
-                let c = self.env.clear;
-                a.setClearColor(MTLClearColor { red: c[0], green: c[1], blue: c[2], alpha: 1.0 });
-                a.setStoreAction(MTLStoreAction::Store);
+        let depth_store = if self.targets.temporal() { MTLStoreAction::Store } else { transient_store };
+        let mut rp = PassDesc { size: Some((cw, ch)), ..Default::default() }.with_depth(Att::depth(&self.targets.depth[(self.frame % 2) as usize], MTLLoadAction::Clear, depth_store));
+        if deferred {
+            for i in 0..4 {
+                let clear = match i {
+                    0 => [self.env.fog[0] as f64, self.env.fog[1] as f64, self.env.fog[2] as f64, 1.0],
+                    3 => [1.0, 0.0, 0.0, 0.0],
+                    _ => [0.0, 0.0, 0.0, 0.0],
+                };
+                rp.colors[i] = Some(Att::clear(&self.targets.gbuf[i], clear, transient_store));
             }
+            rp.colors[4] = Some(Att::new(color, MTLLoadAction::DontCare, MTLStoreAction::Store));
+        } else {
+            // same sky as the deferred path: fog through the shader's tonemap curve
+            let c = self.env.clear;
+            rp.colors[0] = Some(Att::clear(color, [c[0], c[1], c[2], 1.0], MTLStoreAction::Store));
         }
         let f = &self.frames[slot];
-        let enc = cb.renderCommandEncoderWithDescriptor(&rp).expect("main encoder");
-        enc.setViewport(MTLViewport { originX: 0.0, originY: 0.0, width: cw as f64, height: ch as f64, znear: 0.0, zfar: 1.0 });
-        enc.setCullMode(MTLCullMode::Back);
-        enc.setFrontFacingWinding(MTLWinding::CounterClockwise);
-        enc.setDepthStencilState(Some(&self.pipes.depth_less));
+        let mut enc = frame.render_pass(&rp).expect("main encoder");
+        enc.set_viewport(MTLViewport { originX: 0.0, originY: 0.0, width: cw as f64, height: ch as f64, znear: 0.0, zfar: 1.0 });
+        enc.set_cull(MTLCullMode::Back);
+        enc.set_winding(MTLWinding::CounterClockwise);
+        enc.set_depth_state(&self.pipes.depth_less);
         if let Content::Three(s) = &mut self.content {
             // several screen passes (a HUD over the scene, a post-processing output pass...): src/mac_targets.rs
-            self.last_draws = if s.multipass() { s.encode_screen(&self.dev, &enc, slot, (cw, ch)) } else { s.encode_main(&enc, slot, &f.uniforms, &self.shadow_map, &self.pipes.depth_less, &self.pipes.depth_test_only) };
-            enc.endEncoding();
+            self.last_draws = if s.multipass() { s.encode_screen(&self.dev, &mut enc, slot, (cw, ch)) } else { s.encode_main(&mut enc, slot, &f.uniforms, &self.shadow_map, &self.pipes.depth_less, &self.pipes.depth_test_only) };
+            enc.end();
             return;
         }
         let k = self.content.kind();
-        enc.setRenderPipelineState(if deferred { self.pipes.gbuffer[k].as_ref().unwrap() } else { &self.pipes.forward[k] });
-        unsafe {
-            enc.setFragmentBuffer_offset_atIndex(Some(&f.uniforms), 0, 0);
-            enc.setFragmentBuffer_offset_atIndex(Some(&f.lights), 0, 1);
-            enc.setFragmentTexture_atIndex(Some(&self.shadow_map), 0);
-        }
+        enc.set_pipeline(if deferred { self.pipes.gbuffer[k].as_ref().unwrap() } else { &self.pipes.forward[k] });
+        enc.fragment_buffer(&f.uniforms, 0, 0);
+        enc.fragment_buffer(&f.lights, 0, 1);
+        enc.texture(crate::bindlist::Stage::Fragment, &self.shadow_map, 0);
         let list = if self.cfg.gpu_cull { Some((&f.visible, &f.args)) } else { None };
-        let draws = self.content.encode_draw(&enc, &self.cube, f, list, planes);
+        let draws = self.content.encode_draw(&mut enc, &self.cube, f, list, planes);
         if deferred {
-            unsafe {
-                // light volumes: back faces of a cube per light, depth-tested against the scene
-                // (GreaterEqual: only where a surface lies in front of the back face), additive, reading
-                // the G-buffer from tile memory; depth clamp keeps volumes crossing the near/far plane
-                if self.n_lights > 0 {
-                    enc.setDepthStencilState(Some(&self.pipes.depth_ge));
-                    enc.setDepthClipMode(MTLDepthClipMode::Clamp);
-                    enc.setCullMode(MTLCullMode::Front);
-                    enc.setRenderPipelineState(self.pipes.light.as_ref().unwrap());
-                    enc.setVertexBuffer_offset_atIndex(Some(&self.cube.v), 0, 0);
-                    enc.setVertexBuffer_offset_atIndex(Some(&f.lights), 0, 1);
-                    enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
-                        MTLPrimitiveType::Triangle, 36, MTLIndexType::UInt16, &self.cube.i, 0, self.n_lights,
-                    );
-                    enc.setDepthClipMode(MTLDepthClipMode::Clip);
-                }
-                // fog + tonemap, written to the only stored attachment
-                enc.setDepthStencilState(Some(&self.pipes.depth_off));
-                enc.setCullMode(MTLCullMode::None);
-                enc.setRenderPipelineState(self.pipes.tonemap.as_ref().unwrap());
-                enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+            // light volumes: back faces of a cube per light, depth-tested against the scene
+            // (GreaterEqual: only where a surface lies in front of the back face), additive, reading
+            // the G-buffer from tile memory; depth clamp keeps volumes crossing the near/far plane
+            if self.n_lights > 0 {
+                enc.set_depth_state(&self.pipes.depth_ge);
+                enc.set_depth_clip(MTLDepthClipMode::Clamp);
+                enc.set_cull(MTLCullMode::Front);
+                enc.set_pipeline(self.pipes.light.as_ref().unwrap());
+                enc.vertex_buffer(&self.cube.v, 0, 0);
+                enc.vertex_buffer(&f.lights, 0, 1);
+                enc.draw_indexed(MTLPrimitiveType::Triangle, 36, MTLIndexType::UInt16, &self.cube.i, 0, self.n_lights, 0, 0);
+                enc.set_depth_clip(MTLDepthClipMode::Clip);
             }
+            // fog + tonemap, written to the only stored attachment
+            enc.set_depth_state(&self.pipes.depth_off);
+            enc.set_cull(MTLCullMode::None);
+            enc.set_pipeline(self.pipes.tonemap.as_ref().unwrap());
+            enc.draw(MTLPrimitiveType::Triangle, 0, 3, 1, 0);
         }
-        enc.endEncoding();
+        enc.end();
         self.last_draws = draws;
     }
 
@@ -1157,19 +1160,10 @@ impl Renderer {
     pub fn read_texture(&self, tex: &Tex) -> Result<(usize, usize, Vec<u8>), String> {
         let (w, h) = (tex.width(), tex.height());
         let buf = self.dev.newBufferWithLength_options(w * h * 4, MTLResourceOptions::StorageModeShared).ok_or("readback buffer")?;
-        let cb = self.queue.commandBuffer().ok_or("command buffer")?;
-        let b = cb.blitCommandEncoder().ok_or("blit")?;
-        unsafe {
-            b.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-                tex, 0, 0, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: w, height: h, depth: 1 }, &buf, 0, w * 4, w * h * 4,
-            );
-        }
-        b.endEncoding();
-        cb.commit();
-        cb.waitUntilCompleted();
-        if let Some(e) = cb.error() {
-            return Err(format!("readback: {}", e.localizedDescription()));
-        }
+        // a one-shot Metal 3 frame on either backend: every frame that wrote `tex` has completed (callers wait)
+        let mut f = Frame3::new(&self.queue, false);
+        f.copy_texture_to_buffer(tex, 0, 0, MTLSize { width: w, height: h, depth: 1 }, &buf, w * 4, w * h * 4);
+        f.commit_wait().map_err(|e| format!("readback: {e}"))?;
         let mut px = unsafe { std::slice::from_raw_parts(buf.contents().as_ptr() as *const u8, w * h * 4) }.to_vec();
         for p in px.chunks_exact_mut(4) { p.swap(0, 2); }
         Ok((w, h, px))
@@ -1197,17 +1191,13 @@ impl Renderer {
             Err(e) => println!("  {name:<30} ERROR {e}"),
         };
         println!("selftest: {}", self.cfg.label());
+        println!("  backend: {}", self.backend_label());
         // 1. a bare clear to red, then read back
-        let cb = self.queue.commandBuffer().expect("cb");
-        let rp = MTLRenderPassDescriptor::new();
-        let a = unsafe { rp.colorAttachments().objectAtIndexedSubscript(0) };
-        a.setTexture(Some(&self.targets.offscreen));
-        a.setLoadAction(MTLLoadAction::Clear);
-        a.setClearColor(MTLClearColor { red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0 });
-        a.setStoreAction(MTLStoreAction::Store);
-        cb.renderCommandEncoderWithDescriptor(&rp).expect("enc").endEncoding();
-        cb.commit();
-        cb.waitUntilCompleted();
+        let mut f = Frame3::new(&self.queue, false);
+        if let Some(enc) = f.render_pass(&PassDesc::default().color(0, Att::clear(&self.targets.offscreen, [1.0, 0.0, 0.0, 1.0], MTLStoreAction::Store))) {
+            enc.end();
+        }
+        let _ = f.commit_wait();
         stats("1 clear-to-red (expect 255 0 0)", self.read_texture(&self.targets.offscreen));
         // 2. real frames
         for i in 0..4 { self.render(1.0 + i as f32 / 60.0, || None); }
@@ -1227,7 +1217,7 @@ impl Renderer {
             if let Some(st) = s.program_stats() {
                 println!("  {st}");
                 let (compiled, pipelines, problems, draws) = s.program_health();
-                let gpu_errors = self.gpu_errors.load(std::sync::atomic::Ordering::Relaxed);
+                let gpu_errors = self.gpu_error_count();
                 let ok = compiled > 0 && pipelines > 0 && problems == 0 && draws > 0 && gpu_errors == 0;
                 println!(
                     "three-programs selftest: {} ({compiled} programs, {pipelines} pipelines, {problems} problems, {draws} draws, {gpu_errors} GPU errors)",
@@ -1239,6 +1229,12 @@ impl Renderer {
             }
         }
     }
+}
+
+impl Drop for Renderer {
+    /// Nothing the renderer owns may go while the GPU still runs frames that use it: no backend is assumed to
+    /// retain what a command buffer references (Metal 4 does not).
+    fn drop(&mut self) { self.wait_idle(); }
 }
 
 pub fn save_png(path: &str, w: usize, h: usize, px: &[u8]) -> Result<(), String> {
@@ -1284,28 +1280,13 @@ pub fn motion_selftest() -> Result<(), String> {
     let cur = cam(Vec3::new(0.8, 0.1, -1.5), 0.02);
     let cur_j = jittered(cur, jitter_px(3), size);
 
-    let cb = queue.commandBuffer().ok_or("command buffer")?;
-    let rp = MTLRenderPassDescriptor::new();
-    let da = rp.depthAttachment();
-    da.setTexture(Some(&depth));
-    da.setLoadAction(MTLLoadAction::Clear);
-    da.setStoreAction(MTLStoreAction::Store);
-    da.setClearDepth(depth_value as f64);
-    cb.renderCommandEncoderWithDescriptor(&rp).ok_or("depth clear")?.endEncoding();
-    encode_motion(&cb, &pipes.motion, &depth, &motion, &cur_j, &cur, &prev, (cw, ch));
+    let mut f = Frame3::new(&queue, false);
+    let clear = Att { clear: [depth_value as f64, 0.0, 0.0, 0.0], ..Att::depth(&depth, MTLLoadAction::Clear, MTLStoreAction::Store) };
+    f.render_pass(&PassDesc::default().with_depth(clear)).ok_or("depth clear")?.end();
+    encode_motion(&mut f, &pipes.motion, &depth, &motion, &cur_j, &cur, &prev, (cw, ch));
     let buf = dev.newBufferWithLength_options(aw * ah * 4, MTLResourceOptions::StorageModeShared).ok_or("readback buffer")?;
-    let b = cb.blitCommandEncoder().ok_or("blit")?;
-    unsafe {
-        b.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-            &motion, 0, 0, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: aw, height: ah, depth: 1 }, &buf, 0, aw * 4, aw * ah * 4,
-        );
-    }
-    b.endEncoding();
-    cb.commit();
-    cb.waitUntilCompleted();
-    if let Some(e) = cb.error() {
-        return Err(format!("GPU error: {}", e.localizedDescription()));
-    }
+    f.copy_texture_to_buffer(&motion, 0, 0, MTLSize { width: aw, height: ah, depth: 1 }, &buf, aw * 4, aw * ah * 4);
+    f.commit_wait().map_err(|e| format!("GPU error: {e}"))?;
     let px = unsafe { std::slice::from_raw_parts(buf.contents().as_ptr() as *const u16, aw * ah * 2) };
     let inv = cur_j.inverse();
     let mut worst = 0f32;
@@ -1433,6 +1414,7 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
         gpu.push(ms);
     }
     // pipelining of the measured frames (lines CI greps): how deep the GPU queue ran and where the thread blocked
+    println!("backend: {}", r.backend_label());
     println!("frame loop: {}; fence: {}; render thread QoS {:?}", r.take_loop_stats().line(r.in_flight_limit()), r.fence_label(), crate::qos::thread_qos());
     if r.cfg.gpu_passes {
         let mut passes = PassStats::default();

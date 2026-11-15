@@ -1,5 +1,5 @@
 //! Frame submission of `Renderer` (src/mac.rs, whose child module this is): the frames-in-flight fence, the frame's
-//! command buffers with per-pass GPU timing, and the power state (thermal, Low Power Mode).
+//! per-pass GPU timing design, and the power state (thermal, Low Power Mode).
 //!
 //! **Pipelining.** The render thread encodes frame N+1 while the GPU runs N. `FrameFence` bounds how far ahead it
 //! may get (2 windowed and in Electron, 3 in the offscreen bench): `begin` blocks only when that many frames are
@@ -15,7 +15,8 @@
 //!   `event.waitUntilSignaledValue(n - limit)` (docs/research/pocketcat-techniques.md PC5). The completion counter
 //!   is kept as a safety net (a failed command buffer never signals), so a wait can never hang.
 //!
-//! **Per-pass GPU time** (PC1). `FrameCmds` is the seam: the frame calls `end_group(PASS_*)` after each pass group
+//! **Per-pass GPU time** (PC1). `gpu::Frame::end_group` is the seam (src/gpu.rs; the Metal 3 implementation,
+//! `Frame3`, is in src/gpu_metal3.rs): the frame calls `end_group(PASS_*)` after each pass group
 //! (targets, shadow, main, upscale). With timing off that is a no-op and the frame is one command buffer. With
 //! timing on, each group is committed as its own command buffer and its `GPUStartTime..GPUEndTime` is read in the
 //! completion handler; groups run back to back on one queue, so a group's time is `end - max(start, previous end)`.
@@ -99,30 +100,38 @@ impl FrameFence {
         t.elapsed().as_secs_f64() * 1000.0
     }
 
-    /// The frame being encoded is about to be committed: encode the GPU-side signal into its last command buffer
-    /// and count it. Returns (the frame's ordinal, frames in flight including this one, the completion handle).
-    pub(super) fn submit(&mut self, last_cb: &CmdBuf) -> (u64, u32, FenceDone) {
+    /// The frame being encoded is about to be committed: count it. Returns (frames in flight including this one,
+    /// the completion handle). The backend encodes the GPU-side signal (`FenceDone::event`, when the fence has one)
+    /// at the end of the frame and calls `FenceDone::signal` when the frame completed.
+    pub(super) fn submit(&mut self) -> (u32, FenceDone) {
         self.submitted += 1;
-        if let Some(e) = &self.event {
-            last_cb.encodeSignalEvent_value(ProtocolObject::from_ref(&**e), self.submitted);
-        }
         let in_flight = (self.submitted - self.completed().min(self.submitted)) as u32;
-        (self.submitted, in_flight, FenceDone { done: self.done.clone(), event: self.event.clone(), ordinal: self.submitted })
+        (in_flight, FenceDone { done: self.done.clone(), event: self.event.clone(), ordinal: self.submitted })
     }
+
+    /// Frame ordinals for the graveyard (src/gpu.rs): the frame being encoded now, and the last one the GPU completed.
+    pub(super) fn clock(&self) -> crate::gpu::FrameClock { crate::gpu::FrameClock { encoding: self.submitted + 1, completed: self.completed().min(self.submitted) } }
 
     pub(super) fn wait_idle(&self) { self.wait_for(self.submitted); }
 }
 
-/// Moved into the last command buffer's completion handler.
-pub(super) struct FenceDone {
+/// A frame's completion handle: moved into whatever the backend runs when the GPU finished the frame (Metal 3: the
+/// last command buffer's completion handler; Metal 4: the commit's feedback handler).
+pub struct FenceDone {
     done: Arc<Completed>,
     event: Option<SharedEvent>,
     ordinal: u64,
 }
 
 impl FenceDone {
-    /// `ok`: the command buffer completed without error (then the GPU has already signalled the event).
-    pub(super) fn signal(&self, ok: bool) {
+    /// The frame's ordinal (1-based): the value the GPU-side signal carries.
+    pub fn ordinal(&self) -> u64 { self.ordinal }
+
+    /// `Fence::Event`: the event the GPU must signal with `ordinal()` at the end of the frame.
+    pub fn event(&self) -> Option<&ProtocolObject<dyn MTLSharedEvent>> { self.event.as_deref() }
+
+    /// `ok`: the frame completed without error (then the GPU has already signalled the event).
+    pub fn signal(&self, ok: bool) {
         if !ok {
             if let Some(e) = &self.event {
                 // a failed command buffer does not run its signal command
@@ -135,61 +144,6 @@ impl FenceDone {
         *n = (*n).max(self.ordinal);
         self.done.cv.notify_all();
     }
-}
-
-/// GPU spans of one frame's pass groups, filled by the completion handlers.
-#[derive(Default)]
-pub(super) struct Spans(Vec<(usize, f64, f64)>);
-
-impl Spans {
-    pub(super) fn push(&mut self, group: usize, start: f64, end: f64) { self.0.push((group, start, end)); }
-
-    /// Per-group ms: groups run back to back, so each is charged from when it could start (`prev_end`: the end of
-    /// whatever ran before it) to its own end. Returns the times and the last end.
-    pub(super) fn resolve(&self, mut prev_end: f64) -> ([f64; 4], f64) {
-        let mut ms = [0.0; 4];
-        for &(g, start, end) in &self.0 {
-            if end <= 0.0 {
-                continue; // an empty command buffer never ran on the GPU
-            }
-            ms[g] += (end - start.max(prev_end)).max(0.0) * 1000.0;
-            prev_end = prev_end.max(end);
-        }
-        (ms, prev_end)
-    }
-}
-
-/// The command buffer(s) of one frame (see the module docs).
-pub(super) struct FrameCmds {
-    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    cb: Retained<CmdBuf>,
-    /// Some: per-pass timing, one command buffer per pass group
-    pub(super) spans: Option<Arc<Mutex<Spans>>>,
-}
-
-impl FrameCmds {
-    pub(super) fn new(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>, timed: bool) -> FrameCmds {
-        FrameCmds { queue: queue.clone(), cb: queue.commandBuffer().expect("command buffer"), spans: timed.then(|| Arc::new(Mutex::new(Spans::default()))) }
-    }
-
-    /// The command buffer to encode into.
-    pub(super) fn cb(&self) -> &CmdBuf { &self.cb }
-
-    /// Everything encoded since the last call belongs to pass group `group`.
-    pub(super) fn end_group(&mut self, group: usize) {
-        let Some(spans) = &self.spans else { return };
-        let spans = spans.clone();
-        let handler = RcBlock::new(move |cb: NonNull<CmdBuf>| {
-            let cb = unsafe { cb.as_ref() };
-            spans.lock().unwrap().push(group, cb.GPUStartTime(), cb.GPUEndTime());
-        });
-        unsafe { self.cb.addCompletedHandler(RcBlock::as_ptr(&handler)) };
-        self.cb.commit();
-        self.cb = self.queue.commandBuffer().expect("command buffer");
-    }
-
-    /// The last command buffer (present + the frame's completion handler go on it), tagged as `group`.
-    pub(super) fn finish(self, group: usize) -> (Retained<CmdBuf>, Option<(Arc<Mutex<Spans>>, usize)>) { (self.cb, self.spans.map(|s| (s, group))) }
 }
 
 /// Thermal state and Low Power Mode of this Mac, or the `FASTRENDER_THERMAL` / `FASTRENDER_LOW_POWER` override.
@@ -256,7 +210,7 @@ impl Renderer {
     pub fn take_loop_stats(&mut self) -> LoopStats { std::mem::take(&mut self.loop_stats) }
 
     /// Completed frames' per-pass GPU ms since the last call (empty unless `cfg.gpu_passes`).
-    pub fn take_pass_times(&self) -> Vec<[f64; 4]> { std::mem::take(&mut *self.pass_times.lock().unwrap()) }
+    pub fn take_pass_times(&self) -> Vec<[f64; 4]> { std::mem::take(&mut *self.sinks.pass_times.lock().unwrap()) }
 
     /// How many frames may be in flight.
     pub fn in_flight_limit(&self) -> usize { self.fence.limit() }

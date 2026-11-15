@@ -26,8 +26,6 @@
 //!   clearDepth) clear with the full-screen triangle. Offscreen targets render at their own size, never upscaled.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
-use std::ptr::NonNull;
 
 use super::*;
 use crate::three::{pass_flag, CopyRec, PassHeader, RenderTargetMeta, Step, TargetFormat};
@@ -184,6 +182,9 @@ pub(super) struct Targets {
     probes: Vec<(String, Buffer, MTLPixelFormat, usize)>,
     /// resource releases of the last batch, applied with the next one (`three::defer_releases`)
     pub pending_releases: Vec<(u32, u32)>,
+    /// attachments taken out of use (target released / resized, a FramebufferTexture re-made): ThreeScene moves them
+    /// to the graveyard (src/gpu.rs), where they wait for the frames that may still sample or render into them
+    pub dead: Vec<Dead>,
 }
 
 impl Targets {
@@ -207,6 +208,7 @@ impl Targets {
             probe: if std::env::var("FASTRENDER_RT_PROBE").is_ok_and(|v| v == "1") { 1 } else { 0 },
             probes: Vec::new(),
             pending_releases: Vec::new(),
+            dead: Vec::new(),
         }
     }
 
@@ -266,7 +268,8 @@ impl Targets {
         let mut colors = Vec::new();
         for (c, f) in m.colors.iter().zip(&formats) {
             let t = make(pixel_format(f.expect("checked")), ty, levels, MTLStorageMode::Private, rw)?;
-            self.textures.insert(c.id, (t.clone(), sampler(dev, &c.sampler_meta())?));
+            let old = self.textures.insert(c.id, (t.clone(), sampler(dev, &c.sampler_meta())?));
+            self.bury_texture(old);
             colors.push(t);
         }
         let (mut depth, mut depth_memoryless) = (None, false);
@@ -285,26 +288,45 @@ impl Targets {
                 make(fmt, dty, levels, MTLStorageMode::Private, if sampled { rw } else { MTLTextureUsage::RenderTarget })?
             };
             if let Some(dt) = &m.depth_texture {
-                self.textures.insert(dt.id, (t.clone(), sampler(dev, &dt.sampler_meta())?));
+                let old = self.textures.insert(dt.id, (t.clone(), sampler(dev, &dt.sampler_meta())?));
+                self.bury_texture(old);
             }
             depth = Some(t);
         }
         if m.samples > 0 {
             self.report(format!("render target {id}: {} MSAA samples rendered without multisampling", m.samples));
         }
-        self.rts.insert(id, Rt { meta: m, key, colors, depth, depth_memoryless, init: HashSet::new(), depth_init: HashSet::new() });
+        if let Some(old) = self.rts.insert(id, Rt { meta: m, key, colors, depth, depth_memoryless, init: HashSet::new(), depth_init: HashSet::new() }) {
+            self.bury_rt(old);
+        }
         Ok(())
     }
 
     pub fn release(&mut self, id: u32) {
         if let Some(rt) = self.rts.remove(&id) {
             for c in &rt.meta.colors {
-                self.textures.remove(&c.id);
+                let old = self.textures.remove(&c.id);
+                self.bury_texture(old);
             }
             if let Some(d) = &rt.meta.depth_texture {
-                self.textures.remove(&d.id);
+                let old = self.textures.remove(&d.id);
+                self.bury_texture(old);
             }
+            self.bury_rt(rt);
         }
+    }
+
+    /// A registered attachment / FramebufferTexture taken out of the registry.
+    fn bury_texture(&mut self, old: Option<(Texture, Sampler)>) {
+        if let Some((t, s)) = old {
+            self.dead.push(Dead::Texture(t));
+            self.dead.push(Dead::Sampler(s));
+        }
+    }
+
+    /// A render target's attachments (released, or re-uploaded at another size).
+    fn bury_rt(&mut self, rt: Rt) {
+        self.dead.extend(rt.colors.into_iter().chain(rt.depth).map(Dead::Texture));
     }
 
     /// a FramebufferTexture (TEXTURE meta `framebuffer: true`): allocated now, re-made in the source's format at the
@@ -313,7 +335,8 @@ impl Targets {
         let m: TextureMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
         let fmt = TargetFormat::of(m.format, m.ty, m.srgb).map_or(MTLPixelFormat::RGBA8Unorm, pixel_format);
         let t = Self::plain_texture(dev, fmt, m.width, m.height)?;
-        self.textures.insert(id, (t, sampler(dev, &m)?));
+        let old = self.textures.insert(id, (t, sampler(dev, &m)?));
+        self.bury_texture(old);
         self.framebuffer.insert(id, m);
         Ok(())
     }
@@ -481,9 +504,11 @@ impl ThreeScene {
         if v3 {
             let s = &mut self.slots[slot_i];
             if s.ring_cap < total {
-                // the slot's previous frame has finished (its semaphore), so its buffer can be replaced
+                // the slot's previous frame has finished (the fence), so nothing in flight reads its buffer; it goes
+                // through the graveyard all the same (one rule for every replaced resource)
                 s.ring_cap = RingLayout::capacity_for(total);
-                s.ring = ring(dev, s.ring_cap);
+                let old = std::mem::replace(&mut s.ring, ring(dev, s.ring_cap));
+                self.dead.push(Dead::Buffer(old));
             }
         }
         // the previous frame's main pass goes back to its slot; every slot is rebuilt
@@ -635,7 +660,7 @@ impl ThreeScene {
     /// Every offscreen pass of the frame (and the shadow maps of screen passes other than the main one), in stream
     /// order, before mac.rs encodes the main pass's shadows and the screen. Consecutive passes into the same
     /// attachment share one render encoder. Leaves the main pass entered.
-    pub fn encode_offscreen(&mut self, dev: &Device, cb: &ProtocolObject<dyn MTLCommandBuffer>, slot_i: usize) {
+    pub fn encode_offscreen<F: Frame>(&mut self, dev: &Device, cb: &mut F, slot_i: usize) {
         if !self.targets.multi() || !self.view.v3 {
             return;
         }
@@ -701,7 +726,7 @@ impl ThreeScene {
     }
 
     /// FASTRENDER_RT_PROBE: print this frame's passes, read every target back (face 0..5 level 0, face 0 every level)
-    fn probe(&mut self, dev: &Device, cb: &ProtocolObject<dyn MTLCommandBuffer>) {
+    fn probe<F: Frame>(&mut self, dev: &Device, cb: &mut F) {
         for (k, p) in self.targets.passes.iter().enumerate().take(120) {
             if let Some(c) = p.copy {
                 eprintln!("rt probe: pass {k}: copy -> texture {} from target {}", c.texture, c.src_target);
@@ -715,7 +740,6 @@ impl ThreeScene {
                 h.target, h.face, h.level, h.flags, h.viewport[2], if p.prepared { "" } else { " UNPREPARED" }
             );
         }
-        let Some(b) = cb.blitCommandEncoder() else { return };
         let mut ids: Vec<u32> = self.targets.rts.keys().copied().collect();
         ids.sort();
         for id in ids {
@@ -734,15 +758,10 @@ impl ThreeScene {
             for (face, level) in picks {
                 let (w, h) = rt.size_at(level);
                 let Some(buf) = dev.newBufferWithLength_options(w * h * bpp, MTLResourceOptions::StorageModeShared) else { continue };
-                unsafe {
-                    b.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-                        t, face as usize, level as usize, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: w, height: h, depth: 1 }, &buf, 0, w * bpp, w * h * bpp,
-                    );
-                }
+                cb.copy_texture_to_buffer(t, face as usize, level as usize, MTLSize { width: w, height: h, depth: 1 }, &buf, w * bpp, w * h * bpp);
                 self.targets.probes.push((format!("rt {id} {w}x{h} face {face} level {level}"), buf, fmt, w * h));
             }
         }
-        b.endEncoding();
     }
 
     /// the probe's readbacks (FASTRENDER_RT_PROBE), once the frame completed: mean RGBA per face / level
@@ -774,7 +793,7 @@ impl ThreeScene {
     }
 
     /// One render encoder for passes `group` (same target, face, level).
-    fn encode_group(&mut self, dev: &Device, cb: &ProtocolObject<dyn MTLCommandBuffer>, slot_i: usize, group: std::ops::Range<usize>) {
+    fn encode_group<F: Frame>(&mut self, dev: &Device, cb: &mut F, slot_i: usize, group: std::ops::Range<usize>) {
         let first = self.targets.passes[group.start].header;
         let (id, face, level) = (first.target, first.face, first.level);
         // does a pass after this group (this frame) load this attachment's depth? then it must be stored
@@ -786,35 +805,35 @@ impl ThreeScene {
         let (_, sc0) = pass_rects(&first, size, false);
         let scissored = partial(&sc0, size);
         let clears = first.clears();
-        let rp = MTLRenderPassDescriptor::new();
+        // the attachments, held for the pass description (the registry is written below)
+        let colors: Vec<Texture> = rt.colors.clone();
+        let depth_tex: Option<Texture> = rt.depth.clone();
+        let mut rp = PassDesc::default();
         let init = rt.init.contains(&(face, level));
         let layered = rt.meta.cube || rt.meta.dim >= 2;
         let mut cleared_by_load = 0;
-        for (i, t) in rt.colors.iter().enumerate() {
-            let a = unsafe { rp.colorAttachments().objectAtIndexedSubscript(i) };
-            a.setTexture(Some(t));
-            a.setLevel(level as usize);
+        for (i, t) in colors.iter().enumerate() {
+            let mut a = Att::new(t, MTLLoadAction::Load, MTLStoreAction::Store);
+            a.level = level as usize;
             if rt.meta.dim == 3 {
-                a.setDepthPlane(face as usize);
+                a.depth_plane = face as usize;
             } else if layered {
-                a.setSlice(face as usize);
+                a.slice = face as usize;
             }
             if clears & pass_flag::CLEAR_COLOR != 0 && !scissored {
                 let c = first.clear_color;
-                a.setLoadAction(MTLLoadAction::Clear);
-                a.setClearColor(MTLClearColor { red: c[0] as f64, green: c[1] as f64, blue: c[2] as f64, alpha: c[3] as f64 });
+                a.load = MTLLoadAction::Clear;
+                a.clear = [c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64];
                 cleared_by_load |= pass_flag::CLEAR_COLOR;
             } else if !init {
-                a.setLoadAction(MTLLoadAction::Clear); // WebGL zero-initialises render targets
-                a.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0 });
-            } else {
-                a.setLoadAction(MTLLoadAction::Load);
+                a.load = MTLLoadAction::Clear; // WebGL zero-initialises render targets
+                a.clear = [0.0, 0.0, 0.0, 0.0];
             }
-            a.setStoreAction(MTLStoreAction::Store);
+            rp.colors[i] = Some(a);
         }
         let mut depth_stored = false;
         let mut memoryless_reload = false;
-        if let Some(d) = &rt.depth {
+        if let Some(d) = &depth_tex {
             let load = !rt.depth_memoryless && rt.depth_init.contains(&(face, level)) && !(clears & pass_flag::CLEAR_DEPTH != 0 && !scissored);
             if clears & pass_flag::CLEAR_DEPTH != 0 && !scissored {
                 cleared_by_load |= pass_flag::CLEAR_DEPTH | pass_flag::CLEAR_STENCIL;
@@ -823,32 +842,19 @@ impl ThreeScene {
             depth_stored = !rt.depth_memoryless && (rt.meta.depth_texture.is_some() || later_loads_depth);
             memoryless_reload = rt.depth_memoryless && later_loads_depth;
             let (load_action, store_action) = (if load { MTLLoadAction::Load } else { MTLLoadAction::Clear }, if depth_stored { MTLStoreAction::Store } else { MTLStoreAction::DontCare });
-            let da = rp.depthAttachment();
-            da.setTexture(Some(d));
-            da.setClearDepth(1.0);
-            da.setLoadAction(load_action);
-            da.setStoreAction(store_action);
+            let mut da = Att::depth(d, load_action, store_action);
             if !rt.depth_memoryless {
-                da.setLevel(level as usize);
+                da.level = level as usize;
                 if layered {
-                    da.setSlice(face as usize);
+                    da.slice = face as usize;
                 }
             }
+            rp.depth = Some(da);
             if rt.meta.stencil_buffer {
-                let sa = rp.stencilAttachment();
-                sa.setTexture(Some(d));
-                sa.setLoadAction(load_action);
-                sa.setStoreAction(store_action);
-                if !rt.depth_memoryless {
-                    sa.setLevel(level as usize);
-                    if layered {
-                        sa.setSlice(face as usize);
-                    }
-                }
+                rp.stencil = Some(da);
             }
         }
         let key = rt.key;
-        let colors: Vec<Texture> = rt.colors.clone();
         if memoryless_reload {
             self.targets.report(format!("render target {id}: depth reused across passes but kept in tile memory (cleared instead)"));
         }
@@ -858,7 +864,7 @@ impl ThreeScene {
                 rt.depth_init.insert((face, level));
             }
         }
-        let Some(enc) = cb.renderCommandEncoderWithDescriptor(&rp) else { return };
+        let Some(mut enc) = cb.render_pass(&rp) else { return };
         self.targets.stats[2] += 1;
         let mut mips = false;
         for j in group.clone() {
@@ -866,35 +872,29 @@ impl ThreeScene {
             let (vp, sc) = pass_rects(&h, size, false);
             let clear = h.clears() & !if j == group.start { cleared_by_load } else { 0 };
             if clear != 0 {
-                self.encode_clear(dev, &enc, key, size, &h, clear);
+                self.encode_clear(dev, &mut enc, key, size, &h, clear);
             }
-            enc.setViewport(vp);
-            enc.setScissorRect(sc.unwrap_or(MTLScissorRect { x: 0, y: 0, width: size.0, height: size.1 }));
+            enc.set_viewport(vp);
+            enc.set_scissor(sc.unwrap_or(MTLScissorRect { x: 0, y: 0, width: size.0, height: size.1 }));
             mips |= h.flags & pass_flag::GEN_MIPMAPS != 0;
             if sc.is_some_and(|s| s.width == 0 || s.height == 0) {
                 continue;
             }
             if h.renders() && self.targets.passes[j].prepared {
                 self.enter(j);
-                self.encode_main_v3(&enc, slot_i);
+                self.encode_main_v3(&mut enc, slot_i);
             }
         }
-        enc.endEncoding();
+        enc.end();
         if mips {
-            if let Some(b) = cb.blitCommandEncoder() {
-                for t in &colors {
-                    if t.mipmapLevelCount() > 1 {
-                        b.generateMipmapsForTexture(t);
-                    }
-                }
-                b.endEncoding();
-                self.targets.stats[4] += 1;
-            }
+            let with_mips: Vec<&crate::gpu::Tex> = colors.iter().filter(|t| t.mipmapLevelCount() > 1).map(|t| &**t).collect();
+            cb.generate_mipmaps(&with_mips);
+            self.targets.stats[4] += 1;
         }
     }
 
     /// A clear that is not a load action: a full-screen triangle (scissored to the pass's scissor rectangle).
-    fn encode_clear(&mut self, dev: &Device, enc: &RenderEnc, key: u32, size: (usize, usize), h: &PassHeader, flags: u32) {
+    fn encode_clear<P: RenderPass>(&mut self, dev: &Device, enc: &mut P, key: u32, size: (usize, usize), h: &PassHeader, flags: u32) {
         let color = flags & pass_flag::CLEAR_COLOR != 0;
         let depth = flags & (pass_flag::CLEAR_DEPTH | pass_flag::CLEAR_STENCIL) != 0 && (key == u32::MAX || key & (1 << 16) != 0);
         if !color && !depth {
@@ -902,25 +902,23 @@ impl ThreeScene {
         }
         let Some(p) = self.targets.clear_pipeline(dev, key, color, depth) else { return };
         let (_, sc) = pass_rects(h, size, key == u32::MAX);
-        enc.setViewport(MTLViewport { originX: 0.0, originY: 0.0, width: size.0 as f64, height: size.1 as f64, znear: 0.0, zfar: 1.0 });
-        enc.setScissorRect(sc.unwrap_or(MTLScissorRect { x: 0, y: 0, width: size.0, height: size.1 }));
+        enc.set_viewport(MTLViewport { originX: 0.0, originY: 0.0, width: size.0 as f64, height: size.1 as f64, znear: 0.0, zfar: 1.0 });
+        enc.set_scissor(sc.unwrap_or(MTLScissorRect { x: 0, y: 0, width: size.0, height: size.1 }));
         if sc.is_some_and(|s| s.width == 0 || s.height == 0) {
             return;
         }
-        enc.setRenderPipelineState(&p);
-        enc.setDepthStencilState(Some(&self.targets.clear_depth[depth as usize]));
-        enc.setCullMode(MTLCullMode::None);
-        enc.setTriangleFillMode(MTLTriangleFillMode::Fill);
+        enc.set_pipeline(&p);
+        enc.set_depth_state(&self.targets.clear_depth[depth as usize]);
+        enc.set_cull(MTLCullMode::None);
+        enc.set_fill(MTLTriangleFillMode::Fill);
         let c = h.clear_color;
-        unsafe {
-            enc.setFragmentBytes_length_atIndex(NonNull::new(c.as_ptr() as *mut c_void).unwrap(), 16, 0);
-            enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
-        }
+        enc.fragment_bytes(unsafe { std::slice::from_raw_parts(c.as_ptr() as *const u8, 16) }, 0);
+        enc.draw(MTLPrimitiveType::Triangle, 0, 3, 1, 0);
         self.targets.stats[3] += 1;
     }
 
     /// copyFramebufferToTexture from a render target (a blit; the destination is re-made in the source's format)
-    fn encode_copy(&mut self, dev: &Device, cb: &ProtocolObject<dyn MTLCommandBuffer>, c: &CopyRec) {
+    fn encode_copy<F: Frame>(&mut self, dev: &Device, cb: &mut F, c: &CopyRec) {
         if c.src_target == 0 {
             self.targets.report("copyFramebufferToTexture from the screen is not supported".into());
             return;
@@ -934,7 +932,9 @@ impl ThreeScene {
         if self.targets.textures.get(&c.texture).is_none_or(|t| t.0.pixelFormat() != fmt) {
             match (Targets::plain_texture(dev, fmt, meta.width, meta.height), sampler(dev, &meta)) {
                 (Ok(t), Ok(s)) => {
-                    self.targets.textures.insert(c.texture, (t, s));
+                    // re-made in the source's format: the old one may be sampled by frames in flight
+                    let old = self.targets.textures.insert(c.texture, (t, s));
+                    self.targets.bury_texture(old);
                 }
                 _ => return,
             }
@@ -946,27 +946,23 @@ impl ThreeScene {
         if w == 0 || h == 0 {
             return;
         }
-        let Some(b) = cb.blitCommandEncoder() else { return };
-        unsafe {
-            b.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
-                &src,
-                slice,
-                c.src_level as usize,
-                MTLOrigin { x, y, z: 0 },
-                MTLSize { width: w, height: h, depth: 1 },
-                &dst,
-                0,
-                0,
-                MTLOrigin { x: c.dst[0] as usize, y: c.dst[1] as usize, z: 0 },
-            );
-        }
-        b.endEncoding();
+        cb.copy_texture(&TexCopy {
+            src: &src,
+            src_slice: slice,
+            src_level: c.src_level as usize,
+            src_origin: MTLOrigin { x, y, z: 0 },
+            size: MTLSize { width: w, height: h, depth: 1 },
+            dst: &dst,
+            dst_slice: 0,
+            dst_level: 0,
+            dst_origin: MTLOrigin { x: c.dst[0] as usize, y: c.dst[1] as usize, z: 0 },
+        });
         self.targets.stats[5] += 1;
     }
 
     /// The screen passes into mac.rs's main encoder (content size): each with its viewport / scissor, the clears the
     /// load action did not do as full-screen triangles. Returns the draws. Leaves the main pass entered.
-    pub fn encode_screen(&mut self, dev: &Device, enc: &RenderEnc, slot_i: usize, content: (usize, usize)) -> usize {
+    pub fn encode_screen<P: RenderPass>(&mut self, dev: &Device, enc: &mut P, slot_i: usize, content: (usize, usize)) -> usize {
         let main = self.targets.main;
         let mut drawn = 0;
         let mut first = true;
@@ -984,8 +980,8 @@ impl ThreeScene {
             if clear != 0 {
                 self.encode_clear(dev, enc, u32::MAX, content, &h, clear);
             }
-            enc.setViewport(vp);
-            enc.setScissorRect(sc.unwrap_or(MTLScissorRect { x: 0, y: 0, width: content.0, height: content.1 }));
+            enc.set_viewport(vp);
+            enc.set_scissor(sc.unwrap_or(MTLScissorRect { x: 0, y: 0, width: content.0, height: content.1 }));
             if sc.is_some_and(|s| s.width == 0 || s.height == 0) || !h.renders() || !prepared {
                 continue;
             }
@@ -993,7 +989,7 @@ impl ThreeScene {
             drawn += self.encode_main_v3(enc, slot_i);
         }
         self.enter(main);
-        enc.setScissorRect(MTLScissorRect { x: 0, y: 0, width: content.0, height: content.1 });
+        enc.set_scissor(MTLScissorRect { x: 0, y: 0, width: content.0, height: content.1 });
         drawn
     }
 

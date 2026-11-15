@@ -4,6 +4,11 @@
 //! main passes. The JS runs in JavaScriptCore here (`jsc.rs`); an Electron host would feed the same
 //! uploads and stream (docs/HOST.md).
 //!
+//! Encoding goes through the backend seam (src/gpu.rs: `Frame`, `RenderPass`), generic over the backend. Nothing here
+//! relies on a command buffer retaining what it references (Metal 4 does not): a buffer or texture that is replaced
+//! or released goes to the graveyard (`ThreeScene::bury`) and is freed once the GPU completed the frames that could
+//! reference it (docs/notes/metal4-port.md).
+//!
 //! This file: the scene state, prepare (cull, sort, FrObjects, pipeline lookups) and the main-pass encoders. Its child
 //! modules: mac_upload.rs (registry: apply + upload_*, samplers), mac_shadow.rs (v3 shadow maps), mac_bind.rs (per-draw
 //! binding and the draw call), mac_targets.rs (render targets and passes).
@@ -20,7 +25,8 @@
 //! - v2 (`programs: 'native'`): materials described by value for the hand-written `vs_three`/`fs_three`
 //!   (the fast tier).
 
-use crate::bindlist::{self, BindArena, FastMap, IdMap, MatBinds, ProgPlan, StreamPlan};
+use crate::bindlist::{self, BindArena, FastMap, IdMap, MatBinds, ProgPlan, Stage, StreamPlan};
+use crate::gpu::{Att, Dead, Frame, FrameClock, Graveyard, PassDesc, RenderPass, TexCopy};
 use crate::mac_programs::{Programs, StreamSig, Target, ATTR_BUFFER0, MAX_SAMPLERS, SIG_INSTANCE};
 use crate::three::{ProgramMaterialMeta, ShadowRec};
 use crate::xlat;
@@ -40,7 +46,6 @@ use crate::mac::{buffer_with, Buffer, Device, Texture, FRAME_SLOTS, OUT_FORMAT};
 use crate::three::{self, flag, light, kind, Array, Draw, GeometryMeta, InstancesMeta, MaterialMeta, Resource, TextureMeta, ThreeLight};
 
 type RenderPipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
-type RenderEnc = ProtocolObject<dyn MTLRenderCommandEncoder>;
 
 const MAX_LIGHTS: usize = 256;
 const OBJ_BYTES: usize = 64;
@@ -165,6 +170,15 @@ struct Geo {
     sphere: [f32; 4],
 }
 
+impl Geo {
+    /// Every buffer of the geometry (the graveyard keeps them while frames in flight may read them).
+    fn bury(self, out: &mut Vec<Dead>) {
+        // `attrs` holds its own handles to pos / nrm / uv / col: burying each handle keeps the buffer alive
+        out.extend(self.attrs.into_iter().chain(self.inst_attrs).map(|a| Dead::Buffer(a.1)));
+        out.extend([Some(self.pos), Some(self.nrm), self.uv, self.col, self.index.map(|i| i.0)].into_iter().flatten().map(Dead::Buffer));
+    }
+}
+
 struct Mat {
     row: u32,
     meta: MaterialMeta,
@@ -175,6 +189,10 @@ struct Inst {
     /// v3: the same matrices as 4 float4 columns per instance (three's `instanceMatrix` attribute)
     cols: Buffer,
     colors: Option<Buffer>,
+}
+
+impl Inst {
+    fn bury(self, out: &mut Vec<Dead>) { out.extend([Some(self.rows), Some(self.cols), self.colors].into_iter().flatten().map(Dead::Buffer)); }
 }
 
 struct Pipes {
@@ -297,6 +315,15 @@ pub struct ThreeScene {
     last_t: f32,
     /// render targets and this frame's passes (src/mac_targets.rs)
     targets: targets::Targets,
+    /// buffers / textures replaced or released, kept until the GPU completed the frames that may reference them
+    /// (src/gpu.rs): no backend is assumed to retain what a command buffer uses
+    grave: Graveyard<Dead>,
+    /// taken out of use since the last `entomb` (buried with the frame being encoded)
+    dead: Vec<Dead>,
+    /// the frame being encoded and the last one the GPU completed (from the renderer's fence, each update())
+    clock: FrameClock,
+    /// textures uploaded this frame whose mip chains the frame must generate before it samples them
+    mip_queue: Vec<Texture>,
 }
 
 fn pipes(dev: &Device, src: &str) -> Result<Pipes, String> {
@@ -457,6 +484,10 @@ impl ThreeScene {
             apply_ms: 0.0,
             encode_ms: std::cell::Cell::new(0.0),
             last_t: 0.0,
+            grave: Graveyard::new(),
+            dead: Vec::new(),
+            clock: FrameClock::default(),
+            mip_queue: Vec::new(),
             targets: targets::Targets::new(dev),
         })
     }
@@ -472,7 +503,13 @@ impl ThreeScene {
 
     /// Run the game's frame(), apply its resource uploads, take its camera, lights and draw list
     /// (v3: and copy its uniform blocks into `slot`'s ring).
-    pub fn update(&mut self, dev: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>, slot_i: usize, t: f32) {
+    /// `clock`: the frame this update belongs to and the last frame the GPU completed (the renderer's fence).
+    pub fn update(&mut self, dev: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>, slot_i: usize, t: f32, clock: FrameClock) {
+        // what died while the previous frame was encoded is buried with that frame; then everything whose frame the
+        // GPU has completed is freed (the only place resources are released while the renderer lives)
+        self.entomb();
+        self.clock = clock;
+        self.grave.collect(clock.completed);
         let dt = (t - self.last_t).max(0.0);
         self.last_t = t;
         self.progs.ensure_lit_depth(dev, queue);
@@ -497,11 +534,13 @@ impl ThreeScene {
             self.stream_epoch += 1;
             self.bind_arena.invalidate();
         }
-        // releases wait for the frame written before them (three::defer_releases; render targets: mac_targets.rs)
+        // releases wait for the frame written before them (three::defer_releases; render targets: mac_targets.rs).
+        // That delay is about order (JS disposes a resource before the passes that use it have run); what keeps the
+        // GPU objects alive for frames in flight is the graveyard
         let res = three::defer_releases(&mut self.targets.pending_releases, self.host.take_resources());
         let t0 = std::time::Instant::now();
         if !res.is_empty() {
-            self.apply(dev, queue, res);
+            self.apply(dev, res);
         }
         self.apply_ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.view.sun = self.lights.iter().find(|l| l.kind == light::DIRECTIONAL && l.cast_shadow != 0).map(|l| -Vec3::from(l.dir));
@@ -514,6 +553,34 @@ impl ThreeScene {
                 self.error = Some(e); // keep the last good draw list
             }
         }
+    }
+
+    /// A GPU object taken out of use now (replaced or released): it stays alive until the GPU has completed the frame
+    /// being encoded, the last one that can reference it.
+    pub(super) fn bury(&mut self, d: Dead) { self.dead.push(d); }
+
+    /// Move what was taken out of use (here and in the render-target registry) into the graveyard, under the frame
+    /// that was being encoded when it died.
+    fn entomb(&mut self) {
+        let frame = self.clock.encoding;
+        for d in self.dead.drain(..).chain(self.targets.dead.drain(..)) {
+            self.grave.bury(frame, d);
+        }
+    }
+
+    /// Resources waiting in the graveyard, and the totals buried / freed so far.
+    pub fn graveyard_stats(&self) -> (usize, u64, u64) { (self.grave.len() + self.dead.len() + self.targets.dead.len(), self.grave.buried, self.grave.freed) }
+
+    /// Mip chains of the textures uploaded by this frame's update(), encoded at the start of the frame (before any
+    /// pass samples them). The Metal 3 path used to commit them in a command buffer of their own from update().
+    pub fn encode_uploads<F: Frame>(&mut self, frame: &mut F) {
+        if self.mip_queue.is_empty() {
+            return;
+        }
+        for t in &self.mip_queue {
+            frame.generate_mipmaps(&[&**t]);
+        }
+        self.mip_queue.clear();
     }
 
     /// v3 health for the selftest: (programs compiled, pipelines built, problems reported, draws in the last frame).
@@ -533,7 +600,7 @@ impl ThreeScene {
         let p = &self.progs;
         self.view.v3.then(|| {
             format!(
-                "three programs: {} compiled (Metal {:.0} ms total), {} pipelines ({:.0} ms), {} material instances; shadows: {} maps, {} passes, {} casters with three's depth programs, {} native depth-only, {} VSM blurs; ring {} KB/frame, {} refused writes; {} bind lists ({} built)",
+                "three programs: {} compiled (Metal {:.0} ms total), {} pipelines ({:.0} ms), {} material instances; shadows: {} maps, {} passes, {} casters with three's depth programs, {} native depth-only, {} VSM blurs; ring {} KB/frame, {} refused writes; {} bind lists ({} built); graveyard {} waiting ({} buried, {} freed)",
                 p.compiled,
                 p.compile_ms,
                 p.pipelines_built,
@@ -547,7 +614,10 @@ impl ThreeScene {
                 self.layout.need >> 10,
                 crate::ring::OVERFLOWS.load(std::sync::atomic::Ordering::Relaxed),
                 self.bind_arena.len(),
-                self.bind_arena.built
+                self.bind_arena.built,
+                self.graveyard_stats().0,
+                self.graveyard_stats().1,
+                self.graveyard_stats().2
             ) + &self.pass_stats().map_or(String::new(), |p| format!("; {p}"))
                 + &format!("\nthree {}", p.compile_line())
         })
@@ -633,8 +703,9 @@ impl ThreeScene {
             // grow the object records only (the slot's ring is not this path's)
             let cap = n.next_power_of_two();
             let s = &mut self.slots[slot_i];
-            s.objects = dev.newBufferWithLength_options(cap * OBJ_BYTES, MTLResourceOptions::StorageModeShared).expect("objects");
+            let old = std::mem::replace(&mut s.objects, dev.newBufferWithLength_options(cap * OBJ_BYTES, MTLResourceOptions::StorageModeShared).expect("objects"));
             s.cap = cap;
+            self.bury(Dead::Buffer(old));
         }
         let s = &self.slots[slot_i];
         let objs = s.objects.contents().as_ptr() as *mut ThreeObj;
@@ -766,8 +837,10 @@ impl ThreeScene {
         let need = self.layout.need;
         if self.slots[slot_i].ring_cap < need {
             let cap = RingLayout::capacity_for(need);
-            self.slots[slot_i].ring = ring(dev, cap);
+            let old = std::mem::replace(&mut self.slots[slot_i].ring, ring(dev, cap));
             self.slots[slot_i].ring_cap = cap;
+            // an earlier pass of this frame may already have been prepared against the old ring
+            self.bury(Dead::Buffer(old));
         }
         let from = self.layout_slot;
         if from != slot_i && from < self.slots.len() {
@@ -834,18 +907,16 @@ impl ThreeScene {
 
     /// v3 main pass: three's programs, each draw with its pipeline / depth state / uniform block as WebGLRenderer
     /// would, issuing only the calls whose state differs from the previous draw (`EncState`).
-    fn encode_main_v3(&self, enc: &RenderEnc, slot_i: usize) -> usize {
+    fn encode_main_v3<P: RenderPass>(&self, enc: &mut P, slot_i: usize) -> usize {
         let t0 = std::time::Instant::now();
         let ring = &self.slots[slot_i].ring;
-        unsafe {
-            for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER] {
-                enc.setVertexBuffer_offset_atIndex(Some(ring), 0, b as usize);
-                enc.setFragmentBuffer_offset_atIndex(Some(ring), 0, b as usize);
-            }
-            enc.setVertexBuffer_offset_atIndex(Some(ring), self.layout.frame, xlat::FRAME_BLOCK_BUFFER as usize);
-            enc.setFragmentBuffer_offset_atIndex(Some(ring), self.layout.frame, xlat::FRAME_BLOCK_BUFFER as usize);
-            enc.setFragmentBuffer_offset_atIndex(Some(ring), self.layout.pass, xlat::PASS_BUFFER as usize);
+        for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER] {
+            enc.vertex_buffer(ring, 0, b as usize);
+            enc.fragment_buffer(ring, 0, b as usize);
         }
+        enc.vertex_buffer(ring, self.layout.frame, xlat::FRAME_BLOCK_BUFFER as usize);
+        enc.fragment_buffer(ring, self.layout.frame, xlat::FRAME_BLOCK_BUFFER as usize);
+        enc.fragment_buffer(ring, self.layout.pass, xlat::PASS_BUFFER as usize);
         // a fresh state: whatever an earlier pass left bound on a shared encoder is unknown
         let mut st = bind::EncState::new();
         let (mut last_bias, mut last_wire) = ((0.0f32, 0.0f32), false);
@@ -858,38 +929,36 @@ impl ThreeScene {
             let Some(pipe) = self.progs.pipeline_at(v.pipe) else { continue };
             let Some(g) = self.geos.get(&d.geometry) else { continue };
             if v.pipe != st.pipe {
-                enc.setRenderPipelineState(pipe);
+                enc.set_pipeline(pipe);
                 st.pipe = v.pipe;
             }
             if v.depth != st.depth {
-                enc.setDepthStencilState(Some(self.progs.depth_at(v.depth)));
+                enc.set_depth_state(self.progs.depth_at(v.depth));
                 st.depth = v.depth;
             }
             st.cull(enc, if v.raster & RASTER_NO_CULL != 0 { MTLCullMode::None } else { MTLCullMode::Back });
             st.winding(enc, if v.raster & RASTER_CLOCKWISE != 0 { MTLWinding::Clockwise } else { MTLWinding::CounterClockwise });
             if v.bias != last_bias {
-                enc.setDepthBias_slopeScale_clamp(v.bias.1, v.bias.0, 0.0);
+                enc.set_depth_bias(v.bias.1, v.bias.0, 0.0);
                 last_bias = v.bias;
             }
             // three draws wireframe as GL_LINES over the triangle edges: the same edges, rasterised as lines
             let wire = v.raster & RASTER_WIREFRAME != 0;
             if wire != last_wire {
-                enc.setTriangleFillMode(if wire { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
+                enc.set_fill(if wire { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
                 last_wire = wire;
             }
-            unsafe {
-                enc.setVertexBufferOffset_atIndex(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
-                enc.setFragmentBufferOffset_atIndex(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
-            }
+            enc.vertex_buffer_offset(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
+            enc.fragment_buffer_offset(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
             self.bind_program_draw(enc, &mut st, d, g, v.plan, v.block as usize, v.bind);
             self.draw(enc, d, g);
             drawn += 1;
         }
         if last_bias != (0.0, 0.0) {
-            enc.setDepthBias_slopeScale_clamp(0.0, 0.0, 0.0);
+            enc.set_depth_bias(0.0, 0.0, 0.0);
         }
         if last_wire {
-            enc.setTriangleFillMode(MTLTriangleFillMode::Fill);
+            enc.set_fill(MTLTriangleFillMode::Fill);
         }
         self.encode_ms.set(t0.elapsed().as_secs_f64() * 1000.0);
         drawn
@@ -922,59 +991,53 @@ impl ThreeScene {
         !((self.dbg & 4 != 0 && d.flags & flag::INSTANCED != 0) || (self.dbg & 8 != 0 && mat.meta.transparent) || (self.dbg & 32 != 0 && !mat.meta.ty.contains("Lambert")))
     }
 
-    pub fn encode_main(&self, enc: &RenderEnc, slot_i: usize, uniforms: &Buffer, shadow_map: &Texture, depth_less: &ProtocolObject<dyn MTLDepthStencilState>, depth_test_only: &ProtocolObject<dyn MTLDepthStencilState>) -> usize {
+    pub fn encode_main<P: RenderPass>(&self, enc: &mut P, slot_i: usize, uniforms: &Buffer, shadow_map: &Texture, depth_less: &ProtocolObject<dyn MTLDepthStencilState>, depth_test_only: &ProtocolObject<dyn MTLDepthStencilState>) -> usize {
         if self.view.v3 {
             return self.encode_main_v3(enc, slot_i);
         }
         let s = &self.slots[slot_i];
-        unsafe {
-            enc.setVertexBuffer_offset_atIndex(Some(uniforms), 0, 3);
-            enc.setFragmentBuffer_offset_atIndex(Some(uniforms), 0, 0);
-            enc.setFragmentBuffer_offset_atIndex(Some(&s.lights), 0, 1);
-            enc.setFragmentBuffer_offset_atIndex(Some(&self.mat_buf), 0, 2);
-            enc.setFragmentTexture_atIndex(Some(shadow_map), 0);
-            enc.setVertexBuffer_offset_atIndex(Some(&s.objects), 0, 5);
-        }
+        enc.vertex_buffer(uniforms, 0, 3);
+        enc.fragment_buffer(uniforms, 0, 0);
+        enc.fragment_buffer(&s.lights, 0, 1);
+        enc.fragment_buffer(&self.mat_buf, 0, 2);
+        enc.texture(Stage::Fragment, shadow_map, 0);
+        enc.vertex_buffer(&s.objects, 0, 5);
         let mut transparent_started = false;
-        enc.setRenderPipelineState(&self.pipes.opaque);
-        enc.setDepthStencilState(Some(depth_less));
+        enc.set_pipeline(&self.pipes.opaque);
+        enc.set_depth_state(depth_less);
         let mut last_geo = u32::MAX;
         for &(i, k) in &self.visible {
             let d = &self.draws[i];
             let g = &self.geos[&d.geometry];
             if d.flags & flag::TRANSPARENT != 0 && !transparent_started {
                 transparent_started = true;
-                enc.setRenderPipelineState(&self.pipes.blend);
-                enc.setDepthStencilState(Some(depth_test_only));
+                enc.set_pipeline(&self.pipes.blend);
+                enc.set_depth_state(depth_test_only);
             }
-            enc.setCullMode(if d.flags & flag::DOUBLE != 0 { MTLCullMode::None } else if d.flags & flag::BACK != 0 { MTLCullMode::Front } else { MTLCullMode::Back });
-            enc.setFrontFacingWinding(Self::winding(d));
+            enc.set_cull(if d.flags & flag::DOUBLE != 0 { MTLCullMode::None } else if d.flags & flag::BACK != 0 { MTLCullMode::Front } else { MTLCullMode::Back });
+            enc.set_winding(Self::winding(d));
             if d.geometry != last_geo || d.flags & flag::INSTANCED != 0 {
                 self.bind_geometry(enc, d, g);
                 last_geo = d.geometry;
             }
-            unsafe {
-                enc.setVertexBufferOffset_atIndex(k * OBJ_BYTES, 5);
-                let m = &self.mats[&d.material];
-                let (map, smp) = match (m.meta.map != 0).then(|| self.texs.get(&m.meta.map)).flatten() {
-                    Some(t) => (&t.0, &t.2),
-                    None => (&self.white, &self.white_s),
-                };
-                enc.setFragmentTexture_atIndex(Some(map), 1);
-                enc.setFragmentSamplerState_atIndex(Some(smp), 0);
-            }
+            enc.vertex_buffer_offset(k * OBJ_BYTES, 5);
+            let m = &self.mats[&d.material];
+            let (map, smp) = match (m.meta.map != 0).then(|| self.texs.get(&m.meta.map)).flatten() {
+                Some(t) => (&t.0, &t.2),
+                None => (&self.white, &self.white_s),
+            };
+            enc.texture(Stage::Fragment, map, 1);
+            enc.sampler(Stage::Fragment, smp, 0);
             self.draw(enc, d, g);
         }
         self.visible.len()
     }
 
-    pub fn encode_shadow(&self, enc: &RenderEnc, slot_i: usize, uniforms: &Buffer, shadow_planes: &[Vec4; 6]) {
+    pub fn encode_shadow<P: RenderPass>(&self, enc: &mut P, slot_i: usize, uniforms: &Buffer, shadow_planes: &[Vec4; 6]) {
         let s = &self.slots[slot_i];
-        enc.setRenderPipelineState(&self.pipes.shadow);
-        unsafe {
-            enc.setVertexBuffer_offset_atIndex(Some(uniforms), 0, 3);
-            enc.setVertexBuffer_offset_atIndex(Some(&s.objects), 0, 5);
-        }
+        enc.set_pipeline(&self.pipes.shadow);
+        enc.vertex_buffer(uniforms, 0, 3);
+        enc.vertex_buffer(&s.objects, 0, 5);
         // every caster inside the shadow camera's frustum, on screen or not (culled in prepare); v2 only (v3 renders
         // its maps in encode_shadows_v3)
         let _ = shadow_planes;
@@ -984,9 +1047,9 @@ impl ThreeScene {
         for &(i, k) in &self.casters {
             let d = &self.draws[i];
             let g = &self.geos[&d.geometry];
-            enc.setFrontFacingWinding(Self::winding(d));
+            enc.set_winding(Self::winding(d));
             self.bind_geometry(enc, d, g);
-            unsafe { enc.setVertexBufferOffset_atIndex(k * OBJ_BYTES, 5) };
+            enc.vertex_buffer_offset(k * OBJ_BYTES, 5);
             self.draw(enc, d, g);
         }
     }

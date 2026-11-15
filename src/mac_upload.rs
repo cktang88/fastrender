@@ -1,5 +1,10 @@
 //! The resource registry of `ThreeScene` (src/mac_three.rs, whose child module this is): applying the frame's
 //! resource messages (uploads / releases of geometry, textures, materials, instance buffers), and the samplers.
+//!
+//! Lifetime: an entry that is replaced (a re-upload under the same id: instance matrices every frame) or released
+//! goes to the graveyard (`ThreeScene::bury`, src/gpu.rs), never straight to `drop`: frames in flight may still
+//! read its buffers / textures and no backend is assumed to retain them. M-C: the same two places (`insert` and
+//! `bury`) are where the Metal 4 residency set learns about a new allocation and forgets a dead one.
 
 use super::*;
 
@@ -96,8 +101,7 @@ pub(super) fn sampler(dev: &Device, m: &TextureMeta) -> Result<Sampler, String> 
 }
 
 impl ThreeScene {
-    pub(super) fn apply(&mut self, dev: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>, res: Vec<Resource>) {
-        let mut mip_cb: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = None;
+    pub(super) fn apply(&mut self, dev: &Device, res: Vec<Resource>) {
         for r in res {
             match r {
                 Resource::Release { kind: k, id } => {
@@ -106,9 +110,20 @@ impl ThreeScene {
                         self.bind_arena.invalidate();
                     }
                     match k {
-                        kind::GEOMETRY => { self.geos.remove(&id); }
-                        kind::TEXTURE => { self.texs.remove(&id); }
-                        kind::INSTANCES => { self.insts.remove(&id); }
+                        kind::GEOMETRY => {
+                            if let Some(g) = self.geos.remove(&id) {
+                                g.bury(&mut self.dead);
+                            }
+                        }
+                        kind::TEXTURE => {
+                            let old = self.texs.remove(&id);
+                            self.bury_texture(old);
+                        }
+                        kind::INSTANCES => {
+                            if let Some(i) = self.insts.remove(&id) {
+                                i.bury(&mut self.dead);
+                            }
+                        }
                         kind::MATERIAL => { self.mats3.remove(&id); }
                         kind::RENDER_TARGET => self.targets.release(id),
                         _ => {}
@@ -121,7 +136,7 @@ impl ThreeScene {
                     let ok = match k {
                         kind::GEOMETRY => self.upload_geometry(dev, id, &meta, &arrays),
                         kind::TEXTURE if meta.contains("\"framebuffer\":true") => self.targets.framebuffer_texture(dev, id, &meta),
-                        kind::TEXTURE => self.upload_texture(dev, queue, id, &meta, &arrays, &mut mip_cb),
+                        kind::TEXTURE => self.upload_texture(dev, id, &meta, &arrays),
                         kind::RENDER_TARGET => self.targets.upload(dev, id, &meta),
                         kind::MATERIAL if meta.contains("\"program\":") => self.upload_program_material(dev, id, &meta),
                         kind::MATERIAL => self.upload_material(id, &meta),
@@ -138,13 +153,19 @@ impl ThreeScene {
                 }
             }
         }
-        if let Some(cb) = mip_cb {
-            cb.commit();
-        }
         if self.mat_dirty {
-            // a fresh buffer: frames in flight keep (retain) the previous one
-            self.mat_buf = buffer_with(dev, &self.mat_rows);
+            // a fresh buffer: frames in flight read the previous one, which waits in the graveyard for them
+            let old = std::mem::replace(&mut self.mat_buf, buffer_with(dev, &self.mat_rows));
+            self.bury(Dead::Buffer(old));
             self.mat_dirty = false;
+        }
+    }
+
+    /// A texture entry taken out of the registry (replaced or released).
+    fn bury_texture(&mut self, old: Option<(Texture, TextureMeta, Sampler)>) {
+        if let Some((t, _, s)) = old {
+            self.dead.push(Dead::Texture(t));
+            self.dead.push(Dead::Sampler(s));
         }
     }
 
@@ -189,7 +210,7 @@ impl ThreeScene {
             }
             attrs.push((self.progs.name_id(&am.name), buffer_with(dev, data), am.item_size));
         }
-        self.geos.insert(
+        let old = self.geos.insert(
             id,
             Geo {
                 plans: Vec::new(),
@@ -205,15 +226,19 @@ impl ThreeScene {
                 sphere: m.sphere,
             },
         );
+        if let Some(g) = old {
+            g.bury(&mut self.dead);
+        }
         Ok(())
     }
 
-    fn upload_texture(&mut self, dev: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>, id: u32, meta: &str, a: &[Option<Array>], cb: &mut Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>) -> Result<(), String> {
+    fn upload_texture(&mut self, dev: &Device, id: u32, meta: &str, a: &[Option<Array>]) -> Result<(), String> {
         let m: TextureMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
         if m.compressed {
             let t = compressed_texture(dev, &m, a)?;
             let s = sampler(dev, &m)?;
-            self.texs.insert(id, (t, m, s));
+            let old = self.texs.insert(id, (t, m, s));
+            self.bury_texture(old);
             return Ok(());
         }
         let px = match a.first().unwrap_or(&None) {
@@ -309,10 +334,8 @@ impl ThreeScene {
                 );
             }
             if mips {
-                let c = cb.get_or_insert_with(|| queue.commandBuffer().expect("cb"));
-                let b = c.blitCommandEncoder().ok_or("blit")?;
-                b.generateMipmapsForTexture(&t);
-                b.endEncoding();
+                // generated by the frame this update belongs to, before any pass samples it (`encode_uploads`)
+                self.mip_queue.push(t.clone());
             }
             t
         };
@@ -326,7 +349,8 @@ impl ThreeScene {
             }
         }
         let s = sampler(dev, &m)?;
-        self.texs.insert(id, (t, m, s));
+        let old = self.texs.insert(id, (t, m, s));
+        self.bury_texture(old);
         Ok(())
     }
 
@@ -371,7 +395,9 @@ impl ThreeScene {
                 return Err("short instance matrices".into());
             }
             let cols = if m.count == 0 { buffer_with(dev, &[0.0f32; 16]) } else { buffer_with(dev, &data[..m.count * 16]) };
-            self.insts.insert(id, Inst { rows: cols.clone(), cols, colors });
+            if let Some(old) = self.insts.insert(id, Inst { rows: cols.clone(), cols, colors }) {
+                old.bury(&mut self.dead);
+            }
             return Ok(());
         }
         let rows = data;
@@ -387,7 +413,9 @@ impl ThreeScene {
         if cols.is_empty() {
             cols.extend_from_slice(&[0.0; 16]);
         }
-        self.insts.insert(id, Inst { rows: buffer_with(dev, &rows[..m.count * 12]), cols: buffer_with(dev, &cols), colors });
+        if let Some(old) = self.insts.insert(id, Inst { rows: buffer_with(dev, &rows[..m.count * 12]), cols: buffer_with(dev, &cols), colors }) {
+            old.bury(&mut self.dead);
+        }
         Ok(())
     }
 

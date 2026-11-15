@@ -149,14 +149,28 @@ jobs:
           ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000 | tee selftest.txt
           ./target/release/fastrender selftest --path forward --upscale metalfx --scale 0.5 --size 640x400 --props 20000 | tee -a selftest.txt
           bash .github/annotate.sh notice "selftest (${{ matrix.name }})" selftest.txt 12
-      # TODO(M-0, docs/research/perf-audit-2026-11.md): when the Metal 4 backend exists, replace the notice below
-      # with the selftests and goldens run as `fastrender selftest --backend metal4 ...` under MTL_DEBUG_LAYER=1.
-      - name: Metal 4 backend selftests + goldens (pending the backend)
+      # The Metal 4 backend (src/gpu_metal4.rs, docs/notes/metal4-port.md): only where the device has the family, i.e.
+      # a self-hosted Apple silicon runner (vars.METAL4_SELF_HOSTED). The selftests and every golden scene through
+      # `--backend metal4` under Metal API validation, each compared with its browser reference
+      # (.github/metal4-goldens.sh). The job is continue-on-error like the rest of this lane; the step itself fails
+      # on a fallback to Metal 3, a GPU error, a validation abort or an MAE above the Metal 3 lane's bound.
+      - name: Metal 4 backend selftests + goldens (--backend metal4, Metal API validation)
         if: steps.probe.outputs.metal4 == 'true'
-        run: echo "::notice title=Metal 4 backend (${{ matrix.name }})::this runner has the Metal 4 family; --backend metal4 does not exist yet, selftests ran on the Metal 3 path"
+        run: |
+          rc=0; bash .github/metal4-goldens.sh metal4 || rc=$?
+          { echo "### Metal 4 backend goldens (${{ matrix.name }})"; echo '```'; cat metal4-goldens.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          bash .github/annotate.sh $([ $rc -eq 0 ] && echo notice || echo error) "Metal 4 backend goldens (${{ matrix.name }})" metal4-goldens.txt 40
+          exit $rc
+      # Everywhere else: asking for Metal 4 must fall back to Metal 3 with a log line, not fail.
+      - name: --backend metal4 falls back to Metal 3 on a device without Metal 4
+        if: steps.probe.outputs.metal4 != 'true'
+        run: |
+          ./target/release/fastrender bench --backend metal4 --path forward --upscale bilinear --scale 1 --size 640x400 --frames 5 --warmup 2 --props 20000 2>&1 | tee backend-fallback.txt
+          grep -q "falling back to metal3" backend-fallback.txt
+          grep -q "^backend: metal3" backend-fallback.txt
       - name: no Metal 4 on this runner
         if: steps.probe.outputs.metal4 != 'true'
-        run: echo "::notice title=Metal 4 backend (${{ matrix.name }})::no Metal 4 family on this runner, Metal 4 selftests skipped"
+        run: echo "::notice title=Metal 4 backend (${{ matrix.name }})::no Metal 4 family on this runner, Metal 4 selftests and goldens skipped (the fallback to Metal 3 was checked)"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -166,5 +180,9 @@ jobs:
             toolchain.txt
             msl.txt
             selftest.txt
+            metal4-goldens.txt
+            m4-*.txt
+            m4-*.png
+            backend-fallback.txt
             metal-*.log
             fr.metallib

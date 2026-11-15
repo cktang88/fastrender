@@ -32,6 +32,11 @@ fastrender native (Rust + Metal): registry → cull/sort → shadow (the game's 
 | 7. Bundling | game → one script | esbuild IIFE (`js/build.mjs`); `three` stays real | CI builds the example |
 | 8. Air tuning | quality tiers, MetalFX, dynamic resolution | renderer-level knobs exist (scale, MetalFX, cached shadows, dynres) | bench matrix on real hardware (pending) |
 
+**Backends** (Nov 2026, docs/notes/metal4-port.md): everything encodes through the seam in `src/gpu.rs`. Metal 3 is the
+default and what CI's goldens run on; a Metal 4 backend (`--backend metal4`, `src/gpu_metal4.rs`) exists but has
+never executed (no hosted runner can) and the port is paused after package M-0. Replaced / released GPU resources
+go through a frame-indexed graveyard instead of relying on command buffers retaining them.
+
 **A real game runs natively** (Nov 2026): cktang88/3d-world-objects (unchanged `src/main.ts`, + patches/ for r187)
 boots in JavaScriptCore and renders through three's own programs on macOS CI, diffed against its browser golden
 every push (docs/notes/real-game-3d-world-objects.md: MAE, per-frame costs, what is still missing).

@@ -251,6 +251,20 @@ jobs:
       - name: golden IBL + bloom MAE<1.5 (PMREM, EffectComposer)
         if: always()
         run: node -e "for(const f of ['golden-ibl.json','golden-ibl-bloom.json']){const r=JSON.parse(require('fs').readFileSync(f,'utf8'));console.log(f,'MAE',r.mae);if(!(r.mae<1.5))process.exit(1)}"
+      # The backend seam (src/gpu.rs, docs/notes/metal4-port.md). This runner's GPU has no Metal 4, so: asking for
+      # Metal 4 falls back to Metal 3 with a log line and renders; and the script the Metal 4 lane (metal4.yml, a
+      # self-hosted Apple silicon runner) runs with `metal4` is exercised here with `metal3`: the same selftests
+      # and goldens, gated on the same bounds.
+      - name: backend seam (--backend metal4 falls back; the Metal 4 lane's golden script on metal3)
+        if: always()
+        run: |
+          ./target/release/fastrender bench --backend metal4 --path forward --upscale bilinear --scale 1 --size 640x400 --frames 5 --warmup 2 --props 20000 2>&1 | tee backend-fallback.txt
+          grep -q "falling back to metal3" backend-fallback.txt
+          grep -q "^backend: metal3" backend-fallback.txt
+          FASTRENDER_BACKEND=metal3 ./target/release/fastrender bench --path forward --upscale bilinear --scale 1 --size 640x400 --frames 5 --warmup 2 --props 20000 | grep "^backend: metal3 (requested)"
+          rc=0; bash .github/metal4-goldens.sh metal3 || rc=$?
+          bash .github/annotate.sh $([ $rc -eq 0 ] && echo notice || echo error) "backend seam: golden script on metal3" metal4-goldens.txt 40
+          exit $rc
       - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
         run: |
           ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000 --rounds 1

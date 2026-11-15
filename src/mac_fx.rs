@@ -182,30 +182,38 @@ struct MotionParams {
 }
 
 /// Encode the motion-vector pass: depth (rendered with `cur_jittered`) → RG16Float motion.
-pub(super) fn encode_motion(cb: &CmdBuf, pipe: &ComputePipeline, depth: &Tex, motion: &Tex, cur_jittered: &Mat4, cur: &Mat4, prev: &Mat4, content: (usize, usize)) {
+pub(super) fn encode_motion<F: Frame>(frame: &mut F, pipe: &ComputePipeline, depth: &Tex, motion: &Tex, cur_jittered: &Mat4, cur: &Mat4, prev: &Mat4, content: (usize, usize)) {
     let p = MotionParams {
         inv_cur_jittered: cur_jittered.inverse().to_cols_array_2d(),
         cur: cur.to_cols_array_2d(),
         prev: prev.to_cols_array_2d(),
         content: [content.0 as f32, content.1 as f32, 0.0, 0.0],
     };
-    let enc = cb.computeCommandEncoder().expect("compute encoder");
-    enc.setComputePipelineState(pipe);
-    unsafe {
-        enc.setTexture_atIndex(Some(depth), 0);
-        enc.setTexture_atIndex(Some(motion), 1);
-        enc.setBytes_length_atIndex(NonNull::new(&p as *const MotionParams as *mut c_void).unwrap(), std::mem::size_of::<MotionParams>(), 0);
-        enc.dispatchThreads_threadsPerThreadgroup(MTLSize { width: content.0, height: content.1, depth: 1 }, MTLSize { width: 16, height: 16, depth: 1 });
-    }
-    enc.endEncoding();
+    let bytes = unsafe { std::slice::from_raw_parts(&p as *const MotionParams as *const u8, std::mem::size_of::<MotionParams>()) };
+    frame.compute(&ComputeJob {
+        pipeline: pipe,
+        buffers: &[],
+        textures: &[(0, depth), (1, motion)],
+        bytes: Some((0, bytes)),
+        threads: MTLSize { width: content.0, height: content.1, depth: 1 },
+        per_group: MTLSize { width: 16, height: 16, depth: 1 },
+    });
 }
 
 impl Renderer {
-    pub(super) fn encode_upscale(&mut self, cb: &CmdBuf, color: &Tex, out: &Tex) {
+    pub(super) fn encode_upscale<F: Frame>(&mut self, frame: &mut F, color: &Tex, out: &Tex) {
         let (cw, ch) = self.content_size();
         let idx = (self.frame % 2) as usize;
-        match &self.targets.scaler {
-            Some(Fx::Temporal(s)) => unsafe {
+        // The MTLFX* scalers encode into a Metal 3 command buffer. TODO(M-F): MTL4FXSpatialScaler /
+        // MTL4FXTemporalScaler (+ MTL4FXFrameInterpolator) encoding into the Metal 4 frame; until then the Metal 4
+        // backend never has a scaler (`Renderer::effective` turns MetalFX into the bilinear pass), and a scaler
+        // without a Metal 3 command buffer falls through to that pass too.
+        let scaler = match frame.metal3() {
+            Some(cb) => self.targets.scaler.as_ref().map(|s| (s, cb)),
+            None => None,
+        };
+        match scaler {
+            Some((Fx::Temporal(s), cb)) => unsafe {
                 let motion = &self.targets.motion.as_ref().expect("temporal targets have motion")[idx];
                 s.setColorTexture(Some(color));
                 s.setDepthTexture(Some(&self.targets.depth[idx]));
@@ -225,7 +233,7 @@ impl Renderer {
                 s.encodeToCommandBuffer(cb);
                 self.history_reset = false;
             },
-            Some(Fx::Spatial(s)) => unsafe {
+            Some((Fx::Spatial(s), cb)) => unsafe {
                 // MetalFX writes straight into the output (the drawable when windowed): no extra copy
                 s.setColorTexture(Some(color));
                 s.setOutputTexture(Some(out));
@@ -234,21 +242,14 @@ impl Renderer {
                 s.encodeToCommandBuffer(cb);
             },
             None => {
-                let rp = MTLRenderPassDescriptor::new();
-                let a = unsafe { rp.colorAttachments().objectAtIndexedSubscript(0) };
-                a.setTexture(Some(out));
-                a.setLoadAction(MTLLoadAction::DontCare);
-                a.setStoreAction(MTLStoreAction::Store);
-                let enc = cb.renderCommandEncoderWithDescriptor(&rp).expect("blit pass");
-                enc.setRenderPipelineState(&self.pipes.blit);
+                let mut enc = frame.render_pass(&PassDesc::default().color(0, Att::new(out, MTLLoadAction::DontCare, MTLStoreAction::Store))).expect("blit pass");
+                enc.set_pipeline(&self.pipes.blit);
                 let (aw, ah) = (self.targets.alloc.0 as f32, self.targets.alloc.1 as f32);
                 let scale = [cw as f32 / aw, ch as f32 / ah, 0.5 / aw, 0.5 / ah];
-                unsafe {
-                    enc.setFragmentTexture_atIndex(Some(color), 0);
-                    enc.setFragmentBytes_length_atIndex(NonNull::new(scale.as_ptr() as *mut c_void).unwrap(), 16, 0);
-                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
-                }
-                enc.endEncoding();
+                enc.texture(crate::bindlist::Stage::Fragment, color, 0);
+                enc.fragment_bytes(unsafe { std::slice::from_raw_parts(scale.as_ptr() as *const u8, 16) }, 0);
+                enc.draw(MTLPrimitiveType::Triangle, 0, 3, 1, 0);
+                enc.end();
             }
         }
     }

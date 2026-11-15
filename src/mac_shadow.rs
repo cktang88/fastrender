@@ -41,6 +41,12 @@ impl ShadowMap {
         let packed = packed.then(|| make(MTLPixelFormat::RGBA8Unorm, MTLTextureType::Type2D));
         ShadowMap { kind, index, size, cube, depth, vsm, packed, rendered: false }
     }
+
+    /// A replaced map's textures (a frame in flight may still sample them: they wait in the graveyard).
+    fn bury(self, out: &mut Vec<Dead>) {
+        let vsm = self.vsm.map(|v| [v.0, v.1]);
+        out.extend([Some(self.depth), self.packed].into_iter().flatten().chain(vsm.into_iter().flatten()).map(Dead::Texture));
+    }
 }
 
 /// A caster drawn with three's own depth / distance program.
@@ -188,7 +194,8 @@ impl ThreeScene {
                     let m = ShadowMap::new(dev, rec.kind, rec.index, (w, h), point, want_vsm, packed);
                     match found {
                         Some(i) => {
-                            self.shadow_maps[i] = m;
+                            // a light whose map changed size / type: the old textures outlive the frames using them
+                            std::mem::replace(&mut self.shadow_maps[i], m).bury(&mut self.dead);
                             i
                         }
                         None => {
@@ -288,88 +295,76 @@ impl ThreeScene {
         }
     }
 
-    /// v3: render every shadow map prepared for `slot_i` (before the main pass, in the same command buffer).
-    pub fn encode_shadows_v3(&self, cb: &ProtocolObject<dyn MTLCommandBuffer>, slot_i: usize) {
+    /// v3: render every shadow map prepared for `slot_i` (before the main pass, in the same frame).
+    pub fn encode_shadows_v3<F: Frame>(&self, frame: &mut F, slot_i: usize) {
         if !self.view.v3 {
             return;
         }
         let ring = &self.slots[slot_i].ring;
         for job in &self.shadow_jobs {
             let map = &self.shadow_maps[job.map];
-            let rp = MTLRenderPassDescriptor::new();
-            let da = rp.depthAttachment();
-            da.setTexture(Some(&map.depth));
+            let mut da = Att::depth(&map.depth, MTLLoadAction::Clear, if map.packed.is_some() { MTLStoreAction::DontCare } else { MTLStoreAction::Store });
             if map.cube {
-                da.setSlice(job.face);
+                da.slice = job.face;
             }
-            da.setLoadAction(MTLLoadAction::Clear);
-            da.setStoreAction(if map.packed.is_some() { MTLStoreAction::DontCare } else { MTLStoreAction::Store });
-            da.setClearDepth(1.0);
+            let mut rp = PassDesc::default().with_depth(da);
             if let Some(c) = &map.packed {
                 // WebGLShadowMap (r170) clears to white: depth 1, nothing in shadow
-                let a = unsafe { rp.colorAttachments().objectAtIndexedSubscript(0) };
-                a.setTexture(Some(c));
-                a.setLoadAction(MTLLoadAction::Clear);
-                a.setStoreAction(MTLStoreAction::Store);
-                a.setClearColor(MTLClearColor { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 });
+                rp.colors[0] = Some(Att::clear(c, [1.0, 1.0, 1.0, 1.0], MTLStoreAction::Store));
             }
-            let Some(enc) = cb.renderCommandEncoderWithDescriptor(&rp) else { continue };
-            enc.setViewport(MTLViewport { originX: 0.0, originY: 0.0, width: map.size.0 as f64, height: map.size.1 as f64, znear: 0.0, zfar: 1.0 });
-            unsafe {
-                for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER] {
-                    enc.setVertexBuffer_offset_atIndex(Some(ring), 0, b as usize);
-                    enc.setFragmentBuffer_offset_atIndex(Some(ring), 0, b as usize);
-                }
-                enc.setVertexBuffer_offset_atIndex(Some(ring), job.frame, xlat::FRAME_BLOCK_BUFFER as usize);
-                enc.setFragmentBuffer_offset_atIndex(Some(ring), job.frame, xlat::FRAME_BLOCK_BUFFER as usize);
-                enc.setFragmentBuffer_offset_atIndex(Some(ring), job.pass, xlat::PASS_BUFFER as usize);
+            let Some(mut enc) = frame.render_pass(&rp) else { continue };
+            enc.set_viewport(MTLViewport { originX: 0.0, originY: 0.0, width: map.size.0 as f64, height: map.size.1 as f64, znear: 0.0, zfar: 1.0 });
+            for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER] {
+                enc.vertex_buffer(ring, 0, b as usize);
+                enc.fragment_buffer(ring, 0, b as usize);
             }
+            enc.vertex_buffer(ring, job.frame, xlat::FRAME_BLOCK_BUFFER as usize);
+            enc.fragment_buffer(ring, job.frame, xlat::FRAME_BLOCK_BUFFER as usize);
+            enc.fragment_buffer(ring, job.pass, xlat::PASS_BUFFER as usize);
             // what this encoder holds (src/mac_bind.rs): only state that changes between casters is set
             let mut st = bind::EncState::new();
             for sd in &self.shadow_list[job.draws.clone()] {
                 let d = &self.draws[sd.i];
                 let Some(g) = self.geos.get(&d.geometry) else { continue };
                 // side rendered: 0 front (cull back), 1 back (cull front), 2 both; the y-flipped projection mirrors winding
-                st.cull(&enc, match sd.side { 0 => MTLCullMode::Back, 1 => MTLCullMode::Front, _ => MTLCullMode::None });
+                st.cull(&mut enc, match sd.side { 0 => MTLCullMode::Back, 1 => MTLCullMode::Front, _ => MTLCullMode::None });
                 let mirrored = Self::winding(d) == MTLWinding::Clockwise;
-                st.winding(&enc, if mirrored { MTLWinding::CounterClockwise } else { MTLWinding::Clockwise });
-                st.fill(&enc, if sd.wireframe { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
+                st.winding(&mut enc, if mirrored { MTLWinding::CounterClockwise } else { MTLWinding::Clockwise });
+                st.fill(&mut enc, if sd.wireframe { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
                 let depth = sd.prog.map_or(sd.depth, |p| p.depth);
                 if depth != st.depth {
-                    enc.setDepthStencilState(Some(self.progs.depth_at(depth)));
+                    enc.set_depth_state(self.progs.depth_at(depth));
                     st.depth = depth;
                 }
-                unsafe { enc.setVertexBufferOffset_atIndex(sd.obj, xlat::OBJECT_BLOCK_BUFFER as usize) };
+                enc.vertex_buffer_offset(sd.obj, xlat::OBJECT_BLOCK_BUFFER as usize);
                 match sd.prog {
                     Some(p) => {
                         let Some(pipe) = self.progs.pipeline_at(p.pipe) else { continue };
                         if p.pipe != st.pipe {
-                            enc.setRenderPipelineState(pipe);
+                            enc.set_pipeline(pipe);
                             st.pipe = p.pipe;
                         }
-                        unsafe { enc.setFragmentBufferOffset_atIndex(sd.obj, xlat::OBJECT_BLOCK_BUFFER as usize) };
-                        self.bind_program_draw(&enc, &mut st, d, g, p.plan, p.block, p.bind);
+                        enc.fragment_buffer_offset(sd.obj, xlat::OBJECT_BLOCK_BUFFER as usize);
+                        self.bind_program_draw(&mut enc, &mut st, d, g, p.plan, p.block, p.bind);
                     }
                     None => {
                         if st.pipe != bind::PIPE_NATIVE {
-                            enc.setRenderPipelineState(if map.packed.is_some() { &self.pipes.depth3_packed } else { &self.pipes.depth3 });
+                            enc.set_pipeline(if map.packed.is_some() { &self.pipes.depth3_packed } else { &self.pipes.depth3 });
                             st.pipe = bind::PIPE_NATIVE;
                         }
                         let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
                         let instanced: u32 = inst.is_some() as u32;
-                        unsafe {
-                            enc.setVertexBuffer_offset_atIndex(Some(&g.pos), 0, 4);
-                            enc.setVertexBuffer_offset_atIndex(Some(inst.map_or(&self.progs.defaults, |x| &x.cols)), 0, 5);
-                            enc.setVertexBytes_length_atIndex(NonNull::new(&instanced as *const u32 as *mut c_void).unwrap(), 4, 6);
-                        }
+                        enc.vertex_buffer(&g.pos, 0, 4);
+                        enc.vertex_buffer(inst.map_or(&self.progs.defaults, |x| &x.cols), 0, 5);
+                        enc.vertex_bytes(&instanced.to_ne_bytes(), 6);
                         // vertex buffers 4..6 are not the program casters' any more
                         st.forget_streams();
                     }
                 }
-                self.draw(&enc, d, g);
+                self.draw(&mut enc, d, g);
             }
-            enc.setTriangleFillMode(MTLTriangleFillMode::Fill);
-            enc.endEncoding();
+            enc.set_fill(MTLTriangleFillMode::Fill);
+            enc.end();
         }
         for job in &self.vsm_jobs {
             let map = &self.shadow_maps[job.map];
@@ -378,35 +373,29 @@ impl ThreeScene {
             // vertical: depth (nearest) -> mapPass; horizontal: mapPass (linear) -> map
             for (n, (src, dst, smp)) in [(&map.depth, vpass, &p.nearest_clamp), (vpass, vmap, &p.linear_clamp)].into_iter().enumerate() {
                 let (Some(pipe), Some(prog)) = (p.pipeline_at(job.pipes[n]), p.progs.get(&job.progs[n])) else { continue };
-                let rp = MTLRenderPassDescriptor::new();
-                let a = unsafe { rp.colorAttachments().objectAtIndexedSubscript(0) };
-                a.setTexture(Some(dst));
-                a.setLoadAction(MTLLoadAction::DontCare);
-                a.setStoreAction(MTLStoreAction::Store);
-                let Some(enc) = cb.renderCommandEncoderWithDescriptor(&rp) else { continue };
-                enc.setRenderPipelineState(pipe);
-                enc.setCullMode(MTLCullMode::None);
-                unsafe {
-                    for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER, xlat::FRAME_BLOCK_BUFFER] {
-                        let off = if b == xlat::DEFAULT_BLOCK_BUFFER { job.blocks[n] } else { self.layout.frame };
-                        enc.setVertexBuffer_offset_atIndex(Some(ring), off, b as usize);
-                        enc.setFragmentBuffer_offset_atIndex(Some(ring), off, b as usize);
-                    }
-                    enc.setFragmentBuffer_offset_atIndex(Some(ring), job.pass, xlat::PASS_BUFFER as usize);
-                    for a in &prog.attrs {
-                        enc.setVertexBuffer_offset_atIndex(Some(&self.fullscreen), 0, ATTR_BUFFER0 + a.location as usize);
-                    }
-                    for t in &prog.layout.textures {
-                        if let Some(b) = t.fragment {
-                            enc.setFragmentTexture_atIndex(Some(src), b.texture as usize);
-                            if let Some(s) = b.sampler {
-                                enc.setFragmentSamplerState_atIndex(Some(smp), s as usize);
-                            }
+                let rp = PassDesc::default().color(0, Att::new(dst, MTLLoadAction::DontCare, MTLStoreAction::Store));
+                let Some(mut enc) = frame.render_pass(&rp) else { continue };
+                enc.set_pipeline(pipe);
+                enc.set_cull(MTLCullMode::None);
+                for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER, xlat::FRAME_BLOCK_BUFFER] {
+                    let off = if b == xlat::DEFAULT_BLOCK_BUFFER { job.blocks[n] } else { self.layout.frame };
+                    enc.vertex_buffer(ring, off, b as usize);
+                    enc.fragment_buffer(ring, off, b as usize);
+                }
+                enc.fragment_buffer(ring, job.pass, xlat::PASS_BUFFER as usize);
+                for a in &prog.attrs {
+                    enc.vertex_buffer(&self.fullscreen, 0, ATTR_BUFFER0 + a.location as usize);
+                }
+                for t in &prog.layout.textures {
+                    if let Some(b) = t.fragment {
+                        enc.texture(Stage::Fragment, src, b.texture as usize);
+                        if let Some(s) = b.sampler {
+                            enc.sampler(Stage::Fragment, smp, s as usize);
                         }
                     }
-                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
                 }
-                enc.endEncoding();
+                enc.draw(MTLPrimitiveType::Triangle, 0, 3, 1, 0);
+                enc.end();
             }
         }
     }

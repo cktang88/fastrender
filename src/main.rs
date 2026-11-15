@@ -15,6 +15,7 @@ options: --scene city|voxel|script|three --script game.js (props = box count) --
          --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
          --warmup n --seconds s --warmup-seconds s --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n
          --gpu-passes 0|1 (per-pass GPU ms: targets, shadow, main, upscale) --fence cpu|event (frames-in-flight fence: completion handler | MTLSharedEvent)
+         --backend metal4|metal3|auto (default auto = Metal 3 until the Metal 4 backend is verified on hardware; metal4 falls back to Metal 3 where unsupported; env FASTRENDER_BACKEND)
          --thermal 0|1 (follow thermal state / Low Power Mode, default 1) --display-link 0|1 (run: CAMetalDisplayLink pacing, default 1) --run-seconds s (run: exit after s, print the frame-loop report)";
 
 // Info.plist of the bare binary (no .app bundle), read by LaunchServices from this section: the Game Mode keys
