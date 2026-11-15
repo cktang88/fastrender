@@ -112,6 +112,7 @@ impl ThreeScene {
                     match k {
                         kind::GEOMETRY => {
                             if let Some(g) = self.geos.remove(&id) {
+                                self.cl.retire(g.cl, self.clock.encoding);
                                 g.bury(&mut self.dead);
                             }
                         }
@@ -177,6 +178,13 @@ impl ThreeScene {
         if pos.len() < m.vertices * 3 || nrm.len() < m.vertices * 3 {
             return Err("short position/normal stream".into());
         }
+        let index_count = match a.get(4).unwrap_or(&None) {
+            Some(Array::U16(v)) => v.len() as u32,
+            Some(Array::U32(v)) => v.len() as u32,
+            _ => 0,
+        };
+        // how often this id was uploaded before: a geometry that keeps changing gets no cluster LOD
+        let cl_uploads = self.geos.get(&id).map_or(0, |g| g.cl_uploads.saturating_add(1));
         let index = match a.get(4).unwrap_or(&None) {
             Some(Array::U16(v)) => Some((buffer_with(dev, v), MTLIndexType::UInt16)),
             Some(Array::U32(v)) => Some((buffer_with(dev, v), MTLIndexType::UInt32)),
@@ -225,9 +233,13 @@ impl ThreeScene {
                 color_size: m.color_size,
                 index,
                 sphere: m.sphere,
+                counts: (m.vertices as u32, index_count),
+                cl: GeoCl::None,
+                cl_uploads,
             },
         );
         if let Some(g) = old {
+            self.cl.retire(g.cl, self.clock.encoding);
             g.bury(&mut self.dead);
         }
         Ok(())

@@ -970,3 +970,43 @@ else {
   assert.deepEqual(custom, { plain: false, sway: true, wobble: true, disp: true, own: true, tint: false }, 'vertexCustom: an onBeforeCompile that rewrites the vertex shader (own or in the class), displacementMap, ShaderMaterial');
   console.log(`[three r${REV}] userData.frInstanceCull: sent with the instance upload (true -> 0, radius -> radius); MATERIAL meta vertexCustom for a vertex-stage onBeforeCompile / displacementMap / ShaderMaterial`);
 }
+
+// ------------------------------------------------------------------ 15. cluster LOD marks (docs/notes/clusters.md): DRAWS flag 32768
+{
+  const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 0, 8);
+  const flagsOf = (opts) => {
+    const h = makeHost();
+    const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20, ...opts });
+    r.setSize(SIZE.width, SIZE.height);
+    const scene = new THREE.Scene();
+    const big = () => new THREE.SphereGeometry(1, 48, 32); // 2976 triangles, indexed
+    const add = (name, o, mark) => { o.name = name; if (mark !== undefined) o.userData.frClusters = mark; scene.add(o); return o; };
+    add('marked', new THREE.Mesh(big(), new THREE.MeshStandardMaterial()), true);
+    add('plain', new THREE.Mesh(big(), new THREE.MeshStandardMaterial()));
+    add('optout', new THREE.Mesh(big(), new THREE.MeshStandardMaterial()), false);
+    add('small', new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()));
+    add('instanced', new THREE.InstancedMesh(big(), new THREE.MeshStandardMaterial(), 2), true);
+    add('unculled', Object.assign(new THREE.Mesh(big(), new THREE.MeshStandardMaterial()), { frustumCulled: false }));
+    const morph = big(); morph.morphAttributes.position = [morph.attributes.position.clone()];
+    add('morph', new THREE.Mesh(morph, new THREE.MeshStandardMaterial()));
+    r.render(scene, camera);
+    const u = new Uint32Array(h.cmd);
+    let w = 2, flags = null;
+    while (w < u[1]) { if (u[w] === OP.DRAWS) flags = r._drawObjects.map((o, i) => [o.name, (u[w + 3 + i * 20 + 2] & 32768) !== 0]); w += 2 + u[w + 1]; }
+    return [Object.fromEntries(flags), r];
+  };
+  const none = { marked: false, plain: false, optout: false, small: false, instanced: false, unculled: false, morph: false };
+  const [byDefault, r1] = flagsOf({});
+  assert.deepEqual(byDefault, { ...none, marked: true }, 'default: only what the game marks (never an InstancedMesh)');
+  assert.equal(r1.clusters, true);
+  assert.equal(globalThis.__frClusters, true, 'the game reads this to leave its own distance LODs off for marked meshes');
+  const [auto] = flagsOf({ clusters: 'auto' });
+  assert.deepEqual(auto, { ...none, marked: true, plain: true }, "'auto': plain static meshes too; not small, opted-out, unculled or morphed ones");
+  const [off, r3] = flagsOf({ clusters: false });
+  assert.deepEqual(off, none);
+  assert.equal(r3.clusters, false);
+  assert.equal(globalThis.__frClusters, false);
+  const hp = makeHost(); hp.params = { clusters: 0 };
+  assert.equal(new FastRenderer({ host: hp, programs: 'three', commandWords: 1 << 20 }).clusters, false, 'host.params.clusters = 0 (FASTRENDER_CLUSTERS=0)');
+  console.log(`[three r${REV}] cluster LOD: userData.frClusters -> DRAWS flag 32768; clusters: 'auto' marks plain static meshes; false / host.params.clusters = 0 switch it off`);
+}

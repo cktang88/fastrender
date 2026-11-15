@@ -62,6 +62,11 @@ mod upload;
 mod shadow;
 #[path = "mac_bind.rs"]
 mod bind;
+// cluster LOD (src/mac_clusters.rs): arena, builds, the per-frame dispatch
+#[path = "mac_clusters.rs"]
+mod clusters_gpu;
+pub use clusters_gpu::ClusterFrame;
+use clusters_gpu::{ClusterGpu, GeoCl};
 use shadow::{ShadowDraw3, ShadowJob, ShadowMap, VsmJob, VSM_BLOCK};
 use upload::sampler;
 
@@ -137,6 +142,8 @@ struct Draw3 {
     raster: u8,
     /// an instanced draw split by the frustum: (first instance, count); count 0: the draw's own instance range
     run: (u32, u32),
+    /// a clustered draw: its record in the frame's cluster dispatch (u32::MAX: a plain draw)
+    cl: u32,
 }
 
 /// matches `ThreeObj` in the shader
@@ -178,6 +185,12 @@ struct Geo {
     color_size: u32,
     index: Option<(Buffer, MTLIndexType)>,
     sphere: [f32; 4],
+    /// vertices, indices
+    counts: (u32, u32),
+    /// cluster LOD: the state of this upload's build, and how often this id was uploaded (a geometry that keeps
+    /// changing is not clustered)
+    cl: GeoCl,
+    cl_uploads: u8,
 }
 
 impl Geo {
@@ -348,6 +361,8 @@ pub struct ThreeScene {
     clock: FrameClock,
     /// textures uploaded this frame whose mip chains the frame must generate before it samples them
     mip_queue: Vec<Texture>,
+    /// cluster LOD of static meshes (src/mac_clusters.rs, docs/notes/clusters.md)
+    cl: ClusterGpu,
 }
 
 /// Instanced draws with fewer instances are drawn whole (the per-instance test would cost more than it saves).
@@ -522,6 +537,7 @@ impl ThreeScene {
             clock: FrameClock::default(),
             mip_queue: Vec::new(),
             targets: targets::Targets::new(dev),
+            cl: ClusterGpu::new(dev, shader_src),
         })
     }
 
@@ -543,6 +559,8 @@ impl ThreeScene {
         self.entomb();
         self.clock = clock;
         self.grave.collect(clock.completed);
+        // cluster LOD: ranges of released meshes whose frames completed, meshes the workers finished
+        self.poll_clusters(dev);
         let dt = (t - self.last_t).max(0.0);
         self.last_t = t;
         self.progs.ensure_lit_depth(dev, queue);
@@ -670,6 +688,7 @@ impl ThreeScene {
     /// `projection`: v3's FrFrame projectionMatrix (three's, with this frame's MetalFX jitter applied).
     /// `viewport_h`: the main pass's render height (gl_FragCoord.y = height - Metal's y, FrPass).
     pub fn prepare(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], shadow_planes: &[Vec4; 6], cam: Vec3, projection: Mat4, viewport_h: f32) -> usize {
+        self.cl.begin_frame();
         if self.view.v3 && self.targets.multi() {
             return self.prepare_passes(dev, slot_i, planes, shadow_planes, cam, projection, viewport_h); // src/mac_targets.rs
         }
@@ -778,6 +797,7 @@ impl ThreeScene {
     /// depend on which shadow maps this pass renders). Returns the draws that will be encoded.
     fn prepare_one_v3(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], cam: Vec3, projection: Mat4, viewport_h: f32) -> usize {
         self.prep_stamp += 1;
+        self.request_cluster_builds(dev);
         let target = self.targets.pipe_target;
         let gl_rows = self.targets.gl_rows;
         let no_cull_ok = self.dbg & 256 == 0;
@@ -859,6 +879,13 @@ impl ThreeScene {
                 | if m.meta.wireframe { RASTER_WIREFRAME } else { 0 };
             let bias = m.meta.polygon_offset.map_or((0.0, 0.0), |p| (p[0], p[1]));
             let prog_id = m.meta.program;
+            // marked for cluster LOD and built: a record for the frame's cluster dispatch instead of a plain indexed draw
+            let cl = if d.flags & flag::CLUSTERS != 0 && self.cl.on && g.cl != GeoCl::None && Self::cluster_allowed(&d, g, &m.meta) {
+                let h = viewport_h * if target == Target::Main { self.cl.screen_scale } else { 1.0 };
+                self.cl.draw(&g.cl, planes, &d.rows, cam, &projection, h, m.meta.side == 0 && no_cull_ok)
+            } else {
+                u32::MAX
+            };
             let Some((pipe, plan)) = self.instance_pipeline(dev, d.material, &d, target) else { continue };
             if target == Target::Main && self.progs.pending(pipe) {
                 // still compiling: skipped this frame, unless the screen would show nothing instead (a post-processing
@@ -871,7 +898,7 @@ impl ThreeScene {
                 }
             }
             let discards = self.progs.progs.get(&prog_id).is_some_and(|p| p.discard);
-            let rec = Draw3 { i: i as u32, obj: 0, block: block as u32, tex: tex as u32, bind: u32::MAX, pipe, depth, bias, plan, raster, run: (0, 0) };
+            let rec = Draw3 { i: i as u32, obj: 0, block: block as u32, tex: tex as u32, bind: u32::MAX, pipe, depth, bias, plan, raster, run: (0, 0), cl };
             // three's painterSortStable / reversePainterSortStable: renderOrder first, then state for opaque draws
             // (pipeline, material instance, geometry: consecutive draws share what is bound), back to front for
             // transparent ones; renderer.sortObjects = false keeps the draw order
@@ -1080,7 +1107,11 @@ impl ThreeScene {
             enc.vertex_buffer_offset(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
             enc.fragment_buffer_offset(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
             self.bind_program_draw(enc, &mut st, d, g, v.plan, v.block as usize, v.bind);
-            self.draw_run(enc, d, g, v.run);
+            // a clustered draw: the triangles the frame's cluster dispatch selected for it (src/mac_clusters.rs)
+            match self.cl.slot_buffers(slot_i).filter(|_| v.cl != u32::MAX) {
+                Some((out, args)) => enc.draw_indexed_indirect(MTLPrimitiveType::Triangle, MTLIndexType::UInt32, out, 0, args, v.cl as usize * 20),
+                None => self.draw_run(enc, d, g, v.run),
+            }
             drawn += 1;
         }
         if last_bias != (0.0, 0.0) {

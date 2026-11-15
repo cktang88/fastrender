@@ -38,7 +38,7 @@ export const PASS_WORDS = 24;
 export const COPY_WORDS = 12;
 export { TEX };
 // draw flags
-export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256, UNSORTED: 512, POINTS: 1024, LINES: 2048, LINE_STRIP: 4096, LINE_LOOP: 8192, BATCH: 16384 };
+export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256, UNSORTED: 512, POINTS: 1024, LINES: 2048, LINE_STRIP: 4096, LINE_LOOP: 8192, BATCH: 16384, CLUSTERS: 32768 };
 // light kinds
 export const L = { AMBIENT: 1, HEMI: 2, DIRECTIONAL: 3, POINT: 4, SPOT: 5 };
 // material models
@@ -127,6 +127,12 @@ export class FastRenderer {
       this._textureId = (t) => this._texture(t);
       this.extensions = compressedTextureExtensions(opts.compressedTextures ?? (this.host.params && this.host.params.compressedTextures));
     }
+    // cluster LOD + GPU culling of static meshes (docs/notes/clusters.md; v3 only): true (default) honours
+    // mesh.userData.frClusters, 'auto' also marks every plain static Mesh, false / 0 off (also host.params.clusters).
+    // globalThis.__frClusters tells a game that marks its meshes to leave its own distance LODs for them off.
+    const cl = opts.clusters ?? (this.host.params && this.host.params.clusters);
+    this.clusters = !this._tp || cl === false || cl === 0 || cl === '0' ? false : cl === 'auto' ? 'auto' : true;
+    if (this._tp) globalThis.__frClusters = !!this.clusters;
     this._initTargets();
     // the host's output size (native owns resolution): what getSize / getDrawingBufferSize report until setSize
     const hp = this.host.params;
@@ -985,6 +991,12 @@ export class FastRenderer {
     if (inst) flags |= F.INSTANCED;
     if (this._drawId >= 0) flags |= F.BATCH | F.NO_CULL; // (three culls batch entries itself, in onBeforeRender)
     if (this.sortObjects === false) flags |= F.UNSORTED; // (native: renderOrder, then state / depth, unless unsorted)
+    // cluster LOD (docs/notes/clusters.md): the game marks a static mesh (userData.frClusters), or `clusters: 'auto'` does;
+    // the native side draws it through its cluster DAG where the picture cannot change (opaque, whole index buffer...)
+    if (this.clusters && !inst && o.isMesh && this._drawId < 0) {
+      const uc = o.userData.frClusters;
+      if (uc === true || (uc !== false && this.clusters === 'auto' && autoClusters(o, g))) flags |= F.CLUSTERS;
+    }
     const material = this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT));
     if (this._tp && this._nestedRenders !== this._passNested) { this._aborted = true; return; } // see render()
     if (!material) return; // v3: the host could not translate this program
@@ -1238,6 +1250,18 @@ function dense(attr, n) {
 function setLength(a, n) { if (a.length !== n) a.length = n; }
 /** Object.keys(o).length > 0 without the array */
 function hasKeys(o) { for (const k in o) return true; return false; }
+
+/**
+ * `clusters: 'auto'`: is `o` (a Mesh, not instanced / batched) a static mesh worth a cluster DAG? Not skinned, no morph
+ * targets, three would frustum-cull it, indexed, a position attribute the game does not intend to rewrite. The native
+ * side adds its own rules per draw (opaque, whole index buffer, three's own vertex stage, enough triangles).
+ */
+function autoClusters(o, g) {
+  if (o.isSkinnedMesh || o.frustumCulled === false || !g.index || g.index.count < 768) return false;
+  if (g.morphAttributes && hasKeys(g.morphAttributes)) return false;
+  const p = g.attributes.position;
+  return !!p && (p.usage === undefined || p.usage === 35044);
+}
 const noop = () => {};
 const toU16 = (a) => (a instanceof Uint16Array ? a : Uint16Array.from(a));
 const toU32 = (a) => (a instanceof Uint32Array ? a : Uint32Array.from(a));

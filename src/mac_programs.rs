@@ -226,7 +226,7 @@ pub fn prewarm_pending(token: u32) -> i32 {
     pm::prewarm_answer(blocking_mode(), PREWARM_TOKEN.load(Ordering::Relaxed), PREWARM_PENDING.load(Ordering::Relaxed), token)
 }
 
-fn blocking_mode() -> bool {
+pub(crate) fn blocking_mode() -> bool {
     match std::env::var("FASTRENDER_COMPILE").as_deref() {
         Ok("async") => false,
         Ok("blocking") => true,

@@ -92,6 +92,9 @@ pub mod flag {
     /// one entry of a BatchedMesh multi-draw: `instances` is the multi-draw index (three's gl_DrawID), drawn as the
     /// base instance (xlat rule 8: `_gl_DrawID` -> gl_BaseInstance)
     pub const BATCH: u32 = 16384;
+    /// the mesh is marked for cluster LOD (`userData.frClusters`, or the renderer's `clusters: 'auto'`): drawn through
+    /// its cluster DAG where `clusters::draw_allowed` (docs/notes/clusters.md)
+    pub const CLUSTERS: u32 = 32768;
 }
 
 pub mod light {

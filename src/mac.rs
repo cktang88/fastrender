@@ -355,7 +355,11 @@ impl Content {
                 // width / height: the output size (FastRenderer defaults its size to it; render targets sized from getSize)
                 // FASTRENDER_ABLATE=a,b,...: GPU-cost diagnostics applied by the game bundle (js/examples/world-objects.three.mjs)
                 let ablate: String = std::env::var("FASTRENDER_ABLATE").unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || *c == ',' || *c == '-').collect();
-                let params = format!("{{\"boxes\": {}, \"lights\": {}, \"programs\": \"{}\", \"width\": {}, \"height\": {}, \"ablate\": \"{}\"}}", cfg.props, cfg.lights, cfg.programs, cfg.width, cfg.height, ablate);
+                // cluster LOD (docs/notes/clusters.md): FASTRENDER_CLUSTERS=0 or the ablation row `noclusters` switch it off for
+                // the game's JS too (its own far LODs come back), `auto` lets the renderer mark static meshes itself
+                let clusters_env = std::env::var("FASTRENDER_CLUSTERS").ok();
+                let clusters = if !crate::clusters::enabled_by_env(clusters_env.as_deref()) || ablate.split(',').any(|a| a == "noclusters") { "0" } else if clusters_env.as_deref() == Some("auto") { "\"auto\"" } else { "1" };
+                let params = format!("{{\"boxes\": {}, \"lights\": {}, \"programs\": \"{}\", \"width\": {}, \"height\": {}, \"ablate\": \"{}\", \"clusters\": {}}}", cfg.props, cfg.lights, cfg.programs, cfg.width, cfg.height, ablate, clusters);
                 (Content::Three(Box::new(ThreeScene::new(dev, &src, &cfg.script, &params)?)), Vec::new())
             }
             SceneKind::Script => {
@@ -1008,6 +1012,8 @@ impl Renderer {
         if let Content::Three(s) = &mut self.content {
             // three's own programs read projectionMatrix from FrFrame: three's matrix with this frame's jitter
             let proj = if temporal { jittered(s.view.proj, self.jitter, (cw as f32, ch as f32)) } else { s.view.proj };
+            // the cluster threshold is in output pixels: the main pass may render below the output size
+            s.set_cluster_screen_scale(self.targets.out.1 as f32 / ch.max(1) as f32);
             self.last_draws = s.prepare(&self.dev, slot, &planes, &shadow_planes, eye, proj, ch as f32);
         }
         // three.js's own programs (v3) render every shadow map of the frame themselves (directional, spot, point cube,
@@ -1016,6 +1022,8 @@ impl Renderer {
         if let Content::Three(s) = &mut self.content {
             // mip chains of the textures this frame's uploads created, before anything samples them
             s.encode_uploads(&mut cmds);
+            // cluster LOD: one dispatch selects and culls the clusters of every clustered draw of the frame
+            s.encode_clusters(&self.dev, &mut cmds, slot);
             // render-target passes first (PMREM, post-processing, ...: src/mac_targets.rs), then the main pass's shadows
             s.encode_offscreen(&self.dev, &mut cmds, slot);
         }
@@ -1433,6 +1441,9 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
         );
         if s.view.v3 {
             println!("draws per pass (last frame): {}", s.counts.line());
+        }
+        if let Some(st) = s.cluster_stats() {
+            println!("{st}");
         }
         if let Some(st) = s.program_stats() {
             println!("{st}");
