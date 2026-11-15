@@ -22,7 +22,7 @@ const OP_SHADOW_DRAWS: u32 = 11;
 pub const OP_PASS: u32 = 12;
 /// `copyFramebufferToTexture`, in stream order between passes
 pub const OP_COPY: u32 = 13;
-pub const SHADOW_WORDS: usize = 28;
+pub const SHADOW_WORDS: usize = 29;
 pub const PASS_WORDS: usize = 24;
 pub const COPY_WORDS: usize = 12;
 
@@ -134,14 +134,17 @@ pub struct ThreeLight {
 /// SHADOWS `kind` flag: three does not re-render this map this frame (shadow.autoUpdate and needsUpdate false).
 pub const SHADOW_KEEP: u32 = 0x100;
 
-/// One SHADOWS record (28 words): a shadow-casting light in three's lights-state order.
+/// One SHADOWS record (29 words): a shadow-casting light in three's lights-state order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShadowRec {
     /// `tex::DIRECTIONAL`.. `tex::SUN`, | [`SHADOW_KEEP`]
     pub kind: u32,
-    /// three's lights-state index (the `[i]` of `directionalShadowMap[i]`)
+    /// three's lights-state index (the `[i]` of `directionalShadowMap[i]`): which sampler of a program the map is
+    /// bound to this frame. It moves when lights before this one come and go
     pub index: u32,
+    /// the light's shadow, for as long as it lives (never 0): what the map is kept under across frames
+    pub id: u32,
     pub map_size: [f32; 2],
     pub bias: f32,
     pub normal_bias: f32,
@@ -151,6 +154,46 @@ pub struct ShadowRec {
     pub pos: [f32; 3],
     /// shadow camera view-projection, column-major, OpenGL clip space (point lights: face 0)
     pub vp: [f32; 16],
+}
+
+/// Where the shadow map of a SHADOWS entry lives among the maps kept across frames ([`shadow_map_slot`]).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum MapSlot {
+    /// the light's own map, at this index
+    Own(usize),
+    /// no map yet: take over this one, which no light has used for a while
+    Recycle(usize),
+    /// no map yet: a new one
+    New,
+}
+
+/// A light's own maps not used this frame or the last that are kept before the oldest is recycled.
+pub const SHADOW_MAPS_IDLE: usize = 8;
+
+/// The kept map for the light `id` (`ShadowRec::id`). `maps`: (id, the frame it was last used in) of every kept map;
+/// `frame`: the frame being prepared. Maps are kept per light, not per (kind, index): three's index of a light moves
+/// when lights before it come and go (`trimLights` drops dark ones), and a map that is not re-rendered
+/// (`shadow.autoUpdate = false`, [`SHADOW_KEEP`]) has to stay its own light's. A light that left the list (dark and
+/// trimmed, hidden, in another scene) keeps its map for when it comes back; only when more than `idle` such maps
+/// exist does a new light take over the one unused for longest (never one used this frame or the last: other passes
+/// of this frame, and the frame in flight, refer to maps by index).
+pub fn shadow_map_slot(maps: impl Iterator<Item = (u32, u64)>, id: u32, frame: u64, idle: usize) -> MapSlot {
+    let (mut idle_n, mut oldest) = (0, None::<(usize, u64)>);
+    for (i, (map_id, used)) in maps.enumerate() {
+        if map_id == id {
+            return MapSlot::Own(i);
+        }
+        if used + 1 < frame {
+            idle_n += 1;
+            if oldest.is_none_or(|o| used < o.1) {
+                oldest = Some((i, used));
+            }
+        }
+    }
+    match oldest {
+        Some((i, _)) if idle_n > idle => MapSlot::Recycle(i),
+        _ => MapSlot::New,
+    }
 }
 
 /// PASS flags.
@@ -989,9 +1032,27 @@ mod tests {
     }
 
     #[test]
+    fn shadow_maps_are_kept_per_light_not_per_index() {
+        use super::{shadow_map_slot, MapSlot};
+        // maps of lights 5 and 9, both used last frame (frame 10): each finds its own wherever three's index put it
+        let maps = [(5u32, 10u64), (9, 10)];
+        assert_eq!(shadow_map_slot(maps.iter().copied(), 9, 11, 8), MapSlot::Own(1));
+        assert_eq!(shadow_map_slot(maps.iter().copied(), 5, 11, 8), MapSlot::Own(0));
+        // a light without a map gets a new one; it never takes a map used this frame or the last
+        assert_eq!(shadow_map_slot(maps.iter().copied(), 3, 11, 0), MapSlot::New);
+        // a light that left the list keeps its map (dark and trimmed, back 500 frames later with autoUpdate off)
+        assert_eq!(shadow_map_slot([(5u32, 10u64), (9, 510)].into_iter(), 5, 511, 8), MapSlot::Own(0));
+        // ...until more than `idle` maps are unused: a new light then takes over the one unused for longest
+        let many: Vec<(u32, u64)> = (0..10).map(|i| (100 + i, 20 + i as u64)).chain([(7, 99)]).collect();
+        assert_eq!(shadow_map_slot(many.iter().copied(), 1, 100, 9), MapSlot::Recycle(0));
+        assert_eq!(shadow_map_slot(many.iter().copied(), 1, 100, 10), MapSlot::New);
+        assert_eq!(shadow_map_slot(many.iter().copied(), 7, 100, 0), MapSlot::Own(10));
+    }
+
+    #[test]
     fn decodes_v3_ops() {
         let mut s = vec![MAGIC3, 0];
-        s.extend([OP_SHADOWS, 1 + 28, 1, tex::DIRECTIONAL, 0]);
+        s.extend([OP_SHADOWS, 1 + 29, 1, tex::DIRECTIONAL, 0, 7]);
         s.extend((0..26).map(|i| fw(i as f32)));
         // two instances: 8-byte block + 1 texture, 4-byte block + 0 textures
         s.extend([OP_MATERIAL_UNIFORMS, 1 + 3 + 2 + 1 + 3 + 1, 2, 11, 8, 1, fw(1.0), fw(2.0), tex::DFG_LUT, 12, 4, 0, fw(3.0)]);
@@ -999,6 +1060,7 @@ mod tests {
         let f = decode(&s).unwrap();
         assert!(f.v3);
         assert_eq!(f.shadows.len(), 1);
+        assert_eq!((f.shadows[0].kind, f.shadows[0].index, f.shadows[0].id), (tex::DIRECTIONAL, 0, 7));
         assert_eq!(f.shadows[0].map_size, [0.0, 1.0]);
         assert_eq!(f.shadows[0].vp[15], 25.0);
         let u: Vec<_> = f.uniforms.collect();

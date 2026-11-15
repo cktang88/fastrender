@@ -28,7 +28,7 @@ function decode(buf) {
     if (op === OP.DRAWS) for (let i = 0; i < u[p]; i++) out.draws.push({ material: u[p + 1 + i * 20 + 1], flags: u[p + 1 + i * 20 + 2] });
     if (op === OP.SHADOWS) {
       assert.equal(n, 1 + u[p] * SHADOW_WORDS);
-      for (let i = 0; i < u[p]; i++) { const q = p + 1 + i * SHADOW_WORDS; out.shadows.push({ kind: u[q], index: u[q + 1], size: [f[q + 2], f[q + 3]], near: f[q + 7], far: f[q + 8] }); }
+      for (let i = 0; i < u[p]; i++) { const q = p + 1 + i * SHADOW_WORDS; out.shadows.push({ kind: u[q], index: u[q + 1], id: u[q + 2], size: [f[q + 3], f[q + 4]], near: f[q + 8], far: f[q + 9] }); }
     }
     if (op === OP_SHADOW_PASS) out.pass = { type: u[p], depthTextures: u[p + 1], count: u[p + 2], vsm: [...u.slice(p + 3, p + n)] };
     if (op === OP_SHADOW_DRAWS) {

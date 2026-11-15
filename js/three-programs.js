@@ -648,6 +648,7 @@ export class ThreePrograms {
     };
     this._camPos = { x: 0, y: 0, z: 0 };
     this._epoch = 0; this._savePool = [];
+    this._shadowIds = 0; // SHADOWS ids handed out (light.shadow._frId)
     this._frameNo = 0;
     // the light uniforms every lit program reads, wired from lights.state each frame (as WebGLRenderer.getProgram
     // wires them into each material's uniforms): one { value } holder per uniform name
@@ -1252,7 +1253,7 @@ export const OP_SHADOWS = 9;
 export const OP_SHADOW_PASS = 10;
 /** SHADOW_DRAWS: per draw of DRAWS (same order): depth and distance material instance ids (0: native depth-only path) */
 export const OP_SHADOW_DRAWS = 11;
-export const SHADOW_WORDS = 28;
+export const SHADOW_WORDS = 29;
 /** three's shadow map types (renderer.shadowMap.type) */
 export const SHADOW_TYPE = { BASIC: 0, PCF: 1, PCF_SOFT: 2, VSM: 3 };
 /** r180+: shadow maps are depth textures (point lights: a cube); older three packs depth into RGBA (not rendered natively) */
@@ -1358,7 +1359,8 @@ function vsmPrograms(tp, samples) {
 }
 
 /**
- * SHADOWS (three's shadow casters in lights-state order, SHADOW_WORDS each) and SHADOW_PASS (how the maps are made).
+ * SHADOWS (three's shadow casters in lights-state order, SHADOW_WORDS each: kind, lights-state index, the shadow's own
+ * id, ...) and SHADOW_PASS (how the maps are made).
  * The native side renders every map: directional/spot into a 2D depth texture, point lights into a cube, VSM blurred
  * by three's own programs (resolution / radius packed natively by name).
  */
@@ -1371,7 +1373,10 @@ export function writeShadows(fr, w) {
   u[w++] = OP_SHADOWS; u[w++] = 1 + casters.length * SHADOW_WORDS; u[w++] = casters.length;
   for (const c of casters) {
     const l = c.light, s = l.shadow, cam = s.camera, m = l.matrixWorld.elements;
-    u[w++] = SHADOW_KIND[c.kind] | (s._frKeep === true ? SHADOW_KEEP : 0); u[w++] = c.index;
+    // id: the light's shadow, for as long as it lives. The native side keeps its maps by this, not by (kind, index):
+    // three's index of a light moves when lights before it come and go (trimLights drops the dark ones), and a map
+    // kept with shadow.autoUpdate = false must stay its own light's
+    u[w++] = SHADOW_KIND[c.kind] | (s._frKeep === true ? SHADOW_KEEP : 0); u[w++] = c.index; u[w++] = s._frId || (s._frId = ++tp._shadowIds);
     f[w++] = s.mapSize.x; f[w++] = s.mapSize.y; f[w++] = s.bias; f[w++] = s.normalBias; f[w++] = s.radius;
     f[w++] = cam.near; f[w++] = cam.far; f[w++] = m[12]; f[w++] = m[13]; f[w++] = m[14];
     vp.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);

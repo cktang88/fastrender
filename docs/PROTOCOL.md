@@ -98,7 +98,11 @@ tone mapping changed): the material is re-uploaded with the new `program` id. Me
 
 `{ program, name, type, side, shadowSide, transparent, opacity, blending, blendSrc, blendDst, blendEquation,
 blendSrcAlpha, blendDstAlpha, blendEquationAlpha, premultipliedAlpha, depthTest, depthWrite, depthFunc, colorWrite,
-alphaToCoverage, polygonOffset: [factor, units] | null, wireframe }`
+alphaToCoverage, polygonOffset: [factor, units] | null, wireframe, vertexCustom }`
+
+`vertexCustom`: the vertex stage may move vertices away from three's built-in transform of the geometry (a
+ShaderMaterial, the material's own `onBeforeCompile`, a displacement map). The native side then culls the instances
+of an InstancedMesh one by one only if the game vouches for their bounds (`userData.frInstanceCull`, INSTANCES).
 
 The native side derives blending exactly as `WebGLState.setMaterial` (Normal + opaque = off; premultiplied tables;
 Custom from the factors), depth from `depthTest`/`depthFunc`/`depthWrite`, culling from `side` and the object's
@@ -155,7 +159,7 @@ false`) sends every visible object and leaves all culling to the native side.
 | op | payload |
 |---|---|
 | 8 MATERIAL_UNIFORMS | n, then per material instance used this frame: id, byteSize, textureCount, `byteSize/4` words of the packed default block, `textureCount` texture ids (one per `layout.textures` entry, same order) |
-| 9 SHADOWS | n, then n × 28: kind (1 directional, 2 spot, 3 point, 4 sun), index (three's lights-state index), mapSize x y, bias, normalBias, radius, camera near, far, light world position xyz, shadow camera view-projection 4×4 (point lights: face 0) |
+| 9 SHADOWS | n, then n × 29: kind (1 directional, 2 spot, 3 point, 4 sun; `| 0x100` SHADOW_KEEP: not re-rendered this frame), index (three's lights-state index: the sampler the map is bound to this frame), id (the light's shadow for as long as it lives, never 0: the native side keeps the map under it, so a kept map stays its light's when the index moves), mapSize x y, bias, normalBias, radius, camera near, far, light world position xyz, shadow camera view-projection 4×4 (point lights: face 0) |
 | 10 SHADOW_PASS | shadowMap.type (0 Basic, 1 PCF, 3 VSM; r186+ never 2), depth-texture maps (1: r180+ convention, rendered natively; 0: older three's RGBA-packed maps, bound lit), n (= SHADOWS n), then per SHADOWS entry: VSM vertical + horizontal blur program ids (0 0 unless VSM; point lights never) |
 | 11 SHADOW_DRAWS | n (= DRAWS n), then per draw in DRAWS order: depth material instance id, distance material instance id (three's MeshDepthMaterial / MeshDistanceMaterial or custom depth materials; 0 = the native depth-only caster path). Written by `js/three-programs.js` (shadow section) |
 

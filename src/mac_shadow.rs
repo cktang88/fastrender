@@ -6,10 +6,13 @@ use super::*;
 /// Bytes reserved per VSM blur program's uniform block (resolution, radius: 16 bytes in practice).
 pub(super) const VSM_BLOCK: usize = 512;
 
-/// One rendered shadow map (a SHADOWS entry), kept across frames while its kind / index / size stay the same.
+/// One rendered shadow map, kept across frames under its light's id (`ShadowRec::id`) while its kind and size stay
+/// the same; which (kind, index) of three's programs it is bound to is per frame (`shadow_lookup`).
 pub(super) struct ShadowMap {
+    id: u32,
     kind: u32,
-    index: u32,
+    /// the frame it was last a SHADOWS entry in (`three::shadow_map_slot`)
+    used: u64,
     size: (usize, usize),
     pub(super) cube: bool,
     /// Depth32Float: what PCF (compare sampler) and Basic (nearest) read; VSM's blur input
@@ -23,7 +26,7 @@ pub(super) struct ShadowMap {
 }
 
 impl ShadowMap {
-    fn new(dev: &Device, kind: u32, index: u32, size: (usize, usize), cube: bool, vsm: bool, packed: bool) -> ShadowMap {
+    fn new(dev: &Device, id: u32, kind: u32, size: (usize, usize), cube: bool, vsm: bool, packed: bool) -> ShadowMap {
         let make = |fmt: MTLPixelFormat, ty: MTLTextureType| -> Texture {
             let d = MTLTextureDescriptor::new();
             d.setTextureType(ty);
@@ -39,7 +42,7 @@ impl ShadowMap {
         let depth = make(MTLPixelFormat::Depth32Float, if cube { MTLTextureType::TypeCube } else { MTLTextureType::Type2D });
         let vsm = vsm.then(|| (make(MTLPixelFormat::RG16Float, MTLTextureType::Type2D), make(MTLPixelFormat::RG16Float, MTLTextureType::Type2D)));
         let packed = packed.then(|| make(MTLPixelFormat::RGBA8Unorm, MTLTextureType::Type2D));
-        ShadowMap { kind, index, size, cube, depth, vsm, packed, rendered: false }
+        ShadowMap { id, kind, used: 0, size, cube, depth, vsm, packed, rendered: false }
     }
 
     /// A replaced map's textures (a frame in flight may still sample them: they wait in the graveyard).
@@ -180,31 +183,38 @@ impl ThreeScene {
             let (w, h) = ((rec.map_size[0].max(1.0) as usize).min(8192), (rec.map_size[1].max(1.0) as usize).min(8192));
             let (w, h) = if point { (w, w) } else { (w, h) };
             let want_vsm = vsm && self.shadow_vsm.get(k).is_some_and(|p| p[0] != 0 && p[1] != 0);
-            let found = self.shadow_maps.iter().position(|m| m.kind == rec.kind && m.index == rec.index);
+            // the light's own map, wherever three's index puts the light this frame (src/three.rs shadow_map_slot)
+            let frame = self.clock.encoding;
+            let slot = three::shadow_map_slot(self.shadow_maps.iter().map(|m| (m.id, m.used)), rec.id, frame, three::SHADOW_MAPS_IDLE);
             if self.shadow_keep.get(k).copied().unwrap_or(false) {
                 // three skips this light's shadow pass: its last map (and the matching shadow matrix three kept) stand
-                if let Some(m) = found.filter(|&m| self.shadow_maps[m].rendered) {
-                    self.shadow_lookup.push((rec.kind, rec.index, m));
+                if let three::MapSlot::Own(m) = slot {
+                    self.shadow_maps[m].used = frame;
+                    if self.shadow_maps[m].rendered && self.shadow_maps[m].kind == rec.kind {
+                        self.shadow_lookup.push((rec.kind, rec.index, m));
+                    }
                 }
                 continue;
             }
-            let map = match found {
-                Some(m) if self.shadow_maps[m].size == (w, h) && self.shadow_maps[m].vsm.is_some() == want_vsm && self.shadow_maps[m].packed.is_some() == packed => m,
-                found => {
-                    let m = ShadowMap::new(dev, rec.kind, rec.index, (w, h), point, want_vsm, packed);
-                    match found {
-                        Some(i) => {
-                            // a light whose map changed size / type: the old textures outlive the frames using them
+            let map = match slot {
+                three::MapSlot::Own(m) if self.shadow_maps[m].kind == rec.kind && self.shadow_maps[m].size == (w, h) && self.shadow_maps[m].vsm.is_some() == want_vsm && self.shadow_maps[m].packed.is_some() == packed => m,
+                slot => {
+                    let m = ShadowMap::new(dev, rec.id, rec.kind, (w, h), point, want_vsm, packed);
+                    match slot {
+                        three::MapSlot::Own(i) | three::MapSlot::Recycle(i) => {
+                            // a light whose map changed size / type, or a map no light has used for a while: the old
+                            // textures outlive the frames using them
                             std::mem::replace(&mut self.shadow_maps[i], m).bury(&mut self.dead);
                             i
                         }
-                        None => {
+                        three::MapSlot::New => {
                             self.shadow_maps.push(m);
                             self.shadow_maps.len() - 1
                         }
                     }
                 }
             };
+            self.shadow_maps[map].used = frame;
             self.shadow_maps[map].rendered = true;
             self.shadow_lookup.push((rec.kind, rec.index, map));
             let pos = Vec3::from(rec.pos);

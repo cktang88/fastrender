@@ -185,7 +185,7 @@ function decode(buf) {
       }
       assert.equal(q, p + n, 'MATERIAL_UNIFORMS tiles exactly');
     }
-    if (op === OP.SHADOWS) for (let i = 0; i < u[p]; i++) { const q = p + 1 + i * 28; out.shadows.push({ kind: u[q], index: u[q + 1], vp: [...f.slice(q + 12, q + 28)] }); }
+    if (op === OP.SHADOWS) for (let i = 0; i < u[p]; i++) { const q = p + 1 + i * 29; out.shadows.push({ kind: u[q], index: u[q + 1], id: u[q + 2], vp: [...f.slice(q + 13, q + 29)] }); }
     w = p + n;
   }
   assert.equal(w, u[1]);
@@ -805,6 +805,38 @@ else {
   for (let i = 0; i < 125; i++) st = trim.frame();
   assert.equal(st.point.length, 0, 'released after the hold');
   console.log(`[three r${REV}] trimLights: dark point / spot lights leave the light state (10 point + 3 spot -> 1 + 0, no dark shadow lookup); counts step up at once and are held 120 frames`);
+}
+
+// ------------------------------------------------------------------ 13b. a shadow keeps its SHADOWS id when trimLights moves its index
+{
+  const h = makeHost();
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20 });
+  r.setSize(SIZE.width, SIZE.height);
+  r.shadowMap.enabled = true;
+  const scene = new THREE.Scene();
+  // two point lights with shadows: `blink` goes dark (and leaves the light state), `fixed` keeps its map
+  // (autoUpdate = false after the first frame): three's index of `fixed` moves from 1 to 0 and back
+  const blink = new THREE.PointLight(0xffffff, 2, 20); blink.castShadow = true;
+  const fixed = new THREE.PointLight(0xffffff, 2, 20); fixed.castShadow = true; fixed.position.set(3, 2, 0);
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()); mesh.receiveShadow = true; mesh.castShadow = true;
+  scene.add(blink, fixed, mesh);
+  const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 3, 8); camera.lookAt(0, 0, 0);
+  const frame = () => { r.render(scene, camera); return decode(h.cmd).shadows.map((s) => ({ kind: s.kind & 0xff, keep: (s.kind & 0x100) !== 0, index: s.index, id: s.id })); };
+  const a = frame();
+  assert.equal(a.length, 2);
+  assert.ok(a[0].id > 0 && a[1].id > 0 && a[0].id !== a[1].id, 'every shadow has its own id (never 0)');
+  const fixedId = a[1].id;
+  assert.deepEqual([a[0].index, a[1].index, a[1].keep], [0, 1, false]);
+  fixed.shadow.autoUpdate = false;
+  blink.intensity = 0;
+  let b = frame();
+  assert.equal(b.length, 2, 'the dark shadow light is held for a while (no program flip for a blink)');
+  for (let i = 0; i < 125; i++) b = frame();
+  assert.deepEqual(b, [{ kind: 3, keep: true, index: 0, id: fixedId }], 'the dark light left; the kept map moved to index 0 under the same id');
+  blink.intensity = 2;
+  const c = frame();
+  assert.deepEqual(c.map((s) => [s.index, s.id, s.keep]), [[0, a[0].id, false], [1, fixedId, true]], 'back: both under their own ids');
+  console.log(`[three r${REV}] SHADOWS ids: a kept shadow map stays its light's while trimLights moves its index (1 -> 0 -> 1)`);
 }
 
 // ------------------------------------------------------------------ 14. userData.frInstanceCull travels with the instance upload
