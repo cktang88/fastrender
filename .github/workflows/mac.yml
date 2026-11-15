@@ -381,3 +381,43 @@ jobs:
             electron-*-spike.json
             electron-*.json
             electron-*.log
+
+  # Why is the real game's JS 3-4x slower in the JavaScriptCore host than in Electron / node on this runner? The JS
+  # alone (`fastrender jsbench`, no Metal) under JSC_* options and code-signing variants, vs node (V8) and bun (its own
+  # JavaScriptCore) on the same bundle. Non-gating, results as annotations. docs/research/jsc-vs-v8.md
+  jsc-profile:
+    runs-on: macos-26
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: |
+          brew install glslang spirv-cross
+          cargo build --release
+          (cd js && npm ci --silent)
+      - name: 3d-world-objects JS cost per engine configuration (JavaScriptCore options, signing, node, bun)
+        run: |
+          WO_BASE=073aa9eae0ba86cecb16970162593281714214e3
+          if ! { git init -q ../3d-world-objects && git -C ../3d-world-objects fetch -q --depth 1 https://github.com/cktang88/3d-world-objects "$WO_BASE" && git -C ../3d-world-objects checkout -q FETCH_HEAD; } > wo-clone.txt 2>&1; then
+            bash .github/annotate.sh warning "jsc-profile: skipped (game fetch failed)" wo-clone.txt 5; exit 0
+          fi
+          for p in patches/3d-world-objects-000*.patch; do
+            git -C ../3d-world-objects -c user.name=ci -c user.email=ci@localhost am -q "$PWD/$p" || { echo "::error title=jsc-profile::$p does not apply"; exit 1; }
+          done
+          node js/examples/world-objects.build.mjs ../3d-world-objects js/dist/world-objects.js --target jsc --three three
+          bash .github/jsc-profile.sh js/dist/world-objects.js "$GITHUB_WORKSPACE/../3d-world-objects" || true
+          cat jsc-profile/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          split -l 10 jsc-profile/summary.txt jsc-profile/summary-part-
+          i=0; for f in jsc-profile/summary-part-*; do i=$((i+1)); bash .github/annotate.sh notice "jsc-profile $i" "$f" 10; done
+          bash .github/annotate.sh notice "jsc-profile sampling profiler" jsc-profile/sampling-top.txt 60
+          bash .github/annotate.sh notice "jsc-profile frame windows" jsc-profile/windows.txt 40
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jsc-profile
+          path: |
+            jsc-profile/*.txt
+            jsc-profile/*.out
+            jsc-profile/*.err
+            jsc-profile/*.json
+            jsc-profile/sampling

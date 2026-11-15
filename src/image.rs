@@ -9,6 +9,35 @@
 //! only the JavaScriptCore binding is macOS-only.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+/// Nanoseconds spent inside native `__fr.*` callbacks (file reads, image decodes, uploads, program translation),
+/// so a host can report "JS" and "native work called from JS" separately (`fastrender jsbench`, src/jsc.rs).
+pub static NATIVE_NS: AtomicU64 = AtomicU64::new(0);
+/// `__fr.readFile` calls / `__fr.decodeImage` calls / nanoseconds in decodeImage
+pub static READS: AtomicU64 = AtomicU64::new(0);
+pub static DECODES: AtomicU64 = AtomicU64::new(0);
+pub static DECODE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Adds its lifetime to [`NATIVE_NS`] (and to `extra`, when given).
+pub struct NativeTime(Instant, Option<&'static AtomicU64>);
+impl NativeTime {
+    pub fn new() -> Self { NativeTime(Instant::now(), None) }
+    pub fn also(extra: &'static AtomicU64) -> Self { NativeTime(Instant::now(), Some(extra)) }
+}
+impl Default for NativeTime {
+    fn default() -> Self { Self::new() }
+}
+impl Drop for NativeTime {
+    fn drop(&mut self) {
+        let ns = self.0.elapsed().as_nanos() as u64;
+        NATIVE_NS.fetch_add(ns, Ordering::Relaxed);
+        if let Some(e) = self.1 {
+            e.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+}
 
 /// RGBA8 pixels of an encoded image (PNG, JPEG, WebP), or None.
 pub fn decode_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
@@ -121,6 +150,8 @@ mod jsc {
         if argc == 0 {
             return JSValueMakeNull(ctx);
         }
+        let _t = super::NativeTime::new();
+        super::READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = string_arg(ctx, *argv);
         match path.and_then(|p| super::read_asset(&p)) {
             Some(bytes) => array_buffer(ctx, bytes),
@@ -132,6 +163,8 @@ mod jsc {
         if argc == 0 {
             return JSValueMakeNull(ctx);
         }
+        let _t = super::NativeTime::also(&super::DECODE_NS);
+        super::DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let v = *argv;
         let ty = JSValueGetTypedArrayType(ctx, v, null_mut());
         if ty != U8 && ty != U8C {

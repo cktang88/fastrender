@@ -42,12 +42,39 @@ let rafId = 0;
 G.requestAnimationFrame = (f) => { raf.push({ id: ++rafId, f }); return rafId; };
 G.cancelAnimationFrame = (id) => { raf = raf.filter((r) => r.id !== id); };
 
+// Where a frame's wall-clock time goes (ms; `fastrender jsbench`, docs/research/jsc-vs-v8.md): virtual timers (work a
+// browser runs between frames lands inside the frame in JavaScriptCore), the rAF callbacks, and with params.prof also
+// renderer.render() and three's scene.updateMatrixWorld() inside them.
+const cost = { frames: 0, timers: 0, raf: 0, render: 0, matrixWorld: 0 };
+G.__worldCostReset = () => { for (const k in cost) cost[k] = 0; };
+G.__worldCostReport = () => { const n = Math.max(1, cost.frames), o = {}; for (const k in cost) o[k] = k === 'frames' ? cost[k] : +(cost[k] / n).toFixed(2); return o; };
+const hookCost = () => {
+  const r = G.__world && G.__world.renderer;
+  if (!r || r.__costHooked) return;
+  r.__costHooked = true;
+  const render = r.render;
+  r.render = function (scene, camera) {
+    if (scene && !scene.__costHooked) {
+      scene.__costHooked = true;
+      const u = scene.updateMatrixWorld;
+      scene.updateMatrixWorld = function (force) { const t = real(); u.call(this, force); cost.matrixWorld += real() - t; };
+    }
+    const t = real();
+    render.call(this, scene, camera);
+    cost.render += real() - t;
+  };
+};
+
 /** one display frame: advance the clock by dt seconds, fire due virtual timers, then the rAF callbacks */
 G.__worldStep = (dt = 1 / 60) => {
   now += dt * 1000;
+  if (P.prof) hookCost();
+  const t0 = real();
   fireDue();
+  const t1 = real();
   const q = raf; raf = [];
   for (const r of q) r.f(now);
+  cost.frames++; cost.timers += t1 - t0; cost.raf += real() - t1;
   return q.length;
 };
 G.__worldNow = () => now;

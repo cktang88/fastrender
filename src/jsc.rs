@@ -9,7 +9,10 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+use crate::image::NativeTime;
 
 use crate::three::{Array, Resource};
 
@@ -100,6 +103,17 @@ unsafe extern "C" fn js_log(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectR
     JSValueMakeUndefined(ctx)
 }
 
+/// `__fr.upload` calls / typed-array bytes copied out of JS by them (`fastrender jsbench`)
+static UPLOADS: AtomicU64 = AtomicU64::new(0);
+static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// __fr.now() -> wall-clock milliseconds since the first call (sub-microsecond; JavaScriptCore's own `Date.now()` is
+/// whole milliseconds and the game's `performance.now` is the driver's virtual clock)
+unsafe extern "C" fn js_now(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectRef, _argc: usize, _argv: *const JSValueRef, _exc: *mut JSValueRef) -> JSValueRef {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    JSValueMakeNumber(ctx, START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0)
+}
+
 unsafe extern "C" fn no_dealloc(_bytes: *mut c_void, _ctx: *mut c_void) {}
 
 thread_local! {
@@ -119,6 +133,7 @@ unsafe extern "C" fn js_program(ctx: JSContextRef, _f: JSObjectRef, _this: JSObj
     if argc < 3 {
         return JSValueMakeNull(ctx);
     }
+    let _t = NativeTime::new();
     let key = to_rust_string(ctx, *argv);
     let vs = to_rust_string(ctx, *argv.add(1));
     let fs = to_rust_string(ctx, *argv.add(2));
@@ -159,6 +174,7 @@ unsafe fn typed_array(ctx: JSContextRef, v: JSValueRef) -> Option<Array> {
     if ptr.is_null() && len > 0 {
         return None;
     }
+    UPLOAD_BYTES.fetch_add(len as u64, Ordering::Relaxed);
     macro_rules! copy {
         ($t:ty, $variant:ident) => {
             Some(Array::$variant(std::slice::from_raw_parts(ptr as *const $t, len / std::mem::size_of::<$t>()).to_vec()))
@@ -176,6 +192,8 @@ unsafe fn typed_array(ctx: JSContextRef, v: JSValueRef) -> Option<Array> {
 /// __fr._upload(kind, id, metaJson, ...typedArrays)
 unsafe extern "C" fn js_upload(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectRef, argc: usize, argv: *const JSValueRef, _exc: *mut JSValueRef) -> JSValueRef {
     if argc >= 3 {
+        let _t = NativeTime::new();
+        UPLOADS.fetch_add(1, Ordering::Relaxed);
         let kind = JSValueToNumber(ctx, *argv, null_mut()) as u32;
         let id = JSValueToNumber(ctx, *argv.add(1), null_mut()) as u32;
         let meta = to_rust_string(ctx, *argv.add(2));
@@ -231,6 +249,8 @@ impl ScriptHost {
             JSObjectSetProperty(ctx, fr, JsStr::new("_upload").0, up as JSValueRef, 0, null_mut());
             let rel = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("_release").0, js_release);
             JSObjectSetProperty(ctx, fr, JsStr::new("_release").0, rel as JSValueRef, 0, null_mut());
+            let now = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("now").0, js_now);
+            JSObjectSetProperty(ctx, fr, JsStr::new("now").0, now as JSValueRef, 0, null_mut());
             let prog = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("program").0, js_program);
             JSObjectSetProperty(ctx, fr, JsStr::new("program").0, prog as JSValueRef, 0, null_mut());
             crate::image::install(ctx as *const c_void, fr); // __fr.readFile / __fr.decodeImage (src/image.rs)
@@ -267,6 +287,18 @@ impl ScriptHost {
             }
         }
         Ok(())
+    }
+
+    /// Evaluate `src` and return its result as a string (diagnostics: `fastrender jsbench`).
+    pub fn eval_string(&self, src: &str) -> Result<String, String> {
+        unsafe {
+            let mut exc: JSValueRef = null();
+            let v = JSEvaluateScript(self.ctx, JsStr::new(src).0, null_mut(), JsStr::new("eval.js").0, 1, &mut exc);
+            if !exc.is_null() || v.is_null() {
+                return Err(describe_exception(self.ctx, exc));
+            }
+            Ok(to_rust_string(self.ctx, v))
+        }
     }
 
     /// Resource uploads/releases the script made since the last call (protocol v2).
@@ -316,4 +348,86 @@ impl crate::host::FrameSource for ScriptHost {
     fn take_programs(&mut self) -> Vec<(u32, String, crate::xlat::Program)> { ScriptHost::take_programs(self) }
     fn take_resources(&mut self) -> Vec<Resource> { ScriptHost::take_resources(self) }
     fn js_ms(&self) -> f64 { self.last_js_ms }
+}
+
+/// What the engine is doing, measured from inside it: a hot integer loop (a JIT runs it in a few ns per iteration,
+/// the interpreter in ~10x that) and, where `$vm` exists (JSC_useDollarVM=1), which tiers ran a hot function.
+const PROBE: &str = "(function () { var r = {}, now = __fr.now; function hot(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + i * i) % 1000003; return s; } hot(1e5); var t = now(); hot(2e7); r.loop_ns_per_iter = +((now() - t) * 1e6 / 2e7).toFixed(2); var a = new Float32Array(4096); function fill(k) { for (var i = 0; i < 4096; i++) a[i] = i * k; return a[7]; } for (var j = 0; j < 200; j++) fill(j); t = now(); for (j = 0; j < 4000; j++) fill(j); r.f32_write_ns = +((now() - t) * 1e6 / (4000 * 4096)).toFixed(2); if (typeof $vm !== 'undefined') { var f = function () { return ($vm.ftlTrue() ? 4 : 0) | ($vm.dfgTrue() ? 2 : 0); }; var m = 0; for (var i = 0; i < 3e6; i++) m |= f(); r.tiers = (m & 4 ? 'FTL ' : '') + (m & 2 ? 'DFG' : '') || 'none above baseline'; } r.wasm = typeof WebAssembly; return JSON.stringify(r); })()";
+
+/// `fastrender jsbench <bundle.js> [--warmup N] [--frames N] [--params JSON] [--window N]`: the game's JS alone in the
+/// JavaScriptCore host (no Metal, no window): `frame()` per frame exactly as the renderer calls it, uploads and
+/// programs drained and dropped. Prints JS ms/frame per window of frames, the time inside native `__fr.*` callbacks,
+/// and the driver's own breakdown (`__worldCostReport`, js/examples/world-objects.drive.mjs). For A/B runs of
+/// JavaScriptCore options (`JSC_useJIT=0`, ...), entitlements and signing: docs/research/jsc-vs-v8.md.
+pub fn js_bench(args: &[String]) -> Result<(), String> {
+    let bundle = args.first().ok_or("usage: fastrender jsbench <bundle.js> [--warmup N] [--frames N] [--params JSON] [--window N]")?;
+    let opt = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    let num = |k: &str, d: usize| opt(k).and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (warmup, frames, window) = (num("--warmup", 71), num("--frames", 30), num("--window", 10).max(1));
+    let params = opt("--params").unwrap_or_else(|| "{\"boxes\": 0, \"lights\": 0, \"programs\": \"three\", \"width\": 1280, \"height\": 800}".into());
+    let game = std::fs::read_to_string(bundle).map_err(|e| format!("bundle {bundle}: {e}"))?;
+    let jsc_env: Vec<String> = std::env::vars().filter(|(k, _)| k.starts_with("JSC_")).map(|(k, v)| format!("{k}={v}")).collect();
+    println!("jsbench: {bundle}, warmup {warmup}, frames {frames}, env [{}]", jsc_env.join(" "));
+    ScriptHost::warm_up_translator();
+    let t = Instant::now();
+    let mut host = ScriptHost::new("", &game, bundle, &params, 4 << 20)?;
+    println!("jsbench: bundle evaluated in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+    println!("jsbench probe: {}", host.eval_string(PROBE).unwrap_or_else(|e| format!("failed: {e}")));
+    let counters = || {
+        use crate::image::{DECODES, DECODE_NS, NATIVE_NS, READS};
+        [NATIVE_NS.load(Ordering::Relaxed), UPLOADS.load(Ordering::Relaxed), UPLOAD_BYTES.load(Ordering::Relaxed), READS.load(Ordering::Relaxed), DECODES.load(Ordering::Relaxed), DECODE_NS.load(Ordering::Relaxed)]
+    };
+    let (mut js, mut native) = (Vec::with_capacity(frames), 0.0);
+    let (mut w_js, mut w_n, mut w0) = (0.0, 0usize, counters());
+    for i in 0..warmup + frames {
+        if i == warmup {
+            let _ = host.eval_string("globalThis.__worldCostReset ? (__worldCostReset(), 1) : 0");
+        }
+        let c0 = counters();
+        host.frame(i as f64 / 60.0, 1.0 / 60.0)?;
+        let (ms, c1) = (host.last_js_ms, counters());
+        drop(host.take_resources());
+        drop(host.take_programs());
+        if i >= warmup {
+            js.push(ms);
+            native += (c1[0] - c0[0]) as f64 / 1e6;
+        }
+        w_js += ms;
+        w_n += 1;
+        if w_n == window || i + 1 == warmup + frames {
+            let d: Vec<u64> = c1.iter().zip(w0).map(|(a, b)| a - b).collect();
+            let n = w_n as f64;
+            println!(
+                "jsbench frames {}-{}: JS {:.1} ms/frame, of which native callbacks {:.1} ms (image decode {:.1}); per frame: {:.1} uploads, {:.2} MB, {:.1} reads, {:.1} decodes",
+                i + 1 - w_n,
+                i,
+                w_js / n,
+                d[0] as f64 / 1e6 / n,
+                d[5] as f64 / 1e6 / n,
+                d[1] as f64 / n,
+                d[2] as f64 / 1e6 / n,
+                d[3] as f64 / n,
+                d[4] as f64 / n
+            );
+            (w_js, w_n, w0) = (0.0, 0, c1);
+        }
+    }
+    if !js.is_empty() {
+        let n = js.len() as f64;
+        let mean = js.iter().sum::<f64>() / n;
+        let mut s = js.clone();
+        s.sort_by(|a, b| a.total_cmp(b));
+        println!(
+            "jsbench result: JS {:.2} ms/frame mean, {:.2} median, {:.2} min, {:.2} max over frames {}-{}; native callbacks {:.2} ms/frame; in-JS breakdown (ms/frame): {}",
+            mean,
+            s[s.len() / 2],
+            s[0],
+            s[s.len() - 1],
+            warmup,
+            warmup + frames - 1,
+            native / n,
+            host.eval_string("JSON.stringify(globalThis.__worldCostReport ? __worldCostReport() : null)").unwrap_or_default()
+        );
+    }
+    Ok(())
 }
