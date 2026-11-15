@@ -30,7 +30,7 @@ on:
 concurrency:
   # many pushes land on this branch: a started run finishes, only the newest waiting one is kept
   group: metal4-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -78,6 +78,9 @@ jobs:
   # EXECUTE lane, never gating: what each runner's GPU really does with Metal 4.
   metal4:
     needs: plan
+    # Already measured on 2026-11-15: no hosted runner can execute Metal 4. Run on request or on a self-hosted
+    # Apple silicon runner only, so it doesn't take scarce hosted macOS capacity on every push.
+    if: github.event_name == 'workflow_dispatch' || vars.METAL4_SELF_HOSTED == 'true'
     name: execute (${{ matrix.name }})
     strategy:
       fail-fast: false

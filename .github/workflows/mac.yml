@@ -1,5 +1,10 @@
 name: mac
 on: [push, workflow_dispatch]
+concurrency:
+  # Many agents push to this branch and macOS runners are scarce: a newer push supersedes every older run, queued or
+  # running. Its run tests all earlier commits too.
+  group: mac-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   run:
     strategy:
@@ -11,9 +16,7 @@ jobs:
           - os: macos-26
             xcode: "26.6"
             experimental: false
-          - os: xcode-27
-            xcode: "27.2"
-            experimental: true   # preview image: never fails the workflow
+          # the macOS 27 preview image (xcode-27) is covered by metal4.yml; dropped here to save scarce runner time
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
     steps:
