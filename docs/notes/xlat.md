@@ -101,6 +101,12 @@ derives from) cannot be configured out through these crates. LTO might trim some
   `NAME.{vert,frag}.metal` and `NAME.layout.json` and prints cold and warm timings. CI (`mac.yml`) compiles each
   `.metal` with `xcrun -sdk macosx metal -std=metal3.0`.
 
+## Half precision (experiment, off by default)
+
+`--half brdf|lit|all` / `FASTRENDER_HALF`: a SPIR-V pass (`src/xlat_half.rs`) between glslang and SPIRV-Cross that
+computes three's lighting functions, chosen by name, in 16-bit float. With a mode on, the cache key has a fifth part
+(`half=<mode> <half::VERSION>`); with it off, keys and output are unchanged. See docs/notes/half-precision.md.
+
 ## Cache
 
 A hit used to cost 1.1-2.5 ms per lit program, 86 % of it `normalize_glsl` run only to compute the key
