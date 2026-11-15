@@ -94,10 +94,18 @@ struct Mat3State {
     binds: MatBinds,
     /// the bind list resolved for (prepare stamp, first texture id in `uni_tex`): one lookup per pass, not per draw
     memo: (u64, u32, u32),
+    /// (streams, target) this instance was drawn with before its last upload (another program, another pipeline
+    /// state): the new pipelines for these take the place of something that was on screen, so the main pass waits
+    /// for them instead of skipping the draw (`bindlist::main_draw_waits`)
+    prev: Vec<(StreamSig, Target)>,
 }
 
 impl Mat3State {
-    fn new(meta: ProgramMaterialMeta, depth: u32) -> Self { Mat3State { meta, depth, pipes: Vec::new(), binds: MatBinds::default(), memo: (0, 0, 0) } }
+    /// `old`: the state this upload replaces (the instance keeps its id when three picks another program for it)
+    fn new(meta: ProgramMaterialMeta, depth: u32, old: Option<&Mat3State>, progs: &Programs) -> Self {
+        let prev = old.map_or(Vec::new(), |o| bindlist::carried_pipes(o.pipes.iter().filter(|p| p.2 != u32::MAX && !progs.pending(p.2)).map(|p| (p.0, p.1)), &o.prev));
+        Mat3State { meta, depth, pipes: Vec::new(), binds: MatBinds::default(), memo: (0, 0, 0), prev }
+    }
 }
 
 /// `Draw3::raster` bits
@@ -888,6 +896,8 @@ impl ThreeScene {
             }
         }
         self.scratch_runs = runs;
+        // the pipelines this pass must not skip (`Programs::require`): all at once, built side by side
+        self.progs.wait_required();
         // equal keys keep the draw order, as three's sort ends with the object id
         opaque.sort_unstable_by_key(|o| (o.0, o.1));
         transparent.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)));
@@ -986,6 +996,10 @@ impl ThreeScene {
         }
         let p = progs.pipeline(dev, &mat.meta, sig, target).unwrap_or(u32::MAX);
         mat.pipes.push((sig, target, p));
+        if p != u32::MAX && target == Target::Main && bindlist::main_draw_waits(mat.prev.contains(&(sig, target)), false, 0) {
+            // it replaces a pipeline this instance was on screen with: not skipped while it compiles
+            progs.require(p);
+        }
         (p != u32::MAX).then_some((p, plan as u16))
     }
 

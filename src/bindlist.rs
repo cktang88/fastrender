@@ -815,9 +815,52 @@ impl PassCounts {
     }
 }
 
+/// Does a main-pass draw whose pipeline is still compiling wait for it (true) or is it skipped this frame (false)?
+/// Skipping is right for what appears for the first time (a level streaming in: it shows up a few frames late, no
+/// frame is held). It is wrong when the screen had the draw and would lose it, or would show nothing at all:
+/// - `replaces`: the material instance was on screen with these streams and got another program or pipeline state
+///   (three compiles the light counts into every lit program: a light count that steps replaces them all at once, and
+///   the lit scene would be gone for the frames the new ones take);
+/// - `samples_target`: the draw samples a render target (a post-processing output pass, a mirror: what the frame's
+///   offscreen passes rendered would not reach the screen);
+/// - `pass_draws == 1`: the pass is one draw (a full-screen pass: without it the screen is its clear colour).
+pub fn main_draw_waits(replaces: bool, samples_target: bool, pass_draws: usize) -> bool { replaces || samples_target || pass_draws == 1 }
+
+/// The (streams, target) pairs a material instance was drawn with, carried over when the instance is uploaded again
+/// (another program, another pipeline state): `ready` are the old state's pipelines that were built, `before` what
+/// the old state itself had carried over (it may have been replaced before its own pipelines were ready). The new
+/// state's pipelines for these pairs take the place of something that was on screen (`main_draw_waits`).
+pub fn carried_pipes<K: Copy + PartialEq>(ready: impl Iterator<Item = K>, before: &[K]) -> Vec<K> {
+    let mut out: Vec<K> = before.to_vec();
+    for k in ready {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_pipeline_is_waited_for_a_new_one_is_not() {
+        // first appearance: skipped while it compiles (no frame is held for content that streams in)
+        assert!(!main_draw_waits(false, false, 1500));
+        // the instance was on screen with these streams and got another program (a light count stepped)
+        assert!(main_draw_waits(true, false, 1500));
+        // a post-processing output pass: samples a render target / is the pass's only draw
+        assert!(main_draw_waits(false, true, 3));
+        assert!(main_draw_waits(false, false, 1));
+        // what an upload carries over: the old state's built pipelines, and what it had carried itself (replaced
+        // twice before the first replacement was ready), each pair once
+        let (a, b, c) = ((0x33u64, 0u8), (0x83u64, 0u8), (0x33u64, 1u8));
+        assert_eq!(carried_pipes([a, b].into_iter(), &[]), vec![a, b]);
+        assert_eq!(carried_pipes([c].into_iter(), &[a, b]), vec![a, b, c]);
+        assert_eq!(carried_pipes([a].into_iter(), &[a, b]), vec![a, b]);
+        assert!(carried_pipes(std::iter::empty::<(u64, u8)>(), &[]).is_empty());
+    }
 
     #[test]
     fn instance_runs_keep_every_instance_that_touches_the_frustum() {

@@ -6,10 +6,13 @@
 //! Nothing is compiled on the render thread (src/pipeline_manifest.rs: the queue, stage dedupe, the persisted
 //! manifest; here: its Metal 3 backend [`Metal3`]). `add` queues a program's two libraries, `pipeline` queues a
 //! pipeline and hands out its slot at once; `pipeline_at` answers None until the slot is filled, so the encoder
-//! skips that draw this frame (counted). Two exceptions wait for the worker instead, because skipping would leave
+//! skips that draw this frame (counted). Three exceptions wait for the worker instead, because skipping would leave
 //! a wrong result behind: a pipeline that renders into a render target or a shadow map (content that may be drawn
-//! once: PMREM, a shadow map with `autoUpdate` off), and everything in blocking mode (the golden / bench /
-//! selftest harness: the frame sequence is then exactly the synchronous one).
+//! once: PMREM, a shadow map with `autoUpdate` off); a main-pass pipeline the pass marked with `require` (it takes
+//! the place of one that was on screen, or the screen would be empty without it: `bindlist::main_draw_waits`;
+//! all of a pass's are waited for together, `wait_required`, while the workers build them side by side); and
+//! everything in blocking mode (the golden / bench / selftest harness: the frame sequence is then exactly the
+//! synchronous one).
 //!
 //! Binding convention (src/xlat.rs): default uniform block buffer(1), FrObject buffer(2), FrFrame buffer(3), both
 //! stages, FrPass (gl_FragCoord origin) fragment buffer(0); vertex attribute at location L reads vertex buffer 4 + L
@@ -80,8 +83,11 @@ pub struct Prog {
     /// opaque draws that cannot (docs/notes/gpu-cost.md)
     pub discard: bool,
     /// the vertex stage reads the instance index (gl_InstanceID: instanced morph targets, a game's own lookups).
-    /// SPIRV-Cross gives it GL's meaning (counted from the draw's first instance), so such a draw is never split
-    /// into instance runs
+    /// A run drawn with a base instance would still see the instance's own index (glslang's relaxed Vulkan rules
+    /// make gl_InstanceID gl_InstanceIndex, SPIRV-Cross emits Metal's `[[instance_id]]` for it without subtracting
+    /// the base instance, and Metal counts from the base instance), but a stage that looks things up per instance
+    /// may place the instance with them: its bounds are not instanceMatrix x the geometry's, so such a draw is
+    /// never split into instance runs
     pub instance_id: bool,
 }
 
@@ -178,6 +184,8 @@ pub struct Programs {
     pub pipeline_ms: f64,
     skipped: Cell<u64>,
     skipped_at_poll: u64,
+    /// pending slots the pass being prepared must not skip (`require`), until `wait_required`
+    required: Vec<u32>,
     stats: CompileStats,
     last_poll: Option<Instant>,
     last_persist: Instant,
@@ -360,6 +368,7 @@ impl Programs {
             pipeline_ms: 0.0,
             skipped: Cell::new(0),
             skipped_at_poll: 0,
+            required: Vec::new(),
             stats: CompileStats { blocking, workers, ..Default::default() },
             last_poll: None,
             last_persist: Instant::now(),
@@ -631,9 +640,39 @@ impl Programs {
         }
     }
 
+    /// Slot `i` is queued or compiling: a draw that needs it is skipped unless the pass `require`s it.
+    pub fn pending(&self, i: u32) -> bool { matches!(self.slots.get(i as usize), Some(Slot::Pending { .. })) }
+
+    /// The pass being prepared must not skip the draws of slot `i` (see the module doc): `wait_required` waits
+    /// for it. Nothing to do for a slot that is ready or failed.
+    pub fn require(&mut self, i: u32) {
+        if self.pending(i) && !self.required.contains(&i) {
+            self.required.push(i);
+        }
+    }
+
+    /// Wait for every slot `require`d since the last call (the workers build them side by side: the wait is the
+    /// longest build, not the sum). Returns how many pipelines were waited for.
+    pub fn wait_required(&mut self) -> usize {
+        if self.required.is_empty() {
+            return 0;
+        }
+        let req = std::mem::take(&mut self.required);
+        let keys: Vec<PipelineKey> = self.waiting_pipes.iter().filter(|(_, slots)| slots.iter().any(|s| req.contains(s))).map(|(k, _)| *k).collect();
+        let t = Instant::now();
+        for k in &keys {
+            self.compiler.wait_pipeline(k);
+        }
+        self.stats.waits += keys.len() as u64;
+        self.stats.wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+        self.drain();
+        keys.len()
+    }
+
     /// The pipeline slot for a material instance drawn with `sig` streams: queued for compilation on first use
     /// (ready at once when the manifest prewarmed it), then cached; a failed build is cached too. None: it failed.
-    /// The main pass never waits; a render target or shadow map does (see the module doc), as does blocking mode.
+    /// The main pass does not wait here (its caller may `require` the slot); a render target or shadow map does (see
+    /// the module doc), as does blocking mode.
     pub fn pipeline(&mut self, _dev: &Device, m: &ProgramMaterialMeta, sig: StreamSig, target: Target) -> Option<u32> {
         let key = match target {
             Target::Main | Target::Rt(_) => PipeKey { prog: m.program, blend: three::blend_of(m), color_write: m.color_write, sig, target },

@@ -422,7 +422,8 @@ impl ThreeScene {
     fn upload_program_material(&mut self, dev: &Device, id: u32, meta: &str) -> Result<(), String> {
         let m: ProgramMaterialMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
         let depth = self.progs.depth(dev, &m);
-        self.mats3.insert(id, Mat3State::new(m, depth));
+        let state = Mat3State::new(m, depth, self.mats3.get(&id), &self.progs);
+        self.mats3.insert(id, state);
         Ok(())
     }
 }
