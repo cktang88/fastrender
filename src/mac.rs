@@ -20,6 +20,7 @@ use block2::RcBlock;
 use glam::{Mat4, Vec3, Vec4};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2::ClassType;
 use objc2_foundation::NSString;
 use objc2_metal::*;
 use objc2_metal_fx::*;
@@ -39,6 +40,17 @@ type DepthState = Retained<ProtocolObject<dyn MTLDepthStencilState>>;
 type CmdBuf = ProtocolObject<dyn MTLCommandBuffer>;
 type RenderEnc = ProtocolObject<dyn MTLRenderCommandEncoder>;
 type Scaler = Retained<ProtocolObject<dyn MTLFXSpatialScaler>>;
+type TemporalScaler = Retained<ProtocolObject<dyn MTLFXTemporalScaler>>;
+type ComputePipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
+
+/// The MetalFX effect between the internal resolution and the output.
+enum Fx {
+    Spatial(Scaler),
+    Temporal(TemporalScaler),
+}
+
+/// Motion vectors for MetalFX temporal: RG16Float, UV units of the content rect (see core::reproject_motion).
+const MOTION_FORMAT: MTLPixelFormat = MTLPixelFormat::RG16Float;
 
 /// Size of the per-frame resource ring. The number of frames actually allowed in flight is
 /// `Renderer::in_flight` (2 when windowed for latency, 3 when benchmarking for throughput).
@@ -102,10 +114,21 @@ pub struct Caps {
     /// Apple-family GPU: memoryless attachments + programmable blending (tile reads)
     pub apple_gpu: bool,
     pub metalfx_spatial: bool,
+    pub metalfx_temporal: bool,
+    /// upscale factors (output / input, per axis) the temporal scaler supports on this device
+    pub temporal_factor: (f32, f32),
 }
 
 pub fn caps(dev: &Device) -> Caps {
-    Caps { apple_gpu: dev.supportsFamily(MTLGPUFamily::Apple7), metalfx_spatial: unsafe { MTLFXSpatialScalerDescriptor::supportsDevice(dev) } }
+    let metalfx_temporal = unsafe { MTLFXTemporalScalerDescriptor::supportsDevice(dev) };
+    // supportedInputContent{Min,Max}ScaleForDevice only exists on newer MetalFX; assume 1..2x without it
+    let query = MTLFXTemporalScalerDescriptor::class().metaclass().responds_to(objc2::sel!(supportedInputContentMaxScaleForDevice:));
+    let temporal_factor = if metalfx_temporal && query {
+        unsafe { (MTLFXTemporalScalerDescriptor::supportedInputContentMinScaleForDevice(dev), MTLFXTemporalScalerDescriptor::supportedInputContentMaxScaleForDevice(dev)) }
+    } else {
+        (1.0, 2.0)
+    };
+    Caps { apple_gpu: dev.supportsFamily(MTLGPUFamily::Apple7), metalfx_spatial: unsafe { MTLFXSpatialScalerDescriptor::supportsDevice(dev) }, metalfx_temporal, temporal_factor }
 }
 
 pub fn device_name() -> String { device().name().to_string() }
@@ -138,7 +161,9 @@ const VOXEL: usize = 1;
 const SCRIPT: usize = 2;
 
 struct Pipelines {
-    cull: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    cull: ComputePipeline,
+    /// MetalFX temporal: motion vectors from depth reprojection
+    motion: ComputePipeline,
     forward: [RenderPipeline; 3],
     shadow: [RenderPipeline; 3],
     gbuffer: [Option<RenderPipeline>; 3],
@@ -210,8 +235,10 @@ impl Pipelines {
             d.setDepthWriteEnabled(write);
             dev.newDepthStencilStateWithDescriptor(&d).expect("depth state")
         };
+        let motion = dev.newComputePipelineStateWithFunction_error(&*func("motion_from_depth")?).map_err(|e| format!("motion_from_depth: {}", e.localizedDescription()))?;
         Ok(Pipelines {
             cull,
+            motion,
             forward: [
                 render("vs_main", Some("fs_forward"), &fwd_att, d32)?,
                 render("vs_voxel", Some("fs_forward"), &fwd_att, d32)?,
@@ -531,17 +558,21 @@ struct Targets {
     path: RenderPath,
     memoryless: bool,
     upscale: Upscale,
-    depth: Texture,
+    /// depth; with MetalFX temporal it is stored and ping-ponged like `color` (read after the pass by
+    /// the motion kernel and MetalFX), otherwise both entries are the same (memoryless) texture
+    depth: [Texture; 2],
     gbuf: Vec<Texture>,
     /// ping-pong internal colour, so frame N's main pass doesn't wait on frame N-1's upscale read
     color: [Texture; 2],
-    scaler: Option<Scaler>,
+    scaler: Option<Fx>,
+    /// MetalFX temporal: motion vectors (RG16Float) at the internal resolution
+    motion: Option<[Texture; 2]>,
     /// offscreen final image at output size (bench/selftest); windowed renders into the drawable
     offscreen: Texture,
 }
 
 impl Targets {
-    fn new(dev: &Device, cfg: &Config, out: (usize, usize), scale: f32) -> Result<Self, String> {
+    fn new(dev: &Device, cfg: &Config, caps: Caps, out: (usize, usize), scale: f32) -> Result<Self, String> {
         let scale = scale.clamp(0.25, 1.0);
         let alloc = (((out.0 as f32 * scale).ceil() as usize).clamp(8, out.0), ((out.1 as f32 * scale).ceil() as usize).clamp(8, out.1));
         let transient = if cfg.memoryless { MTLStorageMode::Memoryless } else { MTLStorageMode::Private };
@@ -552,9 +583,30 @@ impl Targets {
             Vec::new()
         };
         // MetalFX sized from the real internal resolution (not the output): its cost follows its input
-        let scaler = if cfg.upscale == Upscale::Spatial && alloc != out { Some(make_scaler(dev, alloc, out)?) } else { None };
-        let fx_usage = scaler.as_ref().map(|s| unsafe { s.outputTextureUsage() }).unwrap_or(MTLTextureUsage::empty());
-        let color = || texture(dev, OUT_FORMAT, alloc.0, alloc.1, rt | MTLTextureUsage::ShaderRead, MTLStorageMode::Private);
+        let scaler = match cfg.upscale {
+            _ if alloc == out => None,
+            Upscale::Spatial => Some(Fx::Spatial(make_scaler(dev, alloc, out)?)),
+            Upscale::Temporal => Some(Fx::Temporal(make_temporal_scaler(dev, caps, alloc, out, scale)?)),
+            Upscale::Bilinear => None,
+        };
+        let (fx_out, fx_color, fx_depth, fx_motion) = match &scaler {
+            Some(Fx::Spatial(s)) => unsafe { (s.outputTextureUsage(), s.colorTextureUsage(), MTLTextureUsage::empty(), MTLTextureUsage::empty()) },
+            Some(Fx::Temporal(s)) => unsafe { (s.outputTextureUsage(), s.colorTextureUsage(), s.depthTextureUsage(), s.motionTextureUsage()) },
+            None => (MTLTextureUsage::empty(), MTLTextureUsage::empty(), MTLTextureUsage::empty(), MTLTextureUsage::empty()),
+        };
+        let temporal = matches!(scaler, Some(Fx::Temporal(_)));
+        // temporal reads depth twice after the pass (motion kernel + MetalFX): it must be stored, so
+        // it can't be memoryless. The G-buffer stays in tile memory either way.
+        let depth = if temporal {
+            let d = || texture(dev, MTLPixelFormat::Depth32Float, alloc.0, alloc.1, rt | MTLTextureUsage::ShaderRead | fx_depth, MTLStorageMode::Private);
+            [d(), d()]
+        } else {
+            let d = texture(dev, MTLPixelFormat::Depth32Float, alloc.0, alloc.1, rt, transient);
+            [d.clone(), d]
+        };
+        let mv = || texture(dev, MOTION_FORMAT, alloc.0, alloc.1, MTLTextureUsage::ShaderWrite | MTLTextureUsage::ShaderRead | fx_motion, MTLStorageMode::Private);
+        let motion = temporal.then(|| [mv(), mv()]);
+        let color = || texture(dev, OUT_FORMAT, alloc.0, alloc.1, rt | MTLTextureUsage::ShaderRead | fx_color, MTLStorageMode::Private);
         Ok(Targets {
             out,
             alloc,
@@ -562,13 +614,16 @@ impl Targets {
             path: cfg.path,
             memoryless: cfg.memoryless,
             upscale: cfg.upscale,
-            depth: texture(dev, MTLPixelFormat::Depth32Float, alloc.0, alloc.1, rt, transient),
+            depth,
             gbuf,
             color: [color(), color()],
             scaler,
-            offscreen: texture(dev, OUT_FORMAT, out.0, out.1, fx_usage | rt | MTLTextureUsage::ShaderRead, MTLStorageMode::Private),
+            motion,
+            offscreen: texture(dev, OUT_FORMAT, out.0, out.1, fx_out | rt | MTLTextureUsage::ShaderRead, MTLStorageMode::Private),
         })
     }
+
+    fn temporal(&self) -> bool { matches!(self.scaler, Some(Fx::Temporal(_))) }
 
     /// Can these targets serve `cfg` at `scale` without reallocating?
     fn matches(&self, cfg: &Config, out: (usize, usize), scale: f32) -> bool {
@@ -597,6 +652,82 @@ fn make_scaler(dev: &Device, input: (usize, usize), output: (usize, usize)) -> R
         d.setColorProcessingMode(MTLFXSpatialScalerColorProcessingMode::Perceptual);
         d.newSpatialScalerWithDevice(dev).ok_or_else(|| "MetalFX spatial scaler creation failed".to_string())
     }
+}
+
+/// MTLFXTemporalScaler (the classic one: we encode into an MTLCommandBuffer, not an MTL4 one).
+///
+/// `input` is the allocated internal size; the content actually rendered may be smaller (dynamic
+/// resolution) and is set per frame with `inputContentWidth/Height`, so a DynRes change never
+/// recreates the scaler. Where the OS has `inputContentPropertiesEnabled`, the content scale range is
+/// declared up front: from the allocation itself down to `Targets::matches`'s 0.7x reallocation
+/// threshold, clamped to what the device supports.
+///
+/// Colour input is display-referred LDR (BGRA8, already tone-mapped, the same texture the spatial path
+/// reads), so auto-exposure is off and no exposure texture is bound (exposure 1); see
+/// docs/notes/metalfx-temporal.md for why the tone map stays before the upscale.
+fn make_temporal_scaler(dev: &Device, caps: Caps, input: (usize, usize), output: (usize, usize), alloc_scale: f32) -> Result<TemporalScaler, String> {
+    unsafe {
+        let d = MTLFXTemporalScalerDescriptor::new();
+        d.setInputWidth(input.0);
+        d.setInputHeight(input.1);
+        d.setOutputWidth(output.0);
+        d.setOutputHeight(output.1);
+        d.setColorTextureFormat(OUT_FORMAT);
+        d.setDepthTextureFormat(MTLPixelFormat::Depth32Float);
+        d.setMotionTextureFormat(MOTION_FORMAT);
+        d.setOutputTextureFormat(OUT_FORMAT);
+        d.setAutoExposureEnabled(false);
+        // build the fast pipelines now, not during the first frames (benchmarks and first impressions)
+        // (newer MetalFX only: guard each newer selector so older macOS still gets a working scaler)
+        let cls = MTLFXTemporalScalerDescriptor::class();
+        if cls.responds_to(objc2::sel!(setRequiresSynchronousInitialization:)) {
+            d.setRequiresSynchronousInitialization(true);
+        }
+        if cls.responds_to(objc2::sel!(setInputContentPropertiesEnabled:)) {
+            let (lo, hi) = caps.temporal_factor;
+            let min = (output.0 as f32 / input.0 as f32).clamp(lo, hi);
+            let max = (1.0 / (alloc_scale * 0.7)).clamp(min, hi);
+            d.setInputContentPropertiesEnabled(true);
+            d.setInputContentMinScale(min);
+            d.setInputContentMaxScale(max);
+        }
+        d.newTemporalScalerWithDevice(dev).ok_or_else(|| "MetalFX temporal scaler creation failed".to_string())
+    }
+}
+
+/// Sign applied to the jitter handed to MetalFX (debug knob for checking the convention on a real Mac:
+/// `FASTRENDER_MFX_JITTER_SIGN=-1`; with the wrong sign a still image visibly shimmers/blurs).
+fn mfx_jitter_sign() -> f32 {
+    static SIGN: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SIGN.get_or_init(|| if std::env::var("FASTRENDER_MFX_JITTER_SIGN").ok().as_deref() == Some("-1") { -1.0 } else { 1.0 })
+}
+
+/// Parameters of the `motion_from_depth` kernel (matches `MotionParams` in the shader).
+#[repr(C)]
+struct MotionParams {
+    inv_cur_jittered: [[f32; 4]; 4],
+    cur: [[f32; 4]; 4],
+    prev: [[f32; 4]; 4],
+    content: [f32; 4],
+}
+
+/// Encode the motion-vector pass: depth (rendered with `cur_jittered`) → RG16Float motion.
+fn encode_motion(cb: &CmdBuf, pipe: &ComputePipeline, depth: &Tex, motion: &Tex, cur_jittered: &Mat4, cur: &Mat4, prev: &Mat4, content: (usize, usize)) {
+    let p = MotionParams {
+        inv_cur_jittered: cur_jittered.inverse().to_cols_array_2d(),
+        cur: cur.to_cols_array_2d(),
+        prev: prev.to_cols_array_2d(),
+        content: [content.0 as f32, content.1 as f32, 0.0, 0.0],
+    };
+    let enc = cb.computeCommandEncoder().expect("compute encoder");
+    enc.setComputePipelineState(pipe);
+    unsafe {
+        enc.setTexture_atIndex(Some(depth), 0);
+        enc.setTexture_atIndex(Some(motion), 1);
+        enc.setBytes_length_atIndex(NonNull::new(&p as *const MotionParams as *mut c_void).unwrap(), std::mem::size_of::<MotionParams>(), 0);
+        enc.dispatchThreads_threadsPerThreadgroup(MTLSize { width: content.0, height: content.1, depth: 1 }, MTLSize { width: 16, height: 16, depth: 1 });
+    }
+    enc.endEncoding();
 }
 
 /// Counting semaphore for frames in flight.
@@ -647,6 +778,12 @@ pub struct Renderer {
     shader_mtime: Option<SystemTime>,
     /// draws issued by the last main pass (voxel: chunks drawn)
     pub last_draws: usize,
+    /// MetalFX temporal: this frame's sub-pixel jitter (pixels, y down; zero when temporal is off)
+    jitter: glam::Vec2,
+    /// previous frame's unjittered view-projection and eye (motion vectors, cut detection)
+    prev_vp: Option<(Mat4, Vec3)>,
+    /// discard MetalFX history on the next temporal encode (first frame, resize, scene switch, cut)
+    history_reset: bool,
 }
 
 impl Renderer {
@@ -660,7 +797,7 @@ impl Renderer {
         let pipes = Pipelines::new(&dev, &src, caps)?;
         let queue = dev.newCommandQueue().ok_or("no command queue")?;
         let (content, lights) = Content::build(&dev, &cfg)?;
-        let targets = Targets::new(&dev, &cfg, (cfg.width as usize, cfg.height as usize), cfg.scale)?;
+        let targets = Targets::new(&dev, &cfg, caps, (cfg.width as usize, cfg.height as usize), cfg.scale)?;
         let (cv, ci) = cube();
         let in_flight = in_flight.clamp(1, FRAME_SLOTS);
         let mut r = Renderer {
@@ -684,6 +821,9 @@ impl Renderer {
             shader_mtime: std::fs::metadata(&shader_path).and_then(|m| m.modified()).ok(),
             shader_path,
             last_draws: 0,
+            jitter: glam::Vec2::ZERO,
+            prev_vp: None,
+            history_reset: true,
             caps,
             cfg,
             dev,
@@ -702,6 +842,20 @@ impl Renderer {
                 return Err("skipped: single-pass deferred needs an Apple-family GPU (tile reads)".into());
             }
             cfg.memoryless = false;
+        }
+        if cfg.upscale == Upscale::Temporal && cfg.scale < 1.0 {
+            if caps.metalfx_temporal {
+                // below the device's largest upscale factor MetalFX can't take the content: clamp
+                let min_scale = 1.0 / caps.temporal_factor.1.max(1.0);
+                if cfg.scale < min_scale {
+                    println!("MetalFX temporal: scale {:.2} below this device's limit, using {min_scale:.2}", cfg.scale);
+                    cfg.scale = min_scale;
+                }
+            } else {
+                // same policy as spatial-unsupported below, but with a working fallback: spatial
+                println!("MetalFX temporal scaler not supported on this device: falling back to MetalFX spatial");
+                cfg.upscale = Upscale::Spatial;
+            }
         }
         if cfg.upscale == Upscale::Spatial && cfg.scale < 1.0 && !caps.metalfx_spatial {
             return Err("skipped: MetalFX spatial scaler not supported on this device".into());
@@ -758,9 +912,12 @@ impl Renderer {
             self.static_lights = lights;
             self.frames = self.make_frames();
             self.shadow_center = None;
+            self.history_reset = true; // scene switch
+            self.prev_vp = None;
         }
         if targets_changed {
-            self.targets = Targets::new(&self.dev, &cfg, out, cfg.scale)?;
+            self.targets = Targets::new(&self.dev, &cfg, self.caps, out, cfg.scale)?;
+            self.history_reset = true; // new scaler, resize
         }
         self.cfg = cfg;
         Ok(())
@@ -779,6 +936,12 @@ impl Renderer {
     }
 
     pub fn frame_count(&self) -> u64 { self.frame }
+
+    /// This frame's sub-pixel jitter in pixels of the content rect (x right, y down), zero unless
+    /// MetalFX temporal is active. Any path that builds its own projection (e.g. packing three.js's
+    /// `projectionMatrix` into a uniform block) must apply it with `core::jittered`.
+    #[allow(dead_code)]
+    pub fn jitter(&self) -> glam::Vec2 { self.jitter }
 
     /// Completed-frame GPU times since the last call.
     pub fn take_gpu_times(&self) -> Vec<f64> { std::mem::take(&mut *self.gpu_times.lock().unwrap()) }
@@ -902,7 +1065,23 @@ impl Renderer {
         };
         let (vp, eye) = self.view_proj(t);
         let shadow = self.shadow_due(eye);
-        self.write_uniforms(slot, t, &vp, eye);
+        let direct = self.content_size() == self.targets.out;
+        // MetalFX temporal: jitter the projection natively for every content path (city, voxel,
+        // script, three: a clip-space translation of the whole view-projection, equal to jittering
+        // three's projection after gl_to_metal). Culling keeps the unjittered planes.
+        let temporal = self.targets.temporal() && !direct;
+        let (cw, ch) = self.content_size();
+        self.jitter = if temporal { jitter_px(self.frame) } else { glam::Vec2::ZERO };
+        let vp_jittered = if temporal { jittered(vp, self.jitter, (cw as f32, ch as f32)) } else { vp };
+        let prev_vp = match self.prev_vp {
+            Some((p, prev_eye)) if !is_camera_cut(prev_eye, eye) => p,
+            _ => {
+                self.history_reset = true; // first frame or camera cut: no valid history
+                vp
+            }
+        };
+        self.prev_vp = Some((vp, eye));
+        self.write_uniforms(slot, t, &vp_jittered, eye);
         let cb = self.queue.commandBuffer().expect("command buffer");
         let planes = frustum_planes(&vp);
         let shadow_planes = frustum_planes(&self.shadow_vp);
@@ -922,13 +1101,17 @@ impl Renderer {
         }
         let d = drawable();
         let out_tex: Option<Texture> = d.as_ref().map(|d| d.texture());
-        let direct = self.content_size() == self.targets.out;
         let color_idx = (self.frame % 2) as usize;
         {
             let final_tex: Texture = match out_tex { Some(t) => t, None => self.targets.offscreen.clone() };
             // scale 1: render straight into the output, no upscale pass
             let color: Texture = if direct { final_tex.clone() } else { self.targets.color[color_idx].clone() };
             self.encode_main(&cb, slot, &color, &planes);
+            if temporal {
+                if let Some(m) = &self.targets.motion {
+                    encode_motion(&cb, &self.pipes.motion, &self.targets.depth[color_idx], &m[color_idx], &vp_jittered, &vp, &prev_vp, (cw, ch));
+                }
+            }
             if !direct {
                 self.encode_upscale(&cb, &color, &final_tex);
             }
@@ -990,9 +1173,10 @@ impl Renderer {
         rp.setRenderTargetWidth(cw);
         rp.setRenderTargetHeight(ch);
         let da = rp.depthAttachment();
-        da.setTexture(Some(&self.targets.depth));
+        da.setTexture(Some(&self.targets.depth[(self.frame % 2) as usize]));
         da.setLoadAction(MTLLoadAction::Clear);
-        da.setStoreAction(transient_store);
+        // MetalFX temporal reads depth after the pass: the one extra DRAM write it costs
+        da.setStoreAction(if self.targets.temporal() { MTLStoreAction::Store } else { transient_store });
         da.setClearDepth(1.0);
         let cas = rp.colorAttachments();
         unsafe {
@@ -1070,10 +1254,31 @@ impl Renderer {
         self.last_draws = draws;
     }
 
-    fn encode_upscale(&self, cb: &CmdBuf, color: &Tex, out: &Tex) {
+    fn encode_upscale(&mut self, cb: &CmdBuf, color: &Tex, out: &Tex) {
         let (cw, ch) = self.content_size();
+        let idx = (self.frame % 2) as usize;
         match &self.targets.scaler {
-            Some(s) => unsafe {
+            Some(Fx::Temporal(s)) => unsafe {
+                let motion = &self.targets.motion.as_ref().expect("temporal targets have motion")[idx];
+                s.setColorTexture(Some(color));
+                s.setDepthTexture(Some(&self.targets.depth[idx]));
+                s.setMotionTexture(Some(motion));
+                s.setOutputTexture(Some(out));
+                // dynamic resolution: only the content rect changes, the scaler is not recreated
+                s.setInputContentWidth(cw);
+                s.setInputContentHeight(ch);
+                // motion is in UV of the content rect: scale to content pixels
+                s.setMotionVectorScaleX(cw as f32);
+                s.setMotionVectorScaleY(ch as f32);
+                let sign = mfx_jitter_sign();
+                s.setJitterOffsetX(self.jitter.x * sign);
+                s.setJitterOffsetY(self.jitter.y * sign);
+                s.setDepthReversed(false); // depth_less, cleared to 1
+                s.setReset(self.history_reset);
+                s.encodeToCommandBuffer(cb);
+                self.history_reset = false;
+            },
+            Some(Fx::Spatial(s)) => unsafe {
                 // MetalFX writes straight into the output (the drawable when windowed): no extra copy
                 s.setColorTexture(Some(color));
                 s.setOutputTexture(Some(out));
@@ -1183,7 +1388,94 @@ fn save_png(path: &str, w: usize, h: usize, px: &[u8]) -> Result<(), String> {
     enc.write_header().and_then(|mut wr| wr.write_image_data(px)).map_err(|e| e.to_string())
 }
 
+fn f16_to_f32(h: u16) -> f32 {
+    let (s, e, m) = ((h >> 15) as u32, ((h >> 10) & 31) as u32, (h & 1023) as u32);
+    let mag = match e {
+        0 => m as f32 * 2f32.powi(-24),
+        31 => if m == 0 { f32::INFINITY } else { f32::NAN },
+        _ => (1.0 + m as f32 / 1024.0) * 2f32.powi(e as i32 - 15),
+    };
+    if s == 1 { -mag } else { mag }
+}
+
+/// GPU check of the `motion_from_depth` kernel against its Rust mirror (`core::reproject_motion`):
+/// a depth buffer cleared to a known value (a surface of constant view depth), a known camera move
+/// (sideways + forward + a small yaw) and a jittered current frame, then a few motion texels read back.
+/// Uses only a render-pass clear and a compute dispatch, so it runs on CI's paravirtual GPU, which has
+/// no MetalFX temporal scaler.
+pub fn motion_selftest() -> Result<(), String> {
+    let dev = device();
+    let src = std::fs::read_to_string("shaders/fastrender.metal").unwrap_or_else(|_| SHADER_SRC.to_string());
+    let pipes = Pipelines::new(&dev, &src, caps(&dev))?;
+    let queue = dev.newCommandQueue().ok_or("no command queue")?;
+    // content rect smaller than the allocation, as with dynamic resolution
+    let (aw, ah) = (96usize, 64usize);
+    let (cw, ch) = (80usize, 50usize);
+    let depth_value = 0.985f32;
+    let depth = texture(&dev, MTLPixelFormat::Depth32Float, aw, ah, MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead, MTLStorageMode::Private);
+    let motion = texture(&dev, MOTION_FORMAT, aw, ah, MTLTextureUsage::ShaderWrite | MTLTextureUsage::ShaderRead, MTLStorageMode::Private);
+    let size = (cw as f32, ch as f32);
+    let cam = |eye: Vec3, yaw: f32| {
+        let view = glam::camera::rh::view::look_to_mat4(eye, Vec3::new(yaw.sin(), 0.0, -yaw.cos()), Vec3::Y);
+        glam::camera::rh::proj::directx::perspective(60f32.to_radians(), size.0 / size.1, 0.1, 900.0) * view
+    };
+    let prev = cam(Vec3::ZERO, 0.0);
+    let cur = cam(Vec3::new(0.8, 0.1, -1.5), 0.02);
+    let cur_j = jittered(cur, jitter_px(3), size);
+
+    let cb = queue.commandBuffer().ok_or("command buffer")?;
+    let rp = MTLRenderPassDescriptor::new();
+    let da = rp.depthAttachment();
+    da.setTexture(Some(&depth));
+    da.setLoadAction(MTLLoadAction::Clear);
+    da.setStoreAction(MTLStoreAction::Store);
+    da.setClearDepth(depth_value as f64);
+    cb.renderCommandEncoderWithDescriptor(&rp).ok_or("depth clear")?.endEncoding();
+    encode_motion(&cb, &pipes.motion, &depth, &motion, &cur_j, &cur, &prev, (cw, ch));
+    let buf = dev.newBufferWithLength_options(aw * ah * 4, MTLResourceOptions::StorageModeShared).ok_or("readback buffer")?;
+    let b = cb.blitCommandEncoder().ok_or("blit")?;
+    unsafe {
+        b.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
+            &motion, 0, 0, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: aw, height: ah, depth: 1 }, &buf, 0, aw * 4, aw * ah * 4,
+        );
+    }
+    b.endEncoding();
+    cb.commit();
+    cb.waitUntilCompleted();
+    if let Some(e) = cb.error() {
+        return Err(format!("GPU error: {}", e.localizedDescription()));
+    }
+    let px = unsafe { std::slice::from_raw_parts(buf.contents().as_ptr() as *const u16, aw * ah * 2) };
+    let inv = cur_j.inverse();
+    let mut worst = 0f32;
+    let mut lines = Vec::new();
+    for (x, y) in [(0, 0), (cw - 1, 0), (cw / 2, ch / 2), (7, ch - 1), (cw - 1, ch - 1), (33, 17)] {
+        let i = (y * aw + x) * 2;
+        let gpu = glam::Vec2::new(f16_to_f32(px[i]), f16_to_f32(px[i + 1])) * glam::Vec2::new(size.0, size.1);
+        let cpu = reproject_motion(&inv, &cur, &prev, (x as u32, y as u32), depth_value, size) * glam::Vec2::new(size.0, size.1);
+        // RG16Float: ~11 bits of mantissa on UV-sized values; compare in pixels
+        let err = (gpu - cpu).length();
+        worst = worst.max(err / (0.05 + 2e-3 * cpu.length()));
+        lines.push(format!("    ({x:>2},{y:>2}) gpu {:>8.3} {:>8.3} px   cpu {:>8.3} {:>8.3} px   err {err:.4}", gpu.x, gpu.y, cpu.x, cpu.y));
+        if !gpu.is_finite() || cpu.length() < 0.5 {
+            worst = f32::INFINITY; // the move must produce visible motion at every probe
+        }
+    }
+    println!("motion-vector pass (depth reprojection), {cw}x{ch} content in {aw}x{ah}:");
+    for l in &lines { println!("{l}"); }
+    if worst <= 1.0 { Ok(()) } else { Err("GPU motion vectors differ from core::reproject_motion".into()) }
+}
+
 pub fn selftest(cfg: Config) {
+    if cfg.upscale == Upscale::Temporal {
+        match motion_selftest() {
+            Ok(()) => println!("motion-vector selftest: PASS"),
+            Err(e) => {
+                println!("motion-vector selftest: FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     match Renderer::new(cfg, FRAME_SLOTS) {
         Ok(mut r) => {
             if let Some(ms) = r.content_mesh_ms() {

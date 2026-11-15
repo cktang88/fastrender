@@ -1,7 +1,7 @@
 //! Platform-independent parts: config, procedural test city, camera path, culling math,
 //! frame statistics and the dynamic-resolution controller. Unit-tested on any OS.
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderPath {
@@ -30,6 +30,9 @@ pub enum Upscale {
     Bilinear,
     /// MetalFX spatial scaler
     Spatial,
+    /// MetalFX temporal scaler: sub-pixel jitter + depth-reprojected motion vectors (no per-shader
+    /// velocity output needed). Falls back to `Spatial` where the device lacks it.
+    Temporal,
 }
 
 #[derive(Clone, Debug)]
@@ -110,7 +113,7 @@ impl Config {
             match self.path { RenderPath::Forward => "forward", RenderPath::Deferred => "deferred" },
             if self.memoryless { "memoryless" } else { "stored" },
             self.scale,
-            match self.upscale { Upscale::Bilinear => "bilinear", Upscale::Spatial => "metalfx" },
+            match self.upscale { Upscale::Bilinear => "bilinear", Upscale::Spatial => "metalfx", Upscale::Temporal => "temporal" },
             if self.shadow_every == 0 { "cached".to_string() } else { format!("every{}", self.shadow_every) },
             self.lights,
             if self.gpu_cull { "gpu" } else { "off" },
@@ -132,7 +135,7 @@ impl Config {
                 "path" => self.path = match v.as_str() { "forward" => RenderPath::Forward, "deferred" => RenderPath::Deferred, _ => return Err(format!("bad --path {v}")) },
                 "memoryless" => self.memoryless = num(v)? != 0.0,
                 "scale" => self.scale = (num(v)? as f32).clamp(0.25, 1.0),
-                "upscale" => self.upscale = match v.as_str() { "bilinear" | "none" => Upscale::Bilinear, "metalfx" | "spatial" => Upscale::Spatial, _ => return Err(format!("bad --upscale {v}")) },
+                "upscale" => self.upscale = match v.as_str() { "bilinear" | "none" => Upscale::Bilinear, "metalfx" | "spatial" => Upscale::Spatial, "temporal" => Upscale::Temporal, _ => return Err(format!("bad --upscale {v}")) },
                 "shadow-every" => self.shadow_every = num(v)? as u32,
                 "lights" => self.lights = (num(v)? as u32).min(MAX_LIGHTS),
                 "cull" => self.gpu_cull = num(v)? != 0.0,
@@ -404,6 +407,77 @@ impl DynRes {
     }
 }
 
+// ------------------------------------------------------------------ temporal upscaling (MetalFX)
+//
+// Pure maths, mirrored by the `motion_from_depth` kernel in shaders/fastrender.metal and unit-tested
+// below. Conventions (docs/notes/metalfx-temporal.md):
+// - pixel coordinates: origin top-left, y down, pixel centres at +0.5 (Metal window coordinates);
+// - jitter `j` (pixels): the rasterised image is shifted by +j, i.e. a clip-space translation of
+//   (+2 jx / w, -2 jy / h). The same `j` goes to MTLFXTemporalScaler's `jitterOffsetX/Y` (the
+//   FSR2/DLSS convention, which MetalFX integrations such as Godot's pass straight through);
+// - motion (UV units of the current content rect): `prev_uv - cur_uv`, both from *unjittered*
+//   matrices; `motionVectorScale = content size` turns it into pixels. Apple's definition: an object
+//   that moved 10 px down and right this frame has motion (-10, -10).
+
+/// Number of jitter phases. 16 Halton(2,3) points cover a pixel well at 1.5-2x upscale; more phases
+/// (DLSS suggests 8 x factor^2) only help static images and slow convergence after motion.
+pub const JITTER_PHASES: u64 = 16;
+
+/// Radical inverse of `i` in `base` (Halton sequence), in [0, 1).
+pub fn halton(mut i: u32, base: u32) -> f32 {
+    let (mut f, mut r) = (1.0f64, 0.0f64);
+    while i > 0 {
+        f /= base as f64;
+        r += f * (i % base) as f64;
+        i /= base;
+    }
+    r as f32
+}
+
+/// Sub-pixel jitter for `frame`, in pixels, each component in [-0.5, 0.5). Index 0 of the Halton
+/// sequence is skipped (it is 0 in both bases).
+pub fn jitter_px(frame: u64) -> Vec2 {
+    let i = (frame % JITTER_PHASES) as u32 + 1;
+    Vec2::new(halton(i, 2) - 0.5, halton(i, 3) - 0.5)
+}
+
+/// Apply a sub-pixel jitter to a projection (or view-projection) matrix: a clip-space translation of
+/// (+2 jx / w, -2 jy / h) (times w), which shifts the rasterised image by `jitter_px` pixels
+/// (x right, y down) on a render target of `size` = (w, h) pixels (the *content* size with dynamic
+/// resolution).
+///
+/// It works on any matrix whose output is clip space, OpenGL or Metal convention alike (only x and y
+/// change), so it applies equally to `proj`, `proj * view`, or three.js's `projectionMatrix` before
+/// or after `three::gl_to_metal`. **A path that packs `projectionMatrix` into a uniform block for
+/// three's own translated GLSL shaders must pack `jittered(projectionMatrix, j, content_size)`**, with
+/// `j` = `Renderer::jitter()` for that frame, or MetalFX reconstructs a blurred, wobbling image.
+/// (Leave `modelViewMatrix`/`viewMatrix`/`cameraPosition` unjittered.)
+pub fn jittered(m: Mat4, jitter_px: Vec2, size: (f32, f32)) -> Mat4 {
+    Mat4::from_translation(Vec3::new(2.0 * jitter_px.x / size.0, -2.0 * jitter_px.y / size.1, 0.0)) * m
+}
+
+/// Rust mirror of the `motion_from_depth` kernel: the motion vector (UV of the content rect,
+/// `prev - cur`) of pixel `px` whose depth-buffer value is `depth`.
+/// `inv_cur_jittered` = inverse of the jittered view-projection the frame was rasterised with
+/// (it recovers the surface point the pixel centre sampled); `cur`/`prev` = the unjittered
+/// view-projections of this frame and the previous one (so the motion carries no jitter).
+pub fn reproject_motion(inv_cur_jittered: &Mat4, cur: &Mat4, prev: &Mat4, px: (u32, u32), depth: f32, content: (f32, f32)) -> Vec2 {
+    let uv = Vec2::new((px.0 as f32 + 0.5) / content.0, (px.1 as f32 + 0.5) / content.1);
+    let ndc = Vec2::new(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let w = *inv_cur_jittered * Vec4::new(ndc.x, ndc.y, depth, 1.0);
+    let w = w / w.w;
+    let to_uv = |c: Vec4| Vec2::new(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
+    let c = *cur * w;
+    let p = *prev * w;
+    if p.w <= 1e-6 || c.w <= 1e-6 {
+        return Vec2::ZERO; // behind the previous camera: no usable history
+    }
+    to_uv(p) - to_uv(c)
+}
+
+/// A camera jump this large in one frame (teleport, path wrap-around) is a cut: reset the history.
+pub fn is_camera_cut(prev_eye: Vec3, eye: Vec3) -> bool { prev_eye.distance(eye) > 10.0 }
+
 /// The benchmark matrix: each entry tests one hypothesis against its neighbour.
 pub fn bench_matrix(base: &Config) -> Vec<(String, Config)> {
     let mut v = Vec::new();
@@ -422,6 +496,8 @@ pub fn bench_matrix(base: &Config) -> Vec<(String, Config)> {
     v.push(("J deferred 0.5x, 256 lights".into(), mk(&|c| { c.path = Deferred; c.scale = 0.5; c.upscale = Spatial; c.lights = 256; })));
     v.push(("K shadow every frame (vs G)".into(), mk(&|c| { c.path = Deferred; c.scale = 0.5; c.upscale = Spatial; c.lights = 0; c.shadow_every = 1; })));
     v.push(("L no culling at all: frustum + prop distance off (vs G)".into(), mk(&|c| { c.path = Deferred; c.scale = 0.5; c.upscale = Spatial; c.lights = 0; c.gpu_cull = false; })));
+    v.push(("M forward 0.5x + MetalFX temporal (vs F)".into(), mk(&|c| { c.path = Forward; c.scale = 0.5; c.upscale = Temporal; c.lights = 0; })));
+    v.push(("N forward 0.67x + MetalFX temporal (vs B, M)".into(), mk(&|c| { c.path = Forward; c.scale = 0.67; c.upscale = Temporal; c.lights = 0; })));
     v
 }
 
@@ -502,6 +578,92 @@ mod tests {
     }
 
     #[test]
+    fn halton_sequence_and_jitter() {
+        let b2: Vec<f32> = (1..5).map(|i| halton(i, 2)).collect();
+        assert_eq!(b2, vec![0.5, 0.25, 0.75, 0.125]);
+        let b3: Vec<f32> = (1..5).map(|i| halton(i, 3)).collect();
+        for (a, b) in b3.iter().zip([1.0 / 3.0, 2.0 / 3.0, 1.0 / 9.0, 4.0 / 9.0]) {
+            assert!((a - b).abs() < 1e-6);
+        }
+        // jitter: in range, well spread, about zero-mean over a cycle, periodic
+        let js: Vec<Vec2> = (0..JITTER_PHASES).map(jitter_px).collect();
+        assert!(js.iter().all(|j| j.x >= -0.5 && j.x < 0.5 && j.y >= -0.5 && j.y < 0.5));
+        let mean = js.iter().fold(Vec2::ZERO, |a, j| a + *j) / js.len() as f32;
+        assert!(mean.length() < 0.07, "mean jitter {mean}");
+        for q in 0..4 {
+            let n = js.iter().filter(|j| (j.x >= 0.0) == (q & 1 == 1) && (j.y >= 0.0) == (q & 2 == 2)).count();
+            assert!((2..=6).contains(&n), "quadrant {q}: {n} of 16");
+        }
+        assert_eq!(jitter_px(3), jitter_px(3 + JITTER_PHASES));
+    }
+
+    fn test_cam(eye: Vec3, size: (f32, f32)) -> Mat4 {
+        let view = glam::camera::rh::view::look_to_mat4(eye, Vec3::NEG_Z, Vec3::Y);
+        glam::camera::rh::proj::directx::perspective(60f32.to_radians(), size.0 / size.1, 0.1, 900.0) * view
+    }
+
+    /// project a world point to pixel coordinates (y down) and its depth-buffer value
+    fn to_px(vp: &Mat4, w: Vec3, size: (f32, f32)) -> (Vec2, f32) {
+        let c = *vp * w.extend(1.0);
+        let n = c.truncate() / c.w;
+        (Vec2::new((n.x * 0.5 + 0.5) * size.0, (0.5 - n.y * 0.5) * size.1), n.z)
+    }
+
+    #[test]
+    fn jitter_shifts_the_image_not_the_depth() {
+        let size = (640.0, 400.0);
+        let vp = test_cam(Vec3::ZERO, size);
+        let w = Vec3::new(3.0, 1.0, -20.0);
+        let j = Vec2::new(0.25, -0.375);
+        let (a, za) = to_px(&vp, w, size);
+        let (b, zb) = to_px(&jittered(vp, j, size), w, size);
+        assert!(((b - a) - j).length() < 1e-3, "image moved by {} not {j}", b - a);
+        assert!((za - zb).abs() < 1e-7, "jitter must not change depth");
+        // same result jittering the projection alone (three.js: after gl_to_metal) or the view-projection
+        let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+        let proj = glam::camera::rh::proj::directx::perspective(60f32.to_radians(), size.0 / size.1, 0.1, 900.0);
+        assert!((jittered(proj, j, size) * view - jittered(proj * view, j, size)).abs_diff_eq(Mat4::ZERO, 1e-6));
+    }
+
+    #[test]
+    fn reprojection_of_a_static_point_under_camera_translation() {
+        let size = (640.0, 400.0);
+        let world = Vec3::new(2.0, 1.5, -25.0);
+        // previous frame: camera at the origin; this frame: 1 m to the right and 2 m forward
+        let prev = test_cam(Vec3::ZERO, size);
+        let cur = test_cam(Vec3::new(1.0, 0.0, -2.0), size);
+        for j in [Vec2::ZERO, jitter_px(5), jitter_px(11)] {
+            let cur_j = jittered(cur, j, size);
+            // the pixel that rasterised the point this frame (jittered), and its depth value
+            let (p, depth) = to_px(&cur_j, world, size);
+            let px = (p.x.floor() as u32, p.y.floor() as u32);
+            let m = reproject_motion(&cur_j.inverse(), &cur, &prev, px, depth, size);
+            // pixel delta of the point itself, prev - cur, unjittered: within a pixel of the motion
+            // read at the (pixel-centre-snapped) sample, with no trace of the jitter
+            let (pp, _) = to_px(&prev, world, size);
+            let (pc, _) = to_px(&cur, world, size);
+            let px_motion = m * Vec2::new(size.0, size.1);
+            assert!((px_motion - (pp - pc)).length() < 0.2, "jitter {j}: {px_motion} vs {}", pp - pc);
+            // signs: the camera's 1 m move right dominates (the point sat further right last frame:
+            // +x); the point is above centre and was further away, i.e. nearer the centre (+y, down)
+            assert!(px_motion.x > 5.0 && px_motion.y > 0.0, "{px_motion}");
+        }
+        // closed form for a pure sideways move of t = 1 m at distance z = 25 m:
+        // the image moves left by f_x * (w/2) * t / z, so motion (prev - cur) = +that
+        let cur = test_cam(Vec3::new(1.0, 0.0, 0.0), size);
+        let (p, depth) = to_px(&cur, Vec3::new(1.0, 0.0, -25.0), size); // screen centre
+        let m = reproject_motion(&cur.inverse(), &cur, &prev, (p.x as u32, p.y as u32), depth, size) * Vec2::new(size.0, size.1);
+        let fx = 1.0 / (30f32.to_radians().tan() * size.0 / size.1);
+        let expected = fx * (size.0 * 0.5) / 25.0; // ~ 34.6 px
+        assert!((m.x - expected).abs() < 0.05 && m.y.abs() < 0.05, "{m} vs ({expected}, 0)");
+        // a still camera gives zero motion whatever the jitter
+        let j = jittered(prev, jitter_px(7), size);
+        let still = reproject_motion(&j.inverse(), &prev, &prev, (100, 300), 0.97, size);
+        assert!(still.length() < 1e-5, "{still}");
+        assert!(is_camera_cut(Vec3::ZERO, Vec3::new(0.0, 0.0, 50.0)) && !is_camera_cut(Vec3::ZERO, Vec3::new(0.0, 0.0, 0.2)));
+    }
+
+    #[test]
     fn args_parse() {
         let mut c = Config::default();
         let a: Vec<String> = "--path forward --scale 0.65 --size 1470x956 --lights 9999 --memoryless 0"
@@ -512,5 +674,9 @@ mod tests {
         assert_eq!(c.lights, MAX_LIGHTS);
         assert!(!c.memoryless);
         assert!(c.apply_args(&["--bogus".into(), "1".into()]).is_err());
+        c.apply_args(&["--upscale".into(), "temporal".into()]).unwrap();
+        assert_eq!(c.upscale, Upscale::Temporal);
+        assert!(c.label().contains("up=temporal"));
+        assert_eq!(bench_matrix(&c).iter().filter(|(_, r)| r.upscale == Upscale::Temporal).count(), 2);
     }
 }

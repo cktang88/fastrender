@@ -30,6 +30,30 @@ jobs:
           # known issue (docs/LOG.md): with GPU shader validation on, the paravirtual device drops
           # the shadow and full-screen draws silently. Kept visible here, not fatal.
           echo "--- shader validation (known paravirtual issue)"; MTL_SHADER_VALIDATION=1 ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000
+      - name: MetalFX temporal (motion-vector pass on the GPU; scaler fallback on the paravirtual GPU)
+        # API validation only: GPU shader validation drops draws on the paravirtual device (docs/LOG.md)
+        env:
+          MTL_DEBUG_LAYER: "1"
+        run: |
+          set -o pipefail
+          # 1. the depth-reprojection kernel vs its Rust mirror (core::reproject_motion), known camera move;
+          #    exits non-zero on mismatch. Then a full selftest frame through the temporal config.
+          ./target/release/fastrender selftest --path forward --upscale temporal --scale 0.5 --size 640x400 --props 20000 | tee temporal-selftest.txt
+          grep -q "motion-vector selftest: PASS" temporal-selftest.txt
+          # the frame still renders (output not blank)
+          grep "3 frame: output" temporal-selftest.txt | grep -v "mean rgba = 0 0 0 0"
+          # 2. screenshots with --upscale temporal (city forward, three.js). Where the device lacks the
+          #    temporal scaler (this runner) the renderer must say so and fall back to MetalFX spatial.
+          ./target/release/fastrender bench --path forward --upscale temporal --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --props 60000 --lights 16 --shot shot-forward-temporal.png | tee temporal-bench.txt
+          ./target/release/fastrender bench --three js/dist/three-city.js --upscale temporal --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --shot shot-three-temporal.png | tee -a temporal-bench.txt
+          test -s shot-forward-temporal.png && test -s shot-three-temporal.png
+          if ./target/release/fastrender probe | grep -q "metalfx_temporal: false"; then
+            grep -q "MetalFX temporal scaler not supported on this device: falling back to MetalFX spatial" temporal-bench.txt
+            grep -q "MetalFX temporal scaler not supported on this device: falling back to MetalFX spatial" temporal-selftest.txt
+            echo "temporal unsupported here: fallback to spatial logged, frames rendered"
+          else
+            echo "temporal scaler supported: ran MetalFX temporal"
+          fi
       - name: API-validation run + screenshots
         env:
           MTL_DEBUG_LAYER: "1"
