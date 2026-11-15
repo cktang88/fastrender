@@ -1488,14 +1488,28 @@ impl ThreeScene {
         if n == 0 {
             return;
         }
+        let prim = Self::primitive(d.flags);
         unsafe {
             match &g.index {
                 Some((ib, ty)) => {
                     let stride = if *ty == MTLIndexType::UInt16 { 2 } else { 4 };
-                    enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(MTLPrimitiveType::Triangle, d.count as usize, *ty, ib, d.start as usize * stride, n);
+                    enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(prim, d.count as usize, *ty, ib, d.start as usize * stride, n);
                 }
-                None => enc.drawPrimitives_vertexStart_vertexCount_instanceCount(MTLPrimitiveType::Triangle, d.start as usize, d.count as usize, n),
+                None => enc.drawPrimitives_vertexStart_vertexCount_instanceCount(prim, d.start as usize, d.count as usize, n),
             }
+        }
+    }
+
+    /// three's draw mode (WebGLRenderer.renderBufferDirect: points, lines, line strip / loop, else triangles)
+    fn primitive(flags: u32) -> MTLPrimitiveType {
+        if flags & flag::POINTS != 0 {
+            MTLPrimitiveType::Point
+        } else if flags & flag::LINES != 0 {
+            MTLPrimitiveType::Line
+        } else if flags & (flag::LINE_STRIP | flag::LINE_LOOP) != 0 {
+            MTLPrimitiveType::LineStrip
+        } else {
+            MTLPrimitiveType::Triangle
         }
     }
 

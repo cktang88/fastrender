@@ -127,6 +127,9 @@ renderer._texture = function (t) {
   }
   return id;
 };
+// program picks (three's getParameters + cache key) per frame: 0 on a steady frame once every program exists
+let picks = 0;
+if (renderer._tp) { const gp = renderer._tp._getProgram; renderer._tp._getProgram = function (...a) { picks++; return gp.apply(this, a); }; }
 globalThis.__worldTrace = true;
 const up0 = { ...hstats.uploads }, upB0 = hstats.uploadBytes;
 const per = [];
@@ -164,6 +167,7 @@ const tm = hrNow(); for (let i = 0; i < 20; i++) scene.updateMatrixWorld(); cons
 const result = {
   three: pkg, search, frames, bootFrames: boot,
   perFrameMs: { gameFrameMedian: med(per.map((p) => p.total)), gameFrameP95: p95(per.map((p) => p.total)), renderMedian: med(per.map((p) => p.render)), renderP95: p95(per.map((p) => p.render)), updateMedian: med(per.map((p) => p.total - p.render)) },
+  programPicksPerFrame: +(picks / frames).toFixed(1),
   draws: maxDraws, drawsMedian: med(per.map((p) => p.calls)), materialInstances: instances, programsTranslated: hstats.programs, programTranslateMs: Math.round(hstats.programMs),
   triangles: renderer.info.render.triangles, screenRendersPerFrame: med(per.map((p) => p.renders)),
   sceneObjects: objects, updateMatrixWorldMs: +matrixWorldMs.toFixed(2),

@@ -34,7 +34,7 @@ export const PASS_WORDS = 24;
 export const COPY_WORDS = 12;
 export { TEX };
 // draw flags
-export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256, UNSORTED: 512 };
+export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256, UNSORTED: 512, POINTS: 1024, LINES: 2048, LINE_STRIP: 4096, LINE_LOOP: 8192 };
 // light kinds
 export const L = { AMBIENT: 1, HEMI: 2, DIRECTIONAL: 3, POINT: 4, SPOT: 5 };
 // material models
@@ -159,7 +159,7 @@ export class FastRenderer {
     scene.updateMatrixWorld();
     if (camera.parent === null) camera.updateMatrixWorld();
     const lights = [], meshes = [];
-    scene.traverseVisible((o) => { if (o.isLight) lights.push(o); else if (o.isMesh) meshes.push(o); });
+    scene.traverseVisible((o) => { if (o.isLight) lights.push(o); else if (o.isMesh || o.isSprite || o.isPoints || o.isLine) meshes.push(o); });
     this._tp.beginFrame(scene, camera, lights);
     for (const o of meshes) {
       if (!o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) continue;
@@ -236,12 +236,13 @@ export class FastRenderer {
       }
     }
     {
-      if (!a.normal) { g.computeVertexNormals(); }
+      // (v3: a missing normal reads 0 as a disabled WebGL attribute does: Sprite / Points / Lines geometry, never mutated)
+      if (!a.normal && !this._tp) { g.computeVertexNormals(); }
       if (!g.boundingSphere) g.computeBoundingSphere();
       const s = g.boundingSphere;
       const streams = {
         position: dense(a.position, 3),
-        normal: dense(g.attributes.normal, 3),
+        normal: g.attributes.normal ? dense(g.attributes.normal, 3) : new Float32Array(a.position.count * 3),
         uv: a.uv ? dense(a.uv, 2) : null,
         color: a.color ? dense(a.color, a.color.itemSize >= 4 ? 4 : 3) : null,
         index: g.index ? (g.index.array instanceof Uint32Array || a.position.count > 65535 ? toU32(g.index.array) : toU16(g.index.array)) : null,
@@ -696,7 +697,9 @@ export class FastRenderer {
       if (!o.visible || !o.layers.test(layers)) continue;
       if (o.isLight) lights[nl++] = o;
       else if (o.isMesh) meshes[nm++] = o;
-      else if (o.isSprite || o.isPoints || o.isLine) this._unsupported(o.type);
+      // v3: Sprites (three's sprite program over Sprite's shared quad), Points and Lines (their primitive in the draw
+      // flags) are drawn as WebGLRenderer draws them; v2: counted
+      else if (o.isSprite || o.isPoints || o.isLine) { if (this._tp) meshes[nm++] = o; else this._unsupported(o.type); }
       const ch = o.children;
       for (let i = ch.length - 1; i >= 0; i--) stack[sp++] = ch[i];
     }
@@ -833,7 +836,12 @@ export class FastRenderer {
     if (this._hookSusp !== null) this._resumePass(this._hookSusp);
     this._inHook = h0; this._hookSusp = susp0;
     let flags = 0;
-    if (o.castShadow) flags |= F.CAST;
+    // WebGLShadowMap draws meshes, lines and points; lines / points casting shadows are not drawn natively (rare)
+    if (o.castShadow && o.isMesh) flags |= F.CAST;
+    else if (o.castShadow && !o.isSprite) this._unsupported(`${o.type} shadow caster`);
+    if (o.isPoints) flags |= F.POINTS;
+    else if (o.isLine) flags |= o.isLineSegments ? F.LINES : o.isLineLoop ? F.LINE_LOOP : F.LINE_STRIP;
+    if (o.isLineLoop) this._unsupported('LineLoop closing segment');
     if (o.receiveShadow) flags |= F.RECEIVE;
     if (m.transparent && m.opacity < 1 || m.transparent && m.map && m.map.format === 1023) flags |= F.TRANSPARENT;
     if (m.side === 2) flags |= F.DOUBLE; else if (m.side === 1) flags |= F.BACK;

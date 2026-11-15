@@ -83,6 +83,12 @@ pub mod flag {
     pub const NO_CULL: u32 = 128;
     /// renderer.sortObjects === false: draws keep their order (three renders its lists unsorted)
     pub const UNSORTED: u32 = 512;
+    /// three.Points / LineSegments / Line / LineLoop: the primitive (none of these: triangles)
+    pub const POINTS: u32 = 1024;
+    pub const LINES: u32 = 2048;
+    pub const LINE_STRIP: u32 = 4096;
+    /// drawn as a strip (Metal has no line loop; the closing segment is missing)
+    pub const LINE_LOOP: u32 = 8192;
 }
 
 pub mod light {

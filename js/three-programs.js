@@ -904,7 +904,11 @@ export class ThreePrograms {
   _newInstance(material, ms, prog, receiveShadow, object) {
     const inst = { id: this.newId(), material, ms, program: prog, receiveShadow, object, values: null, gen: -1, objectValues: null, morphProgram: null, disposed: false };
     ms.instances.add(inst);
-    if (object) inst.objectValues = { bindMatrix: { value: null }, bindMatrixInverse: { value: null }, boneTexture: { value: null } };
+    if (object) {
+      inst.objectValues = { bindMatrix: { value: null }, bindMatrixInverse: { value: null }, boneTexture: { value: null } };
+      // WebGLRenderer.setProgram: p_uniforms.setValue('center', object.center) for a Sprite
+      if (object.isSprite) inst.objectValues.center = { value: object.center };
+    }
     this._bindValues(inst, ms);
     return inst;
   }

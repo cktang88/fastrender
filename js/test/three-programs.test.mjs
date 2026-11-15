@@ -494,3 +494,29 @@ function decode(buf) {
   tp._getProgram = get0;
   console.log(`[three r${REV}] scene + HUD scene per frame: 0 program picks on an unchanged frame; material.envMap swap followed`);
 }
+
+// ------------------------------------------------------------------ 8. Sprites, Points, Lines: three's programs, their primitives
+{
+  const h = makeHost();
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20 });
+  const scene = new THREE.Scene();
+  const s1 = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0xff0000 })); s1.center.set(0.5, 0);
+  const s2 = new THREE.Sprite(s1.material); s2.position.x = 2;
+  const pts = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 1, 1], 3)), new THREE.PointsMaterial({ size: 4 }));
+  const seg = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0], 3)), new THREE.LineBasicMaterial());
+  const strip = new THREE.Line(seg.geometry, new THREE.LineDashedMaterial());
+  strip.computeLineDistances();
+  scene.add(s1, s2, pts, seg, strip);
+  const cam = new THREE.PerspectiveCamera(50, 1.6, 0.1, 50); cam.position.z = 5;
+  r.render(scene, cam);
+  const fr = decode(r.cmd);
+  assert.equal(fr.draws.length, 5, 'two sprites, points, line segments, line');
+  assert.deepEqual(Object.keys(r.info.unsupported), [], 'nothing counted');
+  assert.deepEqual(r._drawObjects.map((o) => o.type), ['Sprite', 'Sprite', 'Points', 'LineSegments', 'Line']);
+  // the sprite program: per-object `center` (WebGLRenderer sets it from object.center)
+  const sp = r._tp._ms.get(s1.material);
+  assert.ok(sp, 'sprite material through three-programs');
+  assert.notEqual(fr.draws[0].material, fr.draws[1].material, 'a uniform block per sprite (center is per object)');
+  assert.equal(pts.geometry.attributes.normal, undefined, 'geometry not mutated (no computed normals)');
+  console.log(`[three r${REV}] Sprite (per-object center), Points, LineSegments, Line (+ lineDistance) drawn with three's programs`);
+}
