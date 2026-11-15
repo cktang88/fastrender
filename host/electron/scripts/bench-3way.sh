@@ -11,7 +11,9 @@
 #     --scenes "A B"     of: empty city world (default: all three)
 #     --variants "A B"   of: webgl webgpu fastrender (default: all three)
 #     --warmup S         default 10        --measure S   default 20
-#     --quick            3 s warmup, 8 s measure, 1280x800 only (what CI runs)
+#     --quick            3 s warmup, 8 s measure, 1280x800 only
+#     --ci               what the CI job runs: quick timings at both sizes, MSAA / MetalFX rows at the first size
+#                        only, no vsync pass for the real game (its boot is slow on the runner's paravirtual GPU)
 #     --no-vsync-pass    skip the second pass with vsync ON (CPU % at the display's rate, first size only)
 #     --no-build         reuse the addon and bundles of a previous run
 #     --power            also sample `sudo powermetrics` (GPU power / active residency) during each run
@@ -24,6 +26,7 @@ el="$(cd "$here/.." && pwd)"
 repo="$(cd "$el/../.." && pwd)"
 world=""; out="$el/bench-out"; sizes="1280x800 2560x1600"; scenes="empty city world"; variants="webgl webgpu fastrender"
 warmup=10; measure=20; vsync_pass=1; build=1; power=0; note=""
+extras_first_only=0; vsync_scenes=""
 electron="${BENCH_ELECTRON:-npx electron}"   # testing elsewhere: BENCH_ELECTRON="xvfb-run -a npx electron --no-sandbox"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -35,6 +38,7 @@ while [ $# -gt 0 ]; do
     --warmup) warmup="$2"; shift 2;;
     --measure) measure="$2"; shift 2;;
     --quick) warmup=3; measure=8; sizes="1280x800"; shift;;
+    --ci) warmup=3; measure=8; extras_first_only=1; vsync_scenes="empty city"; shift;;
     --no-vsync-pass) vsync_pass=0; shift;;
     --no-build) build=0; shift;;
     --power) power=1; shift;;
@@ -82,9 +86,10 @@ fi
 rm -f "$out"/bench-*.json "$out"/bench-*-shot.png "$out"/bench-*.log "$out"/bench-*-power.txt
 n=0
 one() { # one <scene> <variant> <px> <aa> <vsync> [fx]   (fx: fastrender renders at half size, MetalFX upscales)
-  local scene="$1" variant="$2" px="$3" aa="$4" vs="$5" fx="${6:-}" tag args pm=""
+  local scene="$1" variant="$2" px="$3" aa="$4" vs="$5" fx="${6:-}" tag args pm="" slack=120
+  [ "$scene" = world ] && slack=420   # the game's boot: level build, every program / pipeline, streaming
   tag="bench-$scene-$variant-$px"; [ "$aa" = 1 ] && tag="$tag-aa"; [ "$vs" = 1 ] && tag="$tag-vsync"; [ -n "$fx" ] && tag="$tag-fx"
-  args="--variant $variant --scene $scene --px $px --aa $aa --vsync $vs --warmup $warmup --measure $measure --out $out --tag $tag --timeout $((warmup + measure + 600))"
+  args="--variant $variant --scene $scene --px $px --aa $aa --vsync $vs --warmup $warmup --measure $measure --out $out --tag $tag --timeout $((warmup + measure + slack))"
   [ -n "$fx" ] && args="$args --renderer {\"scale\":0.5,\"upscale\":\"metalfx\"} --label MetalFX-spatial-from-0.5x-per-axis"
   n=$((n + 1)); printf '%2d  %-44s ' "$n" "$tag"
   if [ "$power" = 1 ]; then sudo -n powermetrics --samplers gpu_power,cpu_power -i 1000 > "$out/$tag-power.txt" 2>/dev/null & pm=$!; fi
@@ -99,13 +104,14 @@ one() { # one <scene> <variant> <px> <aa> <vsync> [fx]   (fx: fastrender renders
   node -e 'const fs=require("fs");let r={};try{r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
     if(!r.ok||!r.frame_ms)console.log("FAILED: "+String(r.error||"no result (see the .log)").replace(/\s+/g," ").slice(0,140));
     else console.log(`${r.fps.toFixed(1)} fps  frame p50 ${r.frame_ms.p50} ms  JS ${r.js_ms.p50} ms  GPU ${r.gpu_ms?r.gpu_ms.mean:"n/a"} ms  CPU ${r.processes&&r.processes.total?r.processes.total.cpu_percent:"?"}%  [${r.backend&&r.backend.api}]`)' "$out/$tag.json"
-  sleep 2   # let the machine settle (and cool) between runs
+  [ -n "${BENCH_NO_SETTLE:-}" ] || sleep 2   # let the machine settle (and cool) between runs
 }
 
 say "runs: vsync off (uncapped), ${warmup} s warmup + ${measure} s measured each"
 for scene in $scenes; do
   for px in $sizes; do
     for v in $variants; do one "$scene" "$v" "$px" 0 0; done
+    [ "$extras_first_only" = 1 ] && [ "$px" != "${sizes%% *}" ] && continue
     # the game as shipped asks for MSAA 4x; fastrender has none, so the rows above turn it off everywhere
     if [ "$scene" = world ]; then for v in $variants; do [ "$v" = fastrender ] || one world "$v" "$px" 1 0; done; fi
     # what only the native renderer has: a quarter of the pixels shaded, MetalFX spatial upscaling to the same output
@@ -116,7 +122,9 @@ done
 if [ "$vsync_pass" = 1 ]; then
   px="${sizes%% *}"
   say "runs: vsync ON (CPU and GPU cost at the display's rate), $px"
-  for scene in $scenes; do for v in $variants; do one "$scene" "$v" "$px" 0 1; done; done
+  for scene in ${vsync_scenes:-$scenes}; do
+    case " $scenes " in *" $scene "*) for v in $variants; do one "$scene" "$v" "$px" 0 1; done;; esac
+  done
 fi
 
 say "report"

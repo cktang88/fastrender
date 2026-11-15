@@ -480,26 +480,33 @@ jobs:
   bench-3way:
     runs-on: macos-26
     continue-on-error: true
-    timeout-minutes: 75
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
       - name: bench-3way - WebGLRenderer vs WebGPURenderer vs fastrender (PARAVIRTUAL GPU - absolute numbers are not an Air's)
         continue-on-error: true
-        timeout-minutes: 65
+        timeout-minutes: 60
         run: |
           sw_vers; sysctl -n machdep.cpu.brand_string
-          rc=0; bash host/electron/scripts/bench-3way.sh --quick --sizes "1280x800 2560x1600" --out "$GITHUB_WORKSPACE/bench-out" \
-            --note "GitHub macos-26 runner, PARAVIRTUAL GPU: fps and GPU ms are NOT an M2 Air's; compare the CPU-side columns. $(sysctl -n machdep.cpu.brand_string)" > bench-3way.log 2>&1 || rc=$?
-          grep -v "^npm \|^\s*$" bench-3way.log | grep -B2 -A200 "== runs" | head -80 > bench-3way-runs.txt || true
-          bash .github/annotate.sh notice "bench-3way run log (exit $rc)" bench-3way-runs.txt 60
-          if [ -f bench-out/bench-3way.md ]; then
+          rc=0; bash host/electron/scripts/bench-3way.sh --ci --out "$GITHUB_WORKSPACE/bench-out" > bench-3way.log 2>&1 || rc=$?
+          echo "bench-3way.sh exit $rc"; tail -60 bench-3way.log
+      # its own step: a run that hangs must not cost the runs that finished
+      - name: bench-3way - report (job summary + annotations)
+        if: always()
+        continue-on-error: true
+        run: |
+          NOTE="GitHub macos-26 runner, PARAVIRTUAL GPU: fps and GPU ms are NOT an M2 Air's; compare the CPU-side columns. $(sysctl -n machdep.cpu.brand_string)"
+          grep -A200 "== runs" bench-3way.log | grep -v "^\s*$" | head -70 > bench-3way-runs.txt || true
+          bash .github/annotate.sh notice "bench-3way run log" bench-3way-runs.txt 70
+          if ls bench-out/bench-*.json > /dev/null 2>&1; then
+            (cd host/electron && node scripts/bench-3way.report.mjs "$GITHUB_WORKSPACE/bench-out" --annotate --note "$NOTE")
             cat bench-out/bench-3way.md >> "$GITHUB_STEP_SUMMARY"
-            (cd host/electron && node scripts/bench-3way.report.mjs "$GITHUB_WORKSPACE/bench-out" --annotate --note "GitHub macos-26 runner, PARAVIRTUAL GPU: fps and GPU ms are NOT an M2 Air's; compare the CPU-side columns.")
           else
-            tail -40 bench-3way.log > bench-3way-tail.txt; bash .github/annotate.sh error "bench-3way produced no report" bench-3way-tail.txt 40
+            tail -40 bench-3way.log > bench-3way-tail.txt; bash .github/annotate.sh error "bench-3way produced no runs" bench-3way-tail.txt 40
           fi
-          # the first failed run's log tail, if any (what Chromium / the page said)
+          # failed runs: what Chromium / the page said (GitHub keeps 10 warnings per step)
           for j in bench-out/bench-*.json; do
+            [ "$(basename "$j")" = bench-3way.json ] && continue
             node -e "process.exit(JSON.parse(require('fs').readFileSync('$j','utf8')).ok?0:1)" 2>/dev/null && continue
             grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" "${j%.json}.log" | tail -25 > bench-fail.txt; bash .github/annotate.sh warning "bench-3way failed run: $(basename "$j" .json)" bench-fail.txt 25
           done
