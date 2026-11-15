@@ -191,6 +191,31 @@ pub struct TextureMeta {
     pub flip_y: bool,
     #[serde(default = "yes")]
     pub mipmaps: bool,
+    /// three.js constants; defaults are three's Texture defaults (LinearFilter, LinearMipmapLinearFilter, ClampToEdge)
+    #[serde(default = "linear")]
+    pub mag_filter: u32,
+    #[serde(default = "linear_mip_linear")]
+    pub min_filter: u32,
+    #[serde(default = "clamp2")]
+    pub wrap: [u32; 2],
+    #[serde(default = "one_u")]
+    pub anisotropy: u32,
+}
+
+fn linear() -> u32 { 1006 }
+fn linear_mip_linear() -> u32 { 1008 }
+fn clamp2() -> [u32; 2] { [1001, 1001] }
+fn one_u() -> u32 { 1 }
+
+impl Default for TextureMeta {
+    fn default() -> Self {
+        TextureMeta { width: 1, height: 1, srgb: false, repeat: [1.0, 1.0], offset: [0.0, 0.0], flip_y: false, mipmaps: false, mag_filter: 1006, min_filter: 1006, wrap: clamp2(), anisotropy: 1 }
+    }
+}
+
+impl TextureMeta {
+    /// three's mipmap-using min filters (Nearest/Linear MipmapNearest/Linear)
+    pub fn min_filter_mips(&self) -> bool { matches!(self.min_filter, 1004 | 1005 | 1007 | 1008) }
 }
 
 #[derive(Deserialize, Debug, Clone)]

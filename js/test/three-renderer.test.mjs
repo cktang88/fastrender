@@ -1,4 +1,4 @@
-// node test/three-renderer.test.mjs: FastRenderer over a REAL three.js (r170) scene graph.
+// node test/three-renderer.test.mjs: FastRenderer over a REAL three.js (r187 default; THREE_PKG=three-r170 for the older line) scene graph.
 import assert from 'node:assert/strict';
 const THREE = await import(process.env.THREE_PKG || 'three');
 import { FastRenderer, KIND, OP, F, L } from '../fastrender-three.js';

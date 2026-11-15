@@ -98,7 +98,7 @@ pub struct ThreeScene {
     host: Box<ScriptHost>,
     pipes: Pipes,
     geos: HashMap<u32, Geo>,
-    texs: HashMap<u32, (Texture, TextureMeta)>,
+    texs: HashMap<u32, (Texture, TextureMeta, Sampler)>,
     mats: HashMap<u32, Mat>,
     mat_rows: Vec<ThreeMat>,
     mat_buf: Buffer,
@@ -106,6 +106,7 @@ pub struct ThreeScene {
     insts: HashMap<u32, Inst>,
     dummy: Buffer,
     white: Texture,
+    white_s: Sampler,
     slots: Vec<Slot>,
     draws: Vec<Draw>,
     lights: Vec<ThreeLight>,
@@ -155,6 +156,31 @@ fn slot(dev: &Device, cap: usize) -> Slot {
 
 fn f32s(a: &Option<Array>) -> Option<&[f32]> { if let Some(Array::F32(v)) = a { Some(v) } else { None } }
 
+type Sampler = Retained<ProtocolObject<dyn MTLSamplerState>>;
+
+/// A sampler matching three.js's filter/wrap constants (NearestFilter 1003 .. LinearMipmapLinearFilter 1008;
+/// RepeatWrapping 1000, ClampToEdgeWrapping 1001, MirroredRepeatWrapping 1002).
+fn sampler(dev: &Device, m: &TextureMeta) -> Result<Sampler, String> {
+    let d = MTLSamplerDescriptor::new();
+    let lin = |f: u32| if matches!(f, 1006..=1008) { MTLSamplerMinMagFilter::Linear } else { MTLSamplerMinMagFilter::Nearest };
+    let wrap = |w: u32| match w {
+        1001 => MTLSamplerAddressMode::ClampToEdge,
+        1002 => MTLSamplerAddressMode::MirrorRepeat,
+        _ => MTLSamplerAddressMode::Repeat,
+    };
+    d.setMagFilter(lin(m.mag_filter));
+    d.setMinFilter(lin(m.min_filter));
+    d.setMipFilter(match m.min_filter {
+        1004 | 1007 => MTLSamplerMipFilter::Nearest,
+        1005 | 1008 => MTLSamplerMipFilter::Linear,
+        _ => MTLSamplerMipFilter::NotMipmapped,
+    });
+    d.setSAddressMode(wrap(m.wrap[0]));
+    d.setTAddressMode(wrap(m.wrap[1]));
+    d.setMaxAnisotropy(m.anisotropy.clamp(1, 16) as usize);
+    dev.newSamplerStateWithDescriptor(&d).ok_or_else(|| "sampler".into())
+}
+
 impl ThreeScene {
     pub fn new(dev: &Device, shader_src: &str, bundle_path: &str, params_json: &str) -> Result<Self, String> {
         let game = std::fs::read_to_string(bundle_path).map_err(|e| format!("bundle {bundle_path}: {e}"))?;
@@ -186,6 +212,7 @@ impl ThreeScene {
             mat_dirty: false,
             insts: HashMap::new(),
             dummy: buffer_with(dev, &[0f32; 64]),
+            white_s: sampler(dev, &TextureMeta::default())?,
             white,
             slots: (0..FRAME_SLOTS).map(|_| slot(dev, 1024)).collect(),
             draws: Vec::new(),
@@ -318,7 +345,8 @@ impl ThreeScene {
             return Err(format!("texture {}x{} needs {} bytes, got {}", m.width, m.height, m.width * m.height * 4, px.len()));
         }
         let fmt = if m.srgb { MTLPixelFormat::RGBA8Unorm_sRGB } else { MTLPixelFormat::RGBA8Unorm };
-        let mips = m.mipmaps && m.width > 1 && m.height > 1;
+        // three: mips only when generateMipmaps and the min filter uses them (DataTexture defaults to neither)
+        let mips = m.mipmaps && m.min_filter_mips() && m.width > 1 && m.height > 1;
         let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(fmt, m.width, m.height, mips) };
         d.setUsage(MTLTextureUsage::ShaderRead);
         let t = dev.newTextureWithDescriptor(&d).ok_or("texture alloc")?;
@@ -345,7 +373,8 @@ impl ThreeScene {
                 self.mat_dirty = true;
             }
         }
-        self.texs.insert(id, (t, m));
+        let s = sampler(dev, &m)?;
+        self.texs.insert(id, (t, m, s));
         Ok(())
     }
 
@@ -361,7 +390,7 @@ impl ThreeScene {
         };
         // textures usually upload before the material that uses them: take the transform now
         let mut row = row;
-        if let Some((_, tm)) = self.texs.get(&m.map) {
+        if let Some((_, tm, _)) = self.texs.get(&m.map) {
             row.map_xform = [tm.repeat[0], tm.repeat[1], tm.offset[0], tm.offset[1]];
             row.misc[0] = tm.flip_y as u32;
         }
@@ -542,8 +571,12 @@ impl ThreeScene {
             unsafe {
                 enc.setVertexBufferOffset_atIndex(k * OBJ_BYTES, 5);
                 let m = &self.mats[&d.material];
-                let map = if m.meta.map != 0 { self.texs.get(&m.meta.map).map(|t| &t.0) } else { None };
-                enc.setFragmentTexture_atIndex(Some(map.unwrap_or(&self.white)), 1);
+                let (map, smp) = match (m.meta.map != 0).then(|| self.texs.get(&m.meta.map)).flatten() {
+                    Some(t) => (&t.0, &t.2),
+                    None => (&self.white, &self.white_s),
+                };
+                enc.setFragmentTexture_atIndex(Some(map), 1);
+                enc.setFragmentSamplerState_atIndex(Some(smp), 0);
             }
             self.draw(enc, d, g);
         }

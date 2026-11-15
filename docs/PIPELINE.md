@@ -22,7 +22,7 @@ fastrender native (Rust + Metal): registry → cull/sort → shadow (the game's 
 
 | Stage | What | Status | Verified by |
 |---|---|---|---|
-| 1. Renderer swap | `FastRenderer`: drop-in `WebGLRenderer` over the real scene graph | **done** for Mesh, InstancedMesh, BufferGeometry (indexed/non-indexed, interleaved, groups), Basic/Lambert/Phong/Standard/Physical (as Standard), textures, all light types, fog, background, tone mapping, the game's shadow camera, layers/visibility, dispose | `js/test/three-renderer.test.mjs` (real three r170) |
+| 1. Renderer swap | `FastRenderer`: drop-in `WebGLRenderer` over the real scene graph | **done** for Mesh, InstancedMesh, BufferGeometry (indexed/non-indexed, interleaved, groups), Basic/Lambert/Phong/Standard/Physical (as Standard), textures, all light types, fog, background, tone mapping, the game's shadow camera, layers/visibility, dispose | `js/test/three-renderer.test.mjs` (real three r187, latest; also r170) |
 | 2. Protocol | `docs/PROTOCOL.md` v2 | **done** | Rust decoder tests + the JS test |
 | 3. Native backend | `src/mac_three.rs` + `fs_three`/`vs_three` | **done**: registry, culling, sorting, transparency, double-sided, mirrored winding, cofactor normals, shadows | CI on macOS (paravirtual GPU), golden images |
 | 4. Golden images | the same scene in browser three.js and natively, diffed | **done**, runs on every push | `js/golden/` |

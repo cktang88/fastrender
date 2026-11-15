@@ -438,13 +438,14 @@ static float3 three_agx(float3 c, float exposure) {
     return saturate(r2020_to_srgb * c);
 }
 
+static float3 three_srgb(float3 c) { return select(pow(c, 0.41666) * 1.055 - 0.055, c * 12.92, c <= 0.0031308); }
+
 static half3 three_output(float3 c, uint mode, float exposure) {
     if (mode == 6u) c = three_agx(c, exposure);
     else if (mode == 0u) c = saturate(c);
     else if (mode == 1u) c = saturate(c * exposure);
     else c = three_aces(c, exposure);
-    float3 enc = select(pow(c, 0.41666) * 1.055 - 0.055, c * 12.92, c <= 0.0031308);
-    return half3(enc);
+    return half3(three_srgb(c));
 }
 
 // GGX specular (three.js BRDF_GGX: Schlick Fresnel, height-correlated Smith visibility, GGX D)
@@ -465,14 +466,14 @@ fragment half4 fs_three(TOut in [[stage_in]], bool front [[front_facing]],
                         constant ThreeLight* lights [[buffer(1)]],
                         device const ThreeMat* mats [[buffer(2)]],
                         depth2d<float> sm [[texture(0)]],
-                        texture2d<half> map [[texture(1)]]) {
+                        texture2d<half> map [[texture(1)]],
+                        sampler map_s [[sampler(0)]]) {
     ThreeMat m = mats[in.mat];
     float4 base = m.color;
     if (m.params.w > 0.5) {
         float2 uv = in.uv * m.map_xform.xy + m.map_xform.zw;
         if (m.misc.x != 0u) uv.y = 1.0 - uv.y;
-        constexpr sampler s(coord::normalized, filter::linear, mip_filter::linear, address::repeat, max_anisotropy(4));
-        base *= float4(map.sample(s, uv));
+        base *= float4(map.sample(map_s, uv)); // the texture's own three.js filter/wrap/anisotropy
     }
     base *= float4(in.vcol);
     if (m.params.z > 0.0 && base.a < m.params.z) discard_fragment();
@@ -519,9 +520,13 @@ fragment half4 fs_three(TOut in [[stage_in]], bool front [[front_facing]],
         color = direct + irr * diffuse / M_PI_F;
     }
     color += m.emissive_rough.xyz;
-    // fog (three.js: depth = view-space distance along the camera axis)
+    float3 outc = float3(three_output(max(color, 0.0), uint(f.fog2.w), f.cam_pos.w));
+    // fog, in three's order: tonemapping_fragment -> colorspace_fragment -> fog_fragment, i.e. mixed in
+    // output space; three converts the fog colour to the output colour space (getUnlitUniformColorSpace).
+    // Depth = view-space distance along the camera axis.
     uint fm = uint(f.fog2.z);
-    if (fm == 1u) color = mix(color, f.fog.rgb, smoothstep(f.fog2.x, f.fog2.y, in.view_depth));
-    else if (fm == 2u) color = mix(color, f.fog.rgb, 1.0 - exp(-pow2(f.fog2.x * in.view_depth)));
-    return half4(three_output(max(color, 0.0), uint(f.fog2.w), f.cam_pos.w), half(base.a));
+    float3 fogc = three_srgb(saturate(f.fog.rgb));
+    if (fm == 1u) outc = mix(outc, fogc, smoothstep(f.fog2.x, f.fog2.y, in.view_depth));
+    else if (fm == 2u) outc = mix(outc, fogc, 1.0 - exp(-pow2(f.fog2.x * in.view_depth)));
+    return half4(half3(outc), half(base.a));
 }
