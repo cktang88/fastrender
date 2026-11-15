@@ -25,6 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { makeGlslHost } from './glsl-host.mjs';
+import { gpuCensus, gpuCensusText } from '../gpu-census.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -35,6 +36,7 @@ const search = opt('--search', '?mode=world&quality=low&weather=clear&tod=noon&s
 const jsonOut = opt('--json', '');
 const dumpDir = opt('--dump-programs', '');
 const viewArg = opt('--view', '');
+const censusOut = opt('--gpu-census', ''); // '-' or a .json path: lights / shadow passes / draws per program / fragment sizes (js/gpu-census.js)
 const debugMaterial = opt('--debug-material', ''); // e.g. 'Standard' or a material name: its uniforms + textures as sent
 const size = opt('--size', '1280x800').split('x').map(Number);
 const gameDir = resolve(args[0] || process.env.WORLD_OBJECTS_DIR || '../3d-world-objects');
@@ -292,6 +294,7 @@ const result = {
 };
 console.log(JSON.stringify(result, null, 2));
 if (debugMaterial) console.log(JSON.stringify(renderer.debugMaterials(debugMaterial), null, 1));
+if (censusOut) { const c = gpuCensus(renderer); console.log(gpuCensusText(c)); if (censusOut !== '-') writeFileSync(censusOut, JSON.stringify(c, null, 1)); }
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify(result, null, 2));
 // --dump-programs <dir>: every program the game compiled, as NAME.vert.glsl / NAME.frag.glsl for `fastrender xlat-dump`
 if (dumpDir) {

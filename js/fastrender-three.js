@@ -113,6 +113,9 @@ export class FastRenderer {
       if (!this.host.program) throw new Error("fastrender-three: programs: 'three' needs host.program(key, vertex, fragment)");
       this._tp = new ThreePrograms({
         renderer: this, host: this.host, dfgLUT: opts.dfgLUT, newId: () => this._nextId++, unsupported: (w) => this._unsupported(w),
+        // dark point / spot lights leave the light state (three-programs.js _trimLights; false / 0: keep them all);
+        // ablate: picture-changing diagnostics. Both also from the host (host.params), for a game that runs unchanged
+        trimLights: opts.trimLights ?? (this.host.params && this.host.params.trimLights), ablate: opts.ablate ?? (this.host.params && this.host.params.ablate),
         releaseInstance: (inst) => { if (this.host.release) this.host.release(KIND.MATERIAL, inst.id); },
       });
       this._textureId = (t) => this._texture(t);
@@ -736,7 +739,7 @@ export class FastRenderer {
     else { u[0] = MAGIC; u[1] = w; }
     this.info.render.culled = this._nCulled;
     this.info.render.calls = nDraws; this.info.render.triangles = this._tris | 0; this.info.render.frame++;
-    if (tp) { this.info.uniformBlocks.total = tp.stats.blocks; this.info.uniformBlocks.changed = tp.stats.changed; }
+    if (tp) { this.info.uniformBlocks.total = tp.stats.blocks; this.info.uniformBlocks.changed = tp.stats.changed; this.info.render.lightsDropped = tp.stats.lightsDropped; }
     if (this.host.present) this.host.present(w);
   }
 

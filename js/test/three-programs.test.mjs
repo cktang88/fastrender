@@ -757,3 +757,51 @@ else {
   assert.equal(blocks[4].children[4].children[0].matrixWorld.elements[13], 90 + 5);
   console.log(`[three r${REV}] staticSubtrees: ${t.frozen} settled subtrees not walked, same matrices as three's walk; a move shows within check - 1 frames; transformsChanged / add / ancestor / camera at once`);
 }
+
+// ------------------------------------------------------------------ 13. dark point / spot lights leave three's light state (trimLights)
+{
+  const build = (opts) => {
+    const h = makeHost();
+    const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20, ...opts });
+    r.setSize(SIZE.width, SIZE.height);
+    r.shadowMap.enabled = true;
+    const scene = new THREE.Scene();
+    const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(4, 10, 2); sun.castShadow = true;
+    const lamp = new THREE.PointLight(0xffaa66, 3, 20); lamp.position.set(1, 2, 0);
+    // a game's padding (3d-world-objects' "light budget"): dark lights that keep the counts, one of them with a shadow
+    const pads = [];
+    for (let i = 0; i < 8; i++) pads.push(new THREE.PointLight(0x000000, 0, 0.01));
+    for (let i = 0; i < 3; i++) pads.push(new THREE.SpotLight(0xffffff, 0, 0.01));
+    const padShadow = new THREE.PointLight(0x000000, 0, 0.01); padShadow.castShadow = true; padShadow.shadow.autoUpdate = false;
+    scene.add(sun, lamp, padShadow, ...pads);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial({ color: 0x336699 })); mesh.receiveShadow = true;
+    scene.add(mesh);
+    const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 3, 8); camera.lookAt(0, 0, 0);
+    const frame = () => { r.render(scene, camera); return r._tp.lights.state; };
+    return { r, scene, lamp, pads, padShadow, frame, fragment: () => r._used[0].program.fragment };
+  };
+  const all = build({ trimLights: false }), trim = build({});
+  let sa = all.frame(), st = trim.frame();
+  assert.deepEqual([sa.point.length, sa.spot.length, all.r._tp.shadows.length], [10, 3, 2], 'trimLights: false keeps every light, as WebGLRenderer');
+  assert.deepEqual([st.point.length, st.spot.length, trim.r._tp.shadows.length], [1, 0, 1], 'dark point / spot lights (and the dark shadow light) are not in the light state');
+  assert.equal(trim.r.info.render.lightsDropped, 12);
+  assert.deepEqual(st.point[0].color.toArray(), sa.point.find((p) => p.color.r > 0).color.toArray(), 'the lit light is the same light');
+  assert.ok(/= pointLights\[ 9 \]/.test(all.fragment()) && !/= pointLights\[ 1 \]/.test(trim.fragment()) && /= pointLights\[ 0 \]/.test(trim.fragment()), 'the program loops over the lit lights only');
+  assert.deepEqual([sa.pointShadow.length, st.pointShadow.length], [1, 0], 'no shadow lookup for a dark light');
+  // counts grow at once, in steps, filled with the scene's own dark lights...
+  for (let i = 0; i < 4; i++) { trim.pads[i].intensity = 1; trim.pads[i].color.set(0xffffff); }
+  st = trim.frame();
+  assert.equal(st.point.length, 6, '5 lit lights: compiled for 6 (a dark one fills the step)');
+  // ...and shrink only after the lit count stayed lower for a while (a blinking light does not flip programs)
+  for (let i = 0; i < 4; i++) trim.pads[i].intensity = 0;
+  trim.lamp.intensity = 0;
+  for (let i = 0; i < 100; i++) st = trim.frame();
+  assert.equal(st.point.length, 6, 'held');
+  trim.lamp.intensity = 3;
+  st = trim.frame();
+  assert.equal(st.point.length, 6);
+  trim.lamp.intensity = 0;
+  for (let i = 0; i < 125; i++) st = trim.frame();
+  assert.equal(st.point.length, 0, 'released after the hold');
+  console.log(`[three r${REV}] trimLights: dark point / spot lights leave the light state (10 point + 3 spot -> 1 + 0, no dark shadow lookup); counts step up at once and are held 120 frames`);
+}

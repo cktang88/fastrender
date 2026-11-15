@@ -477,6 +477,26 @@ const LIGHT_ROOTS = new Set(LIGHT_WIRING.map(([u]) => u));
 // uniforms that depend on the object being drawn (besides the FrObject matrices): their blocks are per object
 const OBJECT_SPECIFIC = ['bindMatrix', 'bindMatrixInverse', 'boneTexture', 'morphTargetBaseInfluence', 'morphTargetInfluences', 'morphTargetsTexture', 'morphTargetsTextureSize', 'morphTexture', 'batchingTexture', 'batchingIdTexture', 'batchingColorTexture', 'center'];
 
+/** frames the lit count of a kind must stay lower before _trimLights lets its kept count shrink */
+const TRIM_HOLD = 120;
+/** _trimLights' kind of a light: 0 point, 1 point with a shadow, 2 spot, 3 spot with a shadow; -1: not trimmed */
+function trimClass(l) {
+  if (l.isPointLight === true) return l.castShadow ? 1 : 0;
+  if (l.isSpotLight === true) return l.castShadow ? 3 : 2;
+  return -1;
+}
+/** a light whose colour * intensity is exactly 0 (WebGLLights.setup multiplies them; nothing else of it reaches a pixel) */
+function isDark(l) {
+  const c = l.color;
+  return l.intensity === 0 || (c.r === 0 && c.g === 0 && c.b === 0);
+}
+/** light counts programs are compiled for: 0 1 2 3 4 6 8 12 16 24 32 ... */
+export function lightStep(n) {
+  if (n <= 4) return n;
+  let s = 4;
+  for (;;) { if (n <= s * 1.5) return s * 1.5; if (n <= s * 2) return s * 2; s *= 2; }
+}
+
 function materialNeedsLights(m) {
   return m.isMeshLambertMaterial || m.isMeshToonMaterial || m.isMeshPhongMaterial || m.isMeshStandardMaterial || m.isShadowMaterial || (m.isShaderMaterial && m.lights === true);
 }
@@ -638,8 +658,12 @@ export class ThreePrograms {
     this._size = { x: 1, y: 1, set(x, y) { this.x = x; this.y = y; return this; } };
     this._casters = []; this._casterPool = []; this._nCasters = 0;
     /** per frame: uniform blocks refreshed, and how many of them changed (any word) since the previous frame */
-    this.stats = { blocks: 0, changed: 0, lightPrograms: 0 };
+    this.stats = { blocks: 0, changed: 0, lightPrograms: 0, lightsDropped: 0 };
     this._transmissionRT = { texture: { isFastRenderTransmission: true }, width: 1, height: 1 };
+    // dark point / spot lights leave three's light state (see _trimLights); false: every visible light, as WebGLRenderer
+    this.trimLights = opts.trimLights !== false && opts.trimLights !== 0;
+    // diagnostics that CHANGE the picture (host/electron/scripts/gpu-ablate.sh, docs/notes/gpu-cost.md); null: none
+    this.ablate = opts.ablate || null;
     this._emptyScene = { isScene: true, fog: null, environment: null };
   }
 
@@ -653,6 +677,10 @@ export class ThreePrograms {
     // WebGLShadowMap.render, a map is re-rendered only while renderer.shadowMap and the light's shadow have autoUpdate
     // or needsUpdate (needsUpdate is then cleared); otherwise the native side keeps the last map and three keeps the
     // matching shadow matrix (CSM games refresh far cascades every few frames; padding lights never)
+    let ss = this._sceneStates.get(scene);
+    if (ss === undefined) this._sceneStates.set(scene, (ss = { lights: new WebGLLights(this._extensions), key: [], epoch: 0, trim: null }));
+    if (this.ablate !== null) this._ablate(scene, lights);
+    this.stats.lightsDropped = this.trimLights ? this._trimLights(lights, ss) : 0;
     const shadows = this.shadows, sm = r.shadowMap;
     const all = sm.enabled && (sm.autoUpdate !== false || sm.needsUpdate === true);
     let ns = 0;
@@ -669,8 +697,6 @@ export class ThreePrograms {
     if (shadows.length !== ns) shadows.length = ns; // (not cleared with length = 0: V8 would drop its backing store)
     if (!HAS_PCF_SOFT && r.shadowMap.enabled && r.shadowMap.type === 2 && shadows.length) r.shadowMap.type = 1;
     this.lightList = lights;
-    let ss = this._sceneStates.get(scene);
-    if (ss === undefined) this._sceneStates.set(scene, (ss = { lights: new WebGLLights(this._extensions), key: [], epoch: 0 }));
     this.lights = ss.lights;
     this.lights.setup(lights);          // sorts `lights` in place in three's order
     this.lights.setupView(lights, camera);
@@ -700,6 +726,71 @@ export class ThreePrograms {
     this._epoch = ss.epoch;
     // what refreshFogUniforms reads (fog values; the colour space follows the output colour space)
     if (fog !== null && changed(this._fogKey, fog, fog.color.r, fog.color.g, fog.color.b, fog.near, fog.far, fog.density, r.outputColorSpace, 0, 0)) this._fogStamp++;
+  }
+
+  /**
+   * Dark point and spot lights leave the light list before three's WebGLLights sees it (in place; returns how many
+   * left). three compiles the number of lights of each kind into every lit program and unrolls the loops, so a
+   * light with intensity 0 (or a black colour) costs every lit fragment a full BRDF evaluation whose result is
+   * multiplied by 0, and a dark shadow-casting one a shadow lookup as well. Games pad their light lists with such
+   * lights to keep the counts, and so the programs, fixed (3d-world-objects: 17 point + 10 spot lights on a street
+   * with none lit). Removing them changes no pixel: every term they add is `x * 0`; the remaining lights keep their
+   * order.
+   *
+   * What the padding bought (no recompiles when a light goes on) is kept in a cheaper form: per kind (point, spot,
+   * with / without a shadow) the count kept is the lit count rounded up to a step (0 1 2 3 4 6 8 12 16 24 ...; exact
+   * for shadow lights), filled with the scene's own dark lights, and it only shrinks after the lit count has been
+   * lower for TRIM_HOLD frames. So a light that blinks, or a few that fade in one after the other, cause few program
+   * changes, and a variant seen once is cached (ms.programs, the native pipeline cache).
+   */
+  _trimLights(lights, ss) {
+    const t = ss.trim || (ss.trim = { frame: 0, held: [0, 0, 0, 0], since: [0, 0, 0, 0], lit: [0, 0, 0, 0], dark: [0, 0, 0, 0], keep: [0, 0, 0, 0] });
+    const lit = t.lit, dark = t.dark, keep = t.keep;
+    lit[0] = lit[1] = lit[2] = lit[3] = 0; dark[0] = dark[1] = dark[2] = dark[3] = 0;
+    for (let i = 0; i < lights.length; i++) {
+      const l = lights[i], c = trimClass(l);
+      if (c < 0) continue;
+      if (isDark(l)) dark[c]++; else lit[c]++;
+    }
+    t.frame++;
+    let drop = 0;
+    for (let c = 0; c < 4; c++) {
+      const want = (c & 1) === 1 ? lit[c] : lightStep(lit[c]);
+      if (want >= t.held[c] || t.frame - t.since[c] > TRIM_HOLD) { t.held[c] = want; t.since[c] = t.frame; }
+      keep[c] = Math.min(dark[c], Math.max(0, t.held[c] - lit[c]));
+      drop += dark[c] - keep[c];
+    }
+    if (drop === 0) return 0;
+    let n = 0;
+    for (let i = 0; i < lights.length; i++) {
+      const l = lights[i], c = trimClass(l);
+      if (c >= 0 && isDark(l)) { if (keep[c] > 0) keep[c]--; else continue; }
+      lights[n++] = l;
+    }
+    lights.length = n;
+    return drop;
+  }
+
+  /** diagnostics (this.ablate): each one changes the picture; they exist to attribute GPU time (gpu-ablate.sh) */
+  _ablate(scene, lights) {
+    const ab = this.ablate, r = this.facade;
+    if (ab.shadows === 0) r.shadowMap.enabled = false;
+    if (ab.shadowType !== undefined && r.shadowMap.enabled) r.shadowMap.type = ab.shadowType;
+    if (ab.env === 0 && scene.environment) scene.environment = null;
+    let n = 0;
+    for (let i = 0; i < lights.length; i++) {
+      const l = lights[i], local = l.isPointLight === true || l.isSpotLight === true;
+      if (ab.lights === 0 && local) continue;                       // no point / spot light at all
+      if (ab.localShadows === 0 && local && l.castShadow) l.castShadow = false;
+      if (ab.shadowScale !== undefined && l.castShadow && l.shadow) {
+        const s = l.shadow, m = s.mapSize;
+        if (s._frSize === undefined || s._frSet !== m.x) { s._frSize = m.x; s._frSizeY = m.y; }
+        m.x = Math.max(1, Math.floor(s._frSize * ab.shadowScale)); m.y = Math.max(1, Math.floor(s._frSizeY * ab.shadowScale));
+        s._frSet = m.x;
+      }
+      lights[n++] = l;
+    }
+    lights.length = n;
   }
 
   /**
