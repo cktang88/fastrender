@@ -267,7 +267,7 @@ jobs:
           echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-direct.log" || true
       # A REAL game (cktang88/3d-world-objects + patches/3d-world-objects-000{1,2}: air mode, three r187) natively on our
       # default three (r187) vs its browser golden (docs/notes/real-game-3d-world-objects.md): MAE + unsupported counts.
-      - name: real game 3d-world-objects - native vs browser golden (non-gating)
+      - name: real game 3d-world-objects - native vs browser golden (MAE gated in the next step)
         if: ${{ !cancelled() }}
         continue-on-error: true
         env:
@@ -277,7 +277,7 @@ jobs:
           # apply to its HEAD), then the patches: air mode + three r187. Pinned, so the golden stays comparable.
           WO_BASE=073aa9eae0ba86cecb16970162593281714214e3
           if ! { git init -q ../3d-world-objects && git -C ../3d-world-objects fetch -q --depth 1 https://github.com/cktang88/3d-world-objects "$WO_BASE" && git -C ../3d-world-objects checkout -q FETCH_HEAD; } > wo-clone.txt 2>&1; then
-            echo "game repo not readable from this job: skipped"; bash .github/annotate.sh warning "world-objects: skipped (fetch failed)" wo-clone.txt 5; exit 0
+            echo "game repo not readable from this job: skipped"; touch wo-skipped; bash .github/annotate.sh warning "world-objects: skipped (fetch failed)" wo-clone.txt 5; exit 0
           fi
           for p in patches/3d-world-objects-000*.patch; do
             git -C ../3d-world-objects -c user.name=ci -c user.email=ci@localhost am -q "$PWD/$p" || { echo "::error title=world-objects::$p does not apply"; exit 1; }
@@ -297,12 +297,19 @@ jobs:
             grep -A40 "stop reason\|frame #0" wo-lldb.txt | head -60 > wo-bt.txt; bash .github/annotate.sh notice "world-objects crash backtrace" wo-bt.txt 60
           fi
           node js/golden/diff.mjs js/golden/world-objects-ref.png golden-native-world-objects.png golden-diff-world-objects.png | tee world-objects-golden.json
-          echo "::notice title=world-objects golden (MAE vs browser r170)::$(cat world-objects-golden.json)"
+          echo "::notice title=world-objects golden (MAE vs browser, r187)::$(cat world-objects-golden.json)"
           { echo "world-objects golden: $(cat world-objects-golden.json)"; cat world-objects-summary.txt; } >> "$GITHUB_STEP_SUMMARY"
           # per-frame costs once the level has streamed in (no API validation; the paravirtual GPU's ms are not an Air's)
           rc4=0; env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 60 > world-objects-cost.txt 2>&1 || rc4=$?
           grep -E "world-objects:|three frame cost|three programs:|fps" world-objects-cost.txt | cut -c1-1500 > world-objects-cost-summary.txt
           bash .github/annotate.sh notice "world-objects per-frame cost, frames 61-90 (exit $rc4)" world-objects-cost-summary.txt 20
+      # gate (15 Nov, r187 + patches): MAE 50.5 in run 43706682669; the rest is mostly render targets the game samples
+      # (black glass), sprites / crowd and tree leaves. A regression guard: tighten as those land.
+      - name: real game 3d-world-objects MAE<60
+        if: ${{ !cancelled() }}
+        run: |
+          test -f wo-skipped && { echo "game not fetched: skipped"; exit 0; }
+          node -e "const r=JSON.parse(require('fs').readFileSync('world-objects-golden.json','utf8'));console.log('world-objects MAE',r.mae);if(!(r.mae<60))process.exit(1)"
       - name: real game 3d-world-objects - every program translates (src/xlat.rs) and compiles (Apple metal)
         if: ${{ !cancelled() }}
         continue-on-error: true

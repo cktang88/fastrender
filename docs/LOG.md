@@ -2,6 +2,39 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: the real game (3d-world-objects) renders natively on macOS CI: MAE 50.5 (r187), gated < 60
+
+`cktang88/3d-world-objects` (unchanged `src/main.ts`; pinned at 073aa9e + patches/0001 air mode + 0002 three r187),
+JavaScriptCore + three r187 + `FastRenderer({ programs: 'three' })`, vs its browser golden (r187 WebGLRenderer,
+SwiftShader, regenerated), 1280×800 spawn view, Metal API validation on, macos-26 paravirtual GPU.
+
+| run | change | MAE |
+|---|---|---:|
+| 43698589636 | `EXC_BAD_ACCESS` in `ThreeScene::prepare` (also with 1 draw) | – |
+| 43700554360 | **ring fix**: growing the object buffer replaced the whole slot, i.e. the ring update() had sized and filled → a fresh 64 KB ring overrun by FrFrame/FrObject writes. src/ring.rs: per-frame RingLayout, region Bumps, bounds-checked RingWriter (debug assert, counted refusals in release, unit-tested). Then API validation: RGBA8 bound to `batchingIdTexture` (`usampler2D`) | – |
+| 43701730479 | integer samplers bind a zero R32Uint/R32Sint (reflected `Texture.sample`); first frame (r170, no IBL, BatchedMesh skipped) | 79.2 |
+| 43701837272 | BatchedMesh: one draw per instance, plain program | 79.2 |
+| 43702851774 | + PMREM/IBL (render-target work, other agent) | 39.1 (r170 golden) |
+| 43705569293 | game on r187 (patches), golden regenerated on r187; every GLB failed in JSC (`AbortSignal` missing) | 49.9 |
+| 43706682669 | AbortSignal polyfill | **50.5** |
+
+Also in this round: translator rules for `#` in `SHADER_NAME` (6 programs / 27 % of draws failed) and Vulkan-only
+keywords (`sampler` in the transmission chunk; 55 words found by compiling every candidate with glslang under ES 3.00
+and Vulkan 4.50); per-instance attributes (InstancedBufferAttribute: windows, trees, crowd) as per-instance vertex
+streams; r170 RGBA-packed shadow maps rendered natively; three's shadow update rules (SHADOW_KEEP: the far CSM
+cascade every 4th frame, padding lights never). Every program of the spawn view translates and compiles with Apple's
+`metal`: 64/64 (r170), 84/84 (r187), new CI step. Existing goldens unchanged (city 0.97, parity 0.96 / 0.84 / 0.83).
+
+Per-frame cost on the CI host after the level streamed in (frames 61–90, no API validation, r187, run 43706682669):
+render() CPU 72.9 ms (JS 32.3, native prepare 0.49, encode 1.55), GPU 54.1 ms (paravirtual: not an Air), 1,991 draws
+sent, 1,175 after culling, 121 material instances, 2 CSM maps / 1 pass per frame, 45 casters through three's depth
+programs + 232 native depth-only, ring 1.35 MB/frame, 0 refused ring writes. The golden frames (12–14) still cost
+1.7 s of JS each (streaming + 57 Metal compiles under validation, 27 s total).
+
+What the remaining 50 is (docs/notes/real-game-3d-world-objects.md): glass / window panels and car bodies black
+(`render target texture never bound` ~101 bindings/frame), no people (Sprites 19/frame, the crowd), tree leaves, the
+r187 golden's brighter sky/env, canvas textures in JSC (51/frame).
+
 ## 2026-11-15: render targets natively: three's own PMREMGenerator and EffectComposer, IBL golden 0.10 / bloom 0.22
 
 Render targets are resources (kind 5) and a frame is a list of PASSes (docs/PROTOCOL.md "Render targets and passes",

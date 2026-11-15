@@ -16,7 +16,7 @@ what breaks, and the numbers.
 | JSC build in a bare `vm` context with an `__fr` shaped like `src/jsc.rs` + `src/image.rs` | `js/test/world-objects.jsc-sim.mjs` | **reaches v3 frames (magic FRM3), 2814 draws** (its mock `program` applies the SHADER_NAME fix, gap 1) |
 | Native file + image access for JSC: `__fr.readFile(path)` (root `$FASTRENDER_ASSETS`), `__fr.decodeImage(u8)` (PNG/JPEG/WebP via the `image` crate) | `src/image.rs` + one hook line in `src/jsc.rs` (+ `mod image;`) | unit-tested on Linux; macOS binding type-checked (`rustc --target aarch64-apple-darwin`), runs in CI |
 | Golden: the game's real WebGLRenderer, headless Chromium/SwiftShader, same driver/view | `js/golden/world-objects.reference.mjs` → `js/golden/world-objects-ref.png` (+ `.json`) | **done** (spawn view, 5 Av sidewalk looking north) |
-| CI: build the JSC bundle, `fastrender bench --three` natively, diff vs the golden, print MAE + unsupported counts | `.github/workflows/mac.yml` (last step before upload, `continue-on-error`) | needs the game repo to be cloneable from the job (skips with a warning otherwise) |
+| CI: fetch the game at the patches' base, `git am` patches/0001+0002, build the JSC bundle, `fastrender bench --three` natively, diff vs the golden (gated MAE < 60), per-frame cost bench, every program through xlat + Apple metal | `.github/workflows/mac.yml` (last steps) | **renders** (MAE 50.5, run 43706682669) |
 
 Host decision: **JavaScriptCore with stubs works for boot + rendering**, but loses the game's canvas-painted textures
 (106 canvases: signage, facades, shop fixtures, the minimap) because JSC has no 2D canvas. For full fidelity (and DOM HUD,
@@ -122,13 +122,18 @@ What it took, in run order (all CI runs on the macos-26 paravirtual GPU, Metal A
 | 43701730479 | **first native frame of the real game** (r170, BatchedMesh skipped, no IBL) | 79.2 |
 | 43701837272 | + BatchedMesh as per-instance draws | 79.2 |
 | 43702851774 | + PMREM / IBL (render-target work) | **39.1** |
-| (r187, see LOG) | patched game on r187, golden regenerated | see docs/LOG.md |
+| 43705569293 | patched game on r187, golden regenerated on r187; every GLB failed in JSC (`AbortSignal` missing) | 49.9 |
+| 43706682669 | AbortSignal polyfill (r187, models load) | **50.5** (gated < 60) |
 
 All 64 (r170) / 84 (r187) programs of the spawn view translate with src/xlat.rs and compile with Apple's `metal`
 (CI step "every program translates"). What remains visible in the r170 IBL image: glass / window panels and car
 bodies black (the game's window materials sample render targets that are never rendered: `render target texture never
 bound` ~100 bindings/frame; `depth texture outside a render target` ~95: the weather occlusion map), no people
 (Sprites, and the VAT crowd), tree leaves, softer shadows in the browser.
+
+Per-frame cost on the CI host, r187 (run 43706682669), frames 61–90: **render() CPU 72.9 ms (JS 32.3, prepare 0.49,
+encode 1.55), GPU 54.1 ms**, 1,175 draws after culling, 45 casters through three's depth programs + 232 native.
+The r187 golden is brighter and bluer than r170's (new PMREM / sky), so its MAE is not comparable with the r170 39.1.
 
 Per-frame cost on the CI host (JavaScriptCore + Metal, paravirtual GPU; not an Air), frames 61–90 after boot (level
 streamed in), r170 + IBL (run 43702851774): **render() CPU 95.0 ms (JS 68.8, native prepare 1.04, encode 2.77),
