@@ -255,14 +255,16 @@ fn write_stage(dir: &Path, h: Hash, src: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, p)
 }
 
-/// Stage files no manifest program refers to any more (aged out), and temporary files a crash left.
-fn tidy_stages(dir: &Path, m: &Manifest) {
+/// Stage files of earlier launches (older than `before`) no manifest program refers to any more (aged out), and
+/// temporary files a crash left. Files this launch wrote stay: their program may not be in `m` yet.
+fn tidy_stages(dir: &Path, m: &Manifest, before: std::time::SystemTime) {
     let live: std::collections::HashSet<String> = m.programs().flat_map(|p| [hex(p.vertex), hex(p.fragment)]).collect();
     let Ok(rd) = std::fs::read_dir(dir.join("stages")) else { return };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         let keep = name.strip_suffix(".metal").is_some_and(|k| live.contains(k));
-        if !keep && !name.ends_with(&format!(".{}.tmp", std::process::id())) {
+        let old = e.metadata().and_then(|md| md.modified()).is_ok_and(|t| t < before);
+        if !keep && old {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -321,7 +323,7 @@ pub struct Stats {
     /// stage libraries compiled, and their worker time
     pub libraries: usize,
     pub library_ms: f64,
-    /// library requests answered by an identical stage already compiled (or compiling)
+    /// stages of added programs that an earlier program (or the manifest) had already brought: not compiled again
     pub libraries_shared: usize,
     /// pipelines built (compiled or from the archive), and their worker time
     pub pipelines: usize,
@@ -360,6 +362,8 @@ struct Entry<T> {
 
 #[derive(Clone, Copy)]
 enum Job {
+    /// one stage library, so a program's two stages compile on two workers
+    Stage(Hash),
     Program(Hash),
     Pipeline(PipelineKey),
     Persist,
@@ -384,6 +388,7 @@ struct State<B: PipelineBackend> {
 struct Shared<B: PipelineBackend> {
     backend: B,
     dir: Option<PathBuf>,
+    started: std::time::SystemTime,
     state: Mutex<State<B>>,
     /// workers wait here for jobs
     work: Condvar,
@@ -418,26 +423,15 @@ impl<B: PipelineBackend> Shared<B> {
     fn library(&self, h: Hash) -> Result<B::Library, LibError> {
         let src = {
             let mut st = self.lock();
-            // one "shared" count per request that did not have to compile
-            let mut counted = false;
             loop {
-                let found = match st.libs.get(&h) {
-                    Some(Lib::Ready(l)) => Some(Ok(l.clone())),
-                    Some(Lib::Failed(e)) => Some(Err(LibError::Failed(e.clone()))),
-                    Some(Lib::Compiling) => None,
+                match st.libs.get(&h) {
+                    Some(Lib::Ready(l)) => return Ok(l.clone()),
+                    Some(Lib::Failed(e)) => return Err(LibError::Failed(e.clone())),
+                    // another worker has it; if that one finds no source (a manifest stage not on disk) the entry
+                    // goes away and this request compiles it
+                    Some(Lib::Compiling) => st = self.wait(st),
                     None => break,
-                };
-                if !std::mem::replace(&mut counted, true) {
-                    st.stats.libraries_shared += 1;
                 }
-                match found {
-                    Some(r) => return r,
-                    None => st = self.wait(st),
-                }
-            }
-            if counted {
-                // the worker that had it found no source (a manifest stage not on disk): this request compiles it
-                st.stats.libraries_shared -= 1;
             }
             st.libs.insert(h, Lib::Compiling);
             st.sources.get(&h).cloned()
@@ -460,6 +454,7 @@ impl<B: PipelineBackend> Shared<B> {
         st.stats.libraries += 1;
         st.stats.library_ms += ms;
         st.libs.insert(h, match &r { Ok(l) => Lib::Ready(l.clone()), Err(e) => Lib::Failed(e.clone()) });
+        st.sources.remove(&h); // the library is what later requests get
         drop(st);
         self.done.notify_all();
         r.map_err(LibError::Failed)
@@ -569,7 +564,7 @@ impl<B: PipelineBackend> Shared<B> {
         if let Some(dir) = self.dir.as_deref() {
             if let Some(m) = manifest {
                 match m.save(dir) {
-                    Ok(()) => tidy_stages(dir, &m),
+                    Ok(()) => tidy_stages(dir, &m, self.started),
                     Err(e) => result = Err(format!("manifest not written in {}: {e}", dir.display())),
                 }
             }
@@ -604,6 +599,7 @@ impl<B: PipelineBackend> Shared<B> {
                 }
             };
             match job {
+                Job::Stage(h) => drop(self.library(h)),
                 Job::Program(h) => self.run_program(h),
                 Job::Pipeline(k) => self.run_pipeline(k),
                 Job::Persist => self.run_persist(),
@@ -667,7 +663,7 @@ impl<B: PipelineBackend> Compiler<B> {
         }
         (st.stats.manifest_programs, st.stats.manifest_pipelines) = st.manifest.len();
         st.stats.prewarm_queued = st.prewarm.len();
-        let shared = Arc::new(Shared { backend, dir, state: Mutex::new(st), work: Condvar::new(), done: Condvar::new() });
+        let shared = Arc::new(Shared { backend, dir, started: std::time::SystemTime::now(), state: Mutex::new(st), work: Condvar::new(), done: Condvar::new() });
         for i in 0..workers.max(1) {
             let s = shared.clone();
             let spawned = std::thread::Builder::new().name(format!("fr-compile-{i}")).spawn(move || {
@@ -688,8 +684,17 @@ impl<B: PipelineBackend> Compiler<B> {
     pub fn add_program(&self, info: ProgramInfo, vertex_msl: Arc<str>, fragment_msl: Arc<str>) -> Hash {
         let h = info.hash();
         let mut st = self.shared.lock();
-        st.sources.entry(info.vertex).or_insert(vertex_msl);
-        st.sources.entry(info.fragment).or_insert(fragment_msl);
+        let fragment = info.fragment;
+        for (stage, msl) in [(info.vertex, vertex_msl), (fragment, fragment_msl)] {
+            // an identical stage came with an earlier program (or the manifest compiled it): one library for both
+            if st.libs.contains_key(&stage) || st.sources.contains_key(&stage) {
+                st.stats.libraries_shared += 1;
+            }
+            // kept until the library exists: a manifest job that is looking for this stage on disk may not find it
+            if !matches!(st.libs.get(&stage), Some(Lib::Ready(_) | Lib::Failed(_))) {
+                st.sources.entry(stage).or_insert(msl);
+            }
+        }
         st.manifest.use_program(&info);
         st.infos.entry(h).or_insert_with(|| Arc::new(info));
         let e = st.programs.entry(h).or_insert(Entry { work: Work::Queued, wanted: false });
@@ -705,9 +710,11 @@ impl<B: PipelineBackend> Compiler<B> {
             None => {}
         }
         if queue {
-            // ahead of the manifest's queue (a second copy there is skipped when its turn comes)
+            // ahead of the manifest's queue (a second copy there is skipped when its turn comes); the fragment
+            // stage as its own job: another worker compiles it while this program's job is on the vertex stage
             st.demand.push_back(Job::Program(h));
-            self.shared.work.notify_one();
+            st.demand.push_back(Job::Stage(fragment));
+            self.shared.work.notify_all();
         }
         h
     }
@@ -862,7 +869,7 @@ mod tests {
         assert_eq!(fake.pipes.load(Ordering::SeqCst), 1);
         let s = c.stats();
         assert_eq!((s.libraries, s.pipelines, s.pending_programs, s.pending_pipelines), (3, 1, 0, 0));
-        assert!(s.libraries_shared >= 3);
+        assert_eq!(s.libraries_shared, 3, "b's vertex stage, a2's two stages");
     }
 
     #[test]
