@@ -2,6 +2,30 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: review 4 (independent) of everything since review 3
+
+The JS findings were reproduced with scratch scripts; the native ones are from reading the code.
+
+| Severity | Finding | Owner |
+|---|---|---|
+| Critical | A nested `render()` from `onBeforeRender` (Reflector, Water) drops the screen pass every frame | fidelity agent |
+| Critical | **Per-frame caches reset by a second scene.** One global `_frameKey`, so a HUD scene, composer quad or PMREM resets every material's variants. With 200 materials: 0.85 → 3.5 ms. Likely a big share of the real game's JS cost. | fidelity agent |
+| High | **`envMap` swap.** A swapped `material.envMap` is ignored until the next program rebuild. | fidelity agent |
+| High | **`renderOrder`** is sent but not used in sorting | fidelity agent |
+| High | **Pass ordering.** Screen passes are encoded after all offscreen passes, so a screen pass sees a target's end-of-frame contents. Split-screen with shared targets or cascaded shadows breaks. | next wave: render graph |
+| High | **Render scale and MetalFX skip render-target frames.** EffectComposer scenes render at full resolution, and HUD depth corrupts the motion vectors. Passes need classifying as world, post or overlay before MetalFX temporal can be used with a composer. | next wave: render graph |
+| High | **Synchronous Metal compiles on the render thread** (hitches) and no `MTLBinaryArchive` | next wave: async compile / Metal 4 compiler |
+| High | **No library seam for Electron** | Electron agent (in progress) |
+| Medium | Native per-frame allocations (pass slots, clones, `serde_json` per VSM light) | next wave |
+| Medium | Per-draw state churn | next wave |
+| Medium | Memoryless depth reuse | next wave |
+| Medium | MSAA targets render single-sampled | next wave |
+| Medium | No stencil | next wave |
+| Medium | Ring copy after an error frame | next wave |
+| Medium | Shadow maps never freed | next wave |
+
+Checked and fine: the `defer_releases` ordering, ring bounds, the reserved-word renaming and `src/image.rs`.
+
 ## 2026-11-15: the real game (3d-world-objects) renders natively on macOS CI: MAE 50.5 (r187), gated < 60
 
 `cktang88/3d-world-objects` (unchanged `src/main.ts`; pinned at 073aa9e + patches/0001 air mode + 0002 three r187),
