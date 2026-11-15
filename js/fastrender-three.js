@@ -460,9 +460,10 @@ export class FastRenderer {
   _collect(o) {
     const g = o.geometry;
     if (!g || !g.attributes || !g.attributes.position) return;
-    // BatchedMesh: three draws it with multi-draw (gl_DrawID -> batchingIdTexture, an integer texture); one plain
-    // draw of the whole geometry would put every sub-mesh at the batch origin: skipped, counted
-    if (o.isBatchedMesh) { this._unsupported('BatchedMesh'); return; }
+    // BatchedMesh: three draws it with multi-draw (gl_DrawID -> batchingIdTexture -> batchingTexture matrices). v3
+    // draws each visible instance as its own draw of its geometry range with the plain (non-batching) program;
+    // per-instance batch colours are not applied (counted). v2: skipped, counted.
+    if (o.isBatchedMesh) { if (this._tp) this._batched(o); else this._unsupported('BatchedMesh'); return; }
     if (o.isSkinnedMesh && !this._tp) this._unsupported('SkinnedMesh (drawn in bind pose)');
     if (!this._tp && g.morphAttributes && hasKeys(g.morphAttributes)) this._unsupported('morph targets');
     const geometry = this._geometry(g);
@@ -484,6 +485,36 @@ export class FastRenderer {
     }
     // WebGLRenderer passes a null group for a single-material object
     this._draw(o, g, mat, null, geometry, inst, g.drawRange.start, Math.min(g.drawRange.count, indexCount), indexCount);
+  }
+
+  /**
+   * BatchedMesh (v3): one draw per visible, active instance: a proxy object (prototype: the batch, so layers / shadow
+   * flags / material / geometry are the batch's) that is not a BatchedMesh, with the instance's world matrix, drawn
+   * over that instance's geometry range. One geometry upload for the whole batch.
+   */
+  _batched(o) {
+    const info = o._instanceInfo || o._drawInfo, ranges = o._geometryInfo || o._drawRanges;
+    if (!info || !ranges || Array.isArray(o.material)) { this._unsupported('BatchedMesh'); return; }
+    if (o._colorsTexture || o.colorTexture) this._unsupported('BatchedMesh instance colours');
+    const g = o.geometry, geometry = this._geometry(g);
+    const indexCount = g.index ? g.index.count : g.attributes.position.count;
+    const proxies = this._batchProxies || (this._batchProxies = new WeakMap());
+    let list = proxies.get(o);
+    if (!list) proxies.set(o, (list = []));
+    for (let i = 0; i < info.length; i++) {
+      const it = info[i];
+      if (!it || !it.visible || it.active === false) continue;
+      const r = ranges[it.geometryIndex ?? i];
+      if (!r || r.active === false || !(r.count > 0)) continue;
+      let p = list[i];
+      if (!p) {
+        p = list[i] = Object.create(o);
+        p.isBatchedMesh = false; p.matrixWorld = o.matrixWorld.clone();
+        p.onBeforeRender = noop; p.onBeforeShadow = noop;
+      }
+      o.getMatrixAt(i, p.matrixWorld).premultiply(o.matrixWorld);
+      this._draw(p, g, o.material, null, geometry, 0, r.start, r.count, indexCount);
+    }
   }
 
   /** one DRAWS record at this._w */
@@ -603,5 +634,6 @@ function dense(attr, n) {
 function setLength(a, n) { if (a.length !== n) a.length = n; }
 /** Object.keys(o).length > 0 without the array */
 function hasKeys(o) { for (const k in o) return true; return false; }
+const noop = () => {};
 const toU16 = (a) => (a instanceof Uint16Array ? a : Uint16Array.from(a));
 const toU32 = (a) => (a instanceof Uint32Array ? a : Uint32Array.from(a));

@@ -333,6 +333,26 @@ function decode(buf) {
     scene.remove(windows);
   }
 
+  // BatchedMesh: one draw per visible instance over its geometry range, plain program, the instance's world matrix
+  {
+    const bm = new THREE.BatchedMesh(4, 200, 400, new THREE.MeshLambertMaterial());
+    const box = bm.addGeometry(new THREE.BoxGeometry()), ball = bm.addGeometry(new THREE.SphereGeometry(0.5, 6, 4));
+    const ids = [bm.addInstance(box), bm.addInstance(ball), bm.addInstance(box)];
+    bm.setMatrixAt(ids[1], new THREE.Matrix4().makeTranslation(3, 0, 0));
+    bm.setVisibleAt(ids[2], false);
+    bm.position.y = 1; bm.updateMatrixWorld();
+    scene.add(bm);
+    r.render(scene, camera);
+    const objs = r._drawObjects.slice(0, r._nDraws).filter((o) => Object.getPrototypeOf(o) === bm);
+    assert.equal(objs.length, 2, 'two visible instances -> two draws');
+    assert.ok(near([...objs[1].matrixWorld.elements.slice(12, 15)], [3, 1, 0]), 'instance matrix x batch matrix');
+    const fr2 = decode(h.cmd);
+    const key = h.programIds.get(h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.id === fr2.draws[r._drawObjects.indexOf(objs[0])].material).at(-1).meta.program);
+    assert.ok(!h.programs.get(key).vertex.includes('#define USE_BATCHING'), 'drawn with the plain program');
+    assert.ok(!r.info.unsupported.BatchedMesh, 'not skipped');
+    scene.remove(bm);
+  }
+
   // ---------------------------------------------------------------- 5. per-frame cost: the 5000-mesh scene of three-renderer.test.mjs
   const big = new THREE.Scene();
   big.add(new THREE.DirectionalLight(0xffffff, 2), new THREE.AmbientLight(0x404040));
