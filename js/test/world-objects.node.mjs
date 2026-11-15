@@ -147,10 +147,12 @@ const tp = renderer._tp;
 const programs = tp ? new Set([...(tp.programs?.values?.() || [])]).size || tp._programs?.size || 0 : 0;
 const unsupported = Object.entries(renderer.info.unsupported).sort((a, b) => b[1] - a[1]);
 const scene = W().scene;
+let perInstanceAttrMeshes = 0; const perInstanceAttrs = new Set();
 let meshes = 0, instanced = 0, instancesTotal = 0, sprites = 0, points = 0, lines = 0, skinned = 0, lights = 0, shaderMats = new Set(), obc = new Set(), mats = new Set();
 scene.traverseVisible((o) => {
   if (o.isLight) lights++;
   if (o.isSprite) sprites++; if (o.isPoints) points++; if (o.isLine) lines++;
+  if (o.isMesh && o.geometry && Object.values(o.geometry.attributes).some((a) => a.isInstancedBufferAttribute)) { perInstanceAttrMeshes++; for (const [k, a] of Object.entries(o.geometry.attributes)) if (a.isInstancedBufferAttribute) perInstanceAttrs.add(k); }
   if (o.isMesh) { meshes++; if (o.isSkinnedMesh) skinned++; if (o.isInstancedMesh) { instanced++; instancesTotal += o.count; }
     for (const m of [].concat(o.material)) { if (!m) continue; mats.add(m); if (m.isShaderMaterial) shaderMats.add(m.type + ':' + (m.name || '')); if (Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile')) obc.add(m.type); } }
 });
@@ -163,7 +165,7 @@ const result = {
   draws: maxDraws, drawsMedian: med(per.map((p) => p.calls)), materialInstances: instances, programsTranslated: hstats.programs, programTranslateMs: Math.round(hstats.programMs),
   triangles: renderer.info.render.triangles, screenRendersPerFrame: med(per.map((p) => p.renders)),
   sceneObjects: objects, updateMatrixWorldMs: +matrixWorldMs.toFixed(2),
-  scene: { meshes, instancedMeshes: instanced, instances: instancesTotal, skinned, sprites, points, lines, lights, materials: mats.size, shaderMaterials: [...shaderMats], onBeforeCompile: [...obc] },
+  scene: { perInstanceAttrMeshes, perInstanceAttrs: [...perInstanceAttrs], meshes, instancedMeshes: instanced, instances: instancesTotal, skinned, sprites, points, lines, lights, materials: mats.size, shaderMaterials: [...shaderMats], onBeforeCompile: [...obc] },
   unsupportedPerFrame: Object.fromEntries(unsupported.map(([k, v]) => [k, +(v / frames).toFixed(2)])),
   uploadsPerFrame, uploadMBPerFrame, texturesWithoutPixelsPerFrame: Object.fromEntries(Object.entries(texKinds).map(([k, v]) => [k, +(v / frames).toFixed(1)])),
   host: hstats, world: globalThis.__worldStats, errors,

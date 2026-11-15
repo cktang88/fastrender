@@ -62,14 +62,15 @@ Per-frame JS cost, node 22 (V8), x86 container, 120 measured frames, median (p95
 
 | | ms |
 |---|---:|
-| game frame total (update + render) | 20.7 (32.6) |
-| `FastRenderer.render()` | 17.3 (26.8) |
-| of which `scene.updateMatrixWorld()` (three's own, over all 25k objects) | ~5–7 |
-| game update (player, traffic, pedestrians, lighting, weather, minimap...) | 3.2 |
+| game frame total (update + render) | 15.9 (23.9) |
+| `FastRenderer.render()` | 12.5 (19.0) |
+| of which `scene.updateMatrixWorld()` (three's own, over all 25k objects) | 3.4–6.9 |
+| game update (player, traffic, pedestrians, lighting, weather, minimap...) | 2.9 |
 | resource traffic per frame | 52 instance-buffer re-uploads (traffic/people InstancedMesh), 4 geometry, 2 texture: 0.28 MB/frame |
 
-So the game logic is cheap (3 ms); the renderer-side JS is the cost: ~6 µs per draw on top of a ~6 ms
-scene-graph matrix walk three does in WebGLRenderer too. For comparison the three-city example measured 3.3 ms of JS
+(FastRenderer as of commit 5b7e298, which includes the parallel render() optimisation work; the same run on the
+earlier FastRenderer measured 20.7 / 17.3 ms.) So the game logic is cheap (3 ms); the renderer-side JS is the cost:
+~3 µs per draw on top of a 3–7 ms scene-graph matrix walk three does in WebGLRenderer too. For comparison the three-city example measured 3.3 ms of JS
 for 288 draws in JavaScriptCore (docs/LOG.md). Cold start: translating the 71 programs (glslang + SPIRV-Cross CLIs in
 the mock host) took 1–14 s depending on cache; the native in-process translator is ~15 ms per program + Metal compile.
 
@@ -84,6 +85,7 @@ Counts are per frame from `renderer.info.unsupported` (node run, same view); the
 | 3 | **Canvas-painted textures** (JSC only): 106 canvases (shop signs, awnings, facade/fixture tiles, glyphs) have no pixels without a 2D canvas | 315 texture bindings (JSC) | large in JSC; none in node (napi canvas) or Electron | Electron host; or a native 2D canvas (CoreGraphics) behind `__fr` |
 | 4 | **Cascaded shadows (CSM addon)**: several directional shadow lights; v3 renders only the first directional map, the others bind a lit dummy; the game's per-cascade layer hook (`shadowMap.render` wrapper) never runs | every receiving draw | medium: far shadows missing / wrong cascade | render each SHADOWS entry (docs/PIPELINE.md "Not covered") |
 | 5 | **Render-to-target passes skipped**: `render to render target (fullscreen/ortho pass)` 1.2/frame, `(object pass)` 0.5, `(scene pass)` 0.1 + PMREM at boot; weather occlusion depth map, window-view captures, lighting env RT | ~2 passes | small at noon/clear (weather occlusion unused, window views are for interiors); large indoors / in rain | native render targets (the post-processing work in PIPELINE.md); `DepthTexture` uniforms (`wxOcc`, bound by every weather-patched material: the 248 "depth texture" bindings) |
+| 5b | **Per-instance attributes** (`InstancedBufferAttribute` on InstancedMesh geometry): 105 meshes: the instanced building windows (`aSize`, `aImp`, `aInfo`, `aRoom`) and the VAT crowd (`i_anim`, `i_top`, `i_skin`, ...). v3 sent them as vertex streams and the native upload rejected the whole geometry (count mismatch); now skipped and counted (`instanced attribute <name>`, per upload), so those programs read 0 | 105 meshes (every window of every building + pedestrians) | large: windows collapse to their anchor, people lose their animation/colours | a per-instance vertex step for named attributes natively (as `instanceMatrix` already has) + send them with the INSTANCES upload |
 | 6 | **Sprites** (`THREE.Sprite`) not drawn | 30 | small (far pedestrians / labels) | instanced billboards with three's sprite program |
 | 7 | **Transmission** (MeshPhysicalMaterial glass): the transmission program fails translation: `sampler` is a parameter name in three's `textureBicubic(sampler2D sampler, ...)`, a reserved word in Vulkan GLSL; also needs the transmission pass | 2 | small here (revolving door glass) | rename `sampler` identifiers in `normalizeGlsl`; transmission pass later |
 | 8 | Lines | 0.1 | none | |
@@ -104,16 +106,25 @@ Crash fixes made in `js/fastrender-three.js` (both small and separate):
 (player 49.8, 0, 9, yaw −0.12), three r170 WebGLRenderer, SwiftShader. SwiftShader needs ~25–50 s per frame of this
 scene once its queue is full, so the reference uses few frames and reads pixels back in the draw's task
 (`__worldCapture`, no `preserveDrawingBuffer`). The native side runs the same frame count (`--warmup 11 --frames 3`).
-**MAE: not measured yet** (needs the macOS job with access to the game repo). Expected differences before any MAE
+**MAE: not measured yet.** The CI job CAN clone the game repo (run 43698589636), builds the JSC bundle and boots the
+game natively (the `[boot]` log matches node: level built, first frame with 1,298 calls), then **crashes in the native
+side**: `EXC_BAD_ACCESS` in `mac_three::ThreeScene::prepare` (a 32-byte store, `stp q1, q2, [x8]`: an FrFrame /
+FrObject write past the slot ring), also with `FASTRENDER_V3_MAX_DRAWS=1`, so it is not the main pass; the shadow
+pass writes `take(RING_ALIGN)` frames per shadow face with no `ring_cap` check, and this scene has CSM cascades plus
+31 lights. Before that fix (src/mac_three.rs, owned elsewhere) a first run hit a GPU timeout. The step prints the
+lldb backtrace as an annotation. Expected differences before any MAE
 is meaningful: gaps 1–4 above (missing materials if the `#` fix isn't in, no IBL, single shadow cascade) and the
 canvas textures in JSC.
 
 ## Next steps (in order)
 
+0. Native crash: bound the ring writes in `prepare_shadows_v3` / size `shadow_area` for every SHADOWS face (CSM +
+   point lights), then read the golden MAE from the CI step.
 1. Translator: drop `#define SHADER_NAME` (or sanitise it) and rename `sampler` identifiers in `normalizeGlsl` /
    `src/xlat.rs`: +766 draws, the single biggest correctness gap, a few lines.
 2. IBL: bind three's PMREM CubeUV texture (render PMREM natively once at load, or upload RoomEnvironment's prefiltered
    cube) so `envMap` programs work: fixes the look of every PBR surface.
+2b. Per-instance attributes (InstancedBufferAttribute) natively: the windows and the crowd.
 3. Shadows for all SHADOWS entries (CSM cascades), and call the game's `shadowMap.render` hook semantics (layer masks).
 4. Render targets (weather occlusion depth, window views) → the post-processing milestone; then the composer for
    `quality=high`.
