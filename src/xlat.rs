@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 /// Bumped whenever the translation output (MSL or layout) can change, so stale cache entries are never used.
 /// The `xlat-N` part is bumped by hand when this module's output changes; the crate versions are checked against
 /// Cargo.lock by the `translator_version_matches_lockfile` test.
-pub const TRANSLATOR_VERSION: &str = "xlat-6 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
+pub const TRANSLATOR_VERSION: &str = "xlat-7 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
 
 pub const DEFAULT_BLOCK_BUFFER: u32 = 1;
 pub const OBJECT_BLOCK_BUFFER: u32 = 2;
@@ -819,6 +819,10 @@ fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture
     o.argument_buffers = false;
     o.common.fixup_clipspace = model == ExecutionModel::Vertex;
     o.common.flip_vertex_y = false;
+    // WebGL (ANGLE) zero-initialises every local a shader leaves uninitialised; Metal leaves it undefined. Games rely
+    // on it without knowing: an `out` parameter a function only writes on some paths (3d-world-objects' window
+    // shader: `roomShade(out float lampGlow)`) is read back as garbage (NaN -> black glass) without this.
+    o.common.force_zero_initialized_variables = true;
     let out = sc(c.compile(&o))?;
     let msl = gl_derivatives(&out.to_string());
     if model == ExecutionModel::Fragment { gl_frag_coord(&msl) } else { Ok(msl) }
@@ -826,7 +830,7 @@ fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture
 
 /// The MSL option set `to_msl` uses, part of every cache key (a change in the options is a change in the output).
 pub const MSL_OPTIONS: &str =
-    "msl3.0 macos no-argument-buffers fixup_clipspace(vertex) no-flip-y dfdy-gl fragcoord-gl(buffer0) per-stage-bindings constexpr-fixed-samplers split-sampler-arrays";
+    "msl3.0 macos no-argument-buffers fixup_clipspace(vertex) no-flip-y dfdy-gl fragcoord-gl(buffer0) per-stage-bindings constexpr-fixed-samplers split-sampler-arrays zero-init-locals";
 
 /// Metal's window y axis points down, GL's up: `dfdy` has the opposite sign of GLSL's `dFdy`. three relies on the GL
 /// sign (flat shading: `cross(dFdx(p), dFdy(p))`; normal mapping without tangents: `getTangentFrame`), so every
@@ -1802,6 +1806,15 @@ mod tests {
         assert!(p.vertex_msl.contains("FrObject& ") && p.vertex_msl.contains("[[buffer(2)]]"));
         // three's GL-convention projection is fed unchanged; z is remapped to Metal's range in the shader
         assert!(p.vertex_msl.contains("gl_Position.z = (out.gl_Position.z + out.gl_Position.w) * 0.5"));
+    }
+
+    /// WebGL zero-initialises locals (ANGLE); an `out` parameter written on one path only must read back 0, not garbage
+    #[test]
+    fn uninitialised_locals_are_zero() {
+        let v = "#version 300 es\nvoid main() { gl_Position = vec4(0.0); }";
+        let f = "#version 300 es\nprecision highp float;\nout vec4 o;\nuniform float k;\nvoid g(out float x) { if (k > 1.0) x = 1.0; }\nvoid main() { float y = 0.0; g(y); o = vec4(y); }";
+        let p = translate(v, f).unwrap();
+        assert!(p.fragment_msl.contains("= {};"), "{}", p.fragment_msl);
     }
 
     #[test]
