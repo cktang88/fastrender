@@ -250,8 +250,8 @@ pub fn build_city(props: u32, lights: u32, seed: u64) -> Scene {
         for bx in -BLOCKS / 2..=BLOCKS / 2 {
             for bz in -BLOCKS / 2..=BLOCKS / 2 {
                 if ls.len() as u32 >= lights { break 'outer; }
-                let x = bx as f32 * pitch_x - STREET * 0.5 + (pass % 2) as f32 * pitch_x * 0.5;
-                let z = bz as f32 * pitch_z - STREET * 0.5 + (pass / 2) as f32 * pitch_z * 0.5;
+                let x = bx as f32 * pitch_x + (pass % 2) as f32 * pitch_x * 0.5;
+                let z = bz as f32 * pitch_z + (pass / 2) as f32 * pitch_z * 0.5;
                 let hue = (i % 3) as f32;
                 ls.push(Light { pos_radius: [x, 5.0, z, 18.0], color: [3.0 + hue * 0.2, 2.2, 1.2 + hue * 0.3, 0.0] });
                 i += 1;
@@ -267,7 +267,7 @@ pub fn camera_at(t: f32) -> (Vec3, Vec3) {
     let speed = 9.0; // m/s, a slow drive
     let len = BLOCKS as f32 * pitch_x * 0.8;
     let s = (t * speed) % (2.0 * len);
-    let avenue_x = -STREET * 0.5 + pitch_x; // centre of a street between blocks
+    let avenue_x = pitch_x; // streets are centred on multiples of the block pitch
     let (pos, dir) = if s < len {
         (Vec3::new(avenue_x, 1.7, -len * 0.5 + s), Vec3::new((t * 0.3).sin() * 0.35, -0.03, 1.0))
     } else {
@@ -399,6 +399,10 @@ mod tests {
             let (p, d) = camera_at(i as f32 * 0.1);
             assert!(p.x.abs() < s.extent && p.z.abs() < s.extent, "camera left the city at {p}");
             assert!((d.length() - 1.0).abs() < 1e-4);
+            // not inside a block (blocks + sidewalks span +-(BLOCK_X/2 + 3) around (k+0.5)*pitch)
+            let pitch_x = BLOCK_X + STREET;
+            let local = (p.x / pitch_x).rem_euclid(1.0) * pitch_x - pitch_x * 0.5;
+            assert!(local.abs() > BLOCK_X * 0.5 + 3.0, "camera at x={} is inside a block", p.x);
         }
     }
 
