@@ -136,6 +136,7 @@ jobs:
       # prints PASS/FAIL lines, writes electron-*.png / electron-*-spike.json into the artifact below.
       - name: electron spike - build addon (napi-rs 3) + Electron 45
         id: electron_build
+        if: ${{ !cancelled() }}  # independent of the earlier (non-electron) steps
         continue-on-error: true
         working-directory: host/electron
         run: |
@@ -147,7 +148,7 @@ jobs:
           ls -la native/*.node
           npx electron --version
       - name: electron spike - Metal view under transparent web contents (subview stacking)
-        if: steps.electron_build.outcome == 'success'
+        if: ${{ !cancelled() && steps.electron_build.outcome == 'success' }}
         continue-on-error: true
         working-directory: host/electron
         run: |
@@ -155,7 +156,7 @@ jobs:
           npx electron app/main.js --frames 120 --out "$GITHUB_WORKSPACE" --tag electron-subview --stack subview 2>&1 | tee "$GITHUB_WORKSPACE/electron-subview.log"
           echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-subview.log" || true
       - name: electron spike - fallback stacking (child NSWindow below a transparent parent)
-        if: steps.electron_build.outcome == 'success'
+        if: ${{ !cancelled() && steps.electron_build.outcome == 'success' }}
         continue-on-error: true
         working-directory: host/electron
         run: |
@@ -163,7 +164,7 @@ jobs:
           npx electron app/main.js --frames 60 --out "$GITHUB_WORKSPACE" --tag electron-childwindow --stack childwindow 2>&1 | tee "$GITHUB_WORKSPACE/electron-childwindow.log"
           echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-childwindow.log" || true
       - name: electron spike - direct mode (contextIsolation off, no bridge) for the per-call cost comparison
-        if: steps.electron_build.outcome == 'success'
+        if: ${{ !cancelled() && steps.electron_build.outcome == 'success' }}
         continue-on-error: true
         working-directory: host/electron
         run: |
