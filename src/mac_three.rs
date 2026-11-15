@@ -90,13 +90,15 @@ pub struct ThreeView {
     /// direction towards the shadow-casting directional light (if any)
     pub sun: Option<Vec3>,
     pub tonemap: (u32, f32),
+    /// the game's shadow camera, already in Metal clip space
+    pub shadow_vp: Option<Mat4>,
 }
 
 pub struct ThreeScene {
     host: Box<ScriptHost>,
     pipes: Pipes,
     geos: HashMap<u32, Geo>,
-    texs: HashMap<u32, Texture>,
+    texs: HashMap<u32, (Texture, TextureMeta)>,
     mats: HashMap<u32, Mat>,
     mat_rows: Vec<ThreeMat>,
     mat_buf: Buffer,
@@ -109,6 +111,8 @@ pub struct ThreeScene {
     lights: Vec<ThreeLight>,
     /// visible draws this frame: (draw index, object slot)
     visible: Vec<(usize, usize)>,
+    /// shadow casters this frame (visible or not): (draw index, object slot)
+    casters: Vec<(usize, usize)>,
     pub view: ThreeView,
     pub error: Option<String>,
     pub unsupported_resources: usize,
@@ -187,7 +191,8 @@ impl ThreeScene {
             draws: Vec::new(),
             lights: Vec::new(),
             visible: Vec::new(),
-            view: ThreeView { view: Mat4::IDENTITY, proj: Mat4::IDENTITY, cam_pos: Vec3::ZERO, background: [0.0, 0.0, 0.0, 1.0], fog: None, sun: None, tonemap: (0, 1.0) },
+            casters: Vec::new(),
+            view: ThreeView { view: Mat4::IDENTITY, proj: Mat4::IDENTITY, cam_pos: Vec3::ZERO, background: [0.0, 0.0, 0.0, 1.0], fog: None, sun: None, tonemap: (0, 1.0), shadow_vp: None },
             error: None,
             unsupported_resources: 0,
             last_t: 0.0,
@@ -215,6 +220,7 @@ impl ThreeScene {
             self.view.background = f.background;
             self.view.fog = f.fog;
             self.view.tonemap = f.tonemap;
+            self.view.shadow_vp = f.shadow_vp.map(|m| three::gl_to_metal(&Mat4::from_cols_array(&m)));
             self.lights.clear();
             self.lights.extend_from_slice(&f.lights[..f.lights.len().min(MAX_LIGHTS)]);
             self.draws.clear();
@@ -330,7 +336,6 @@ impl ThreeScene {
             b.generateMipmapsForTexture(&t);
             b.endEncoding();
         }
-        self.texs.insert(id, t);
         // materials referencing this texture carry its transform; refresh them
         for mat in self.mats.values() {
             if mat.meta.map == id {
@@ -340,6 +345,7 @@ impl ThreeScene {
                 self.mat_dirty = true;
             }
         }
+        self.texs.insert(id, (t, m));
         Ok(())
     }
 
@@ -353,6 +359,12 @@ impl ThreeScene {
             map_xform: [1.0, 1.0, 0.0, 0.0],
             misc: [0, m.flags, 0, 0],
         };
+        // textures usually upload before the material that uses them: take the transform now
+        let mut row = row;
+        if let Some((_, tm)) = self.texs.get(&m.map) {
+            row.map_xform = [tm.repeat[0], tm.repeat[1], tm.offset[0], tm.offset[1]];
+            row.misc[0] = tm.flip_y as u32;
+        }
         let idx = match self.mats.get(&id) {
             Some(existing) => existing.row,
             None => {
@@ -386,10 +398,13 @@ impl ThreeScene {
     }
 
     /// Cull, sort and write object records + lights for `slot`. Returns the number of draws.
-    pub fn prepare(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], cam: Vec3) -> usize {
+    pub fn prepare(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], shadow_planes: &[Vec4; 6], cam: Vec3) -> usize {
         self.visible.clear();
+        self.casters.clear();
         let mut opaque: Vec<(u64, usize)> = Vec::new();
         let mut transparent: Vec<(f32, usize)> = Vec::new();
+        let mut shadow_only: Vec<usize> = Vec::new();
+        let mut is_caster: Vec<bool> = vec![false; self.draws.len()];
         for (i, d) in self.draws.iter().enumerate() {
             let Some(g) = self.geos.get(&d.geometry) else { continue };
             if !self.mats.contains_key(&d.material) || d.count == 0 {
@@ -404,7 +419,13 @@ impl ThreeScene {
             let scale = (0..3).map(|k| Vec3::new(r[0][k], r[1][k], r[2][k]).length()).fold(0.0, f32::max);
             // instanced meshes: the geometry sphere says nothing about where instances are
             let cullable = d.flags & (flag::NO_CULL | flag::INSTANCED) == 0;
-            if cullable && !sphere_visible(planes, c, g.sphere[3] * scale) {
+            let radius = g.sphere[3] * scale;
+            let casts = d.flags & flag::CAST != 0 && d.flags & flag::TRANSPARENT == 0 && (!cullable || sphere_visible(shadow_planes, c, radius));
+            is_caster[i] = casts;
+            if cullable && !sphere_visible(planes, c, radius) {
+                if casts {
+                    shadow_only.push(i); // off-screen, but its shadow may fall on screen
+                }
                 continue;
             }
             if d.flags & flag::TRANSPARENT != 0 {
@@ -415,7 +436,7 @@ impl ThreeScene {
         }
         opaque.sort_unstable_by_key(|o| o.0);
         transparent.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let n = opaque.len() + transparent.len();
+        let n = opaque.len() + transparent.len() + shadow_only.len();
         if self.slots[slot_i].cap < n {
             self.slots[slot_i] = slot(dev, n.next_power_of_two());
         }
@@ -434,6 +455,17 @@ impl ThreeScene {
             };
             unsafe { objs.add(k).write(o) };
             self.visible.push((i, k));
+            if is_caster[i] {
+                self.casters.push((i, k));
+            }
+        }
+        // shadow-only casters get object records after the visible ones
+        let base = self.visible.len();
+        for (j, &i) in shadow_only.iter().enumerate() {
+            let d = &self.draws[i];
+            let o = ThreeObj { rows: d.rows, material: self.mats[&d.material].row, flags: d.flags, color_size: 0, streams: 0 };
+            unsafe { objs.add(base + j).write(o) };
+            self.casters.push((i, base + j));
         }
         let nl = self.light_count();
         unsafe { std::ptr::copy_nonoverlapping(self.lights.as_ptr(), s.lights.contents().as_ptr() as *mut ThreeLight, nl) };
@@ -510,7 +542,7 @@ impl ThreeScene {
             unsafe {
                 enc.setVertexBufferOffset_atIndex(k * OBJ_BYTES, 5);
                 let m = &self.mats[&d.material];
-                let map = if m.meta.map != 0 { self.texs.get(&m.meta.map) } else { None };
+                let map = if m.meta.map != 0 { self.texs.get(&m.meta.map).map(|t| &t.0) } else { None };
                 enc.setFragmentTexture_atIndex(Some(map.unwrap_or(&self.white)), 1);
             }
             self.draw(enc, d, g);
@@ -525,15 +557,11 @@ impl ThreeScene {
             enc.setVertexBuffer_offset_atIndex(Some(uniforms), 0, 3);
             enc.setVertexBuffer_offset_atIndex(Some(&s.objects), 0, 5);
         }
-        // shadow casters among this frame's visible draws (the object records are already written);
-        // off-screen casters are missed: fine for a sun shadow box centred on the camera
-        for &(i, k) in &self.visible {
+        // every caster inside the shadow camera's frustum, on screen or not (culled in prepare)
+        let _ = shadow_planes;
+        for &(i, k) in &self.casters {
             let d = &self.draws[i];
-            if d.flags & flag::CAST == 0 || d.flags & flag::TRANSPARENT != 0 {
-                continue;
-            }
             let g = &self.geos[&d.geometry];
-            let _ = shadow_planes;
             enc.setFrontFacingWinding(Self::winding(d));
             self.bind_geometry(enc, d, g);
             unsafe { enc.setVertexBufferOffset_atIndex(k * OBJ_BYTES, 5) };

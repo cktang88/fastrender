@@ -17,7 +17,7 @@
 
 export const PROTOCOL = 2;
 const MAGIC = 0x46524d32; // 'FRM2'
-export const OP = { CAMERA: 1, LIGHTS: 2, FOG: 3, BACKGROUND: 4, DRAWS: 5, TONEMAP: 6 };
+export const OP = { CAMERA: 1, LIGHTS: 2, FOG: 3, BACKGROUND: 4, DRAWS: 5, TONEMAP: 6, SHADOW: 7 };
 export const KIND = { GEOMETRY: 1, TEXTURE: 2, MATERIAL: 3, INSTANCES: 4 };
 // draw flags
 export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256 };
@@ -247,7 +247,7 @@ export class FastRenderer {
       let dx = 0, dy = -1, dz = 0;
       if (l.target) { l.target.updateMatrixWorld(); const t = l.target.matrixWorld.elements; dx = t[12] - m[12]; dy = t[13] - m[13]; dz = t[14] - m[14]; }
       const len = Math.hypot(dx, dy, dz) || 1;
-      u[w++] = k; u[w++] = l.castShadow ? 1 : 0;
+      u[w++] = k; u[w++] = l.castShadow && this.shadowMap.enabled ? 1 : 0;
       f[w++] = l.color.r * l.intensity; f[w++] = l.color.g * l.intensity; f[w++] = l.color.b * l.intensity;
       f[w++] = m[12]; f[w++] = m[13]; f[w++] = m[14];
       f[w++] = dx / len; f[w++] = dy / len; f[w++] = dz / len;
@@ -257,6 +257,18 @@ export class FastRenderer {
       else { f[w++] = l.angle ?? 0; f[w++] = l.penumbra ?? 0; f[w++] = 0; }
     }
     u[lightsAt] = w - lightsStart;
+    // the game's own shadow camera for the first shadow-casting directional light (three.js computes
+    // it the same way in WebGLShadowMap), so shadows land exactly where the game tuned them
+    const caster = this.shadowMap.enabled && lights.find((l) => l.isDirectionalLight && l.castShadow);
+    if (caster) {
+      caster.shadow.updateMatrices(caster);
+      const sc = caster.shadow.camera;
+      const vp = this._shadowVP || (this._shadowVP = sc.projectionMatrix.clone());
+      vp.multiplyMatrices(sc.projectionMatrix, sc.matrixWorldInverse);
+      u[w++] = OP.SHADOW; u[w++] = 18;
+      f.set(vp.elements, w); w += 16;
+      f[w++] = caster.shadow.mapSize.x; f[w++] = caster.shadow.bias;
+    }
     // draws
     u[w++] = OP.DRAWS; u[w++] = 1 + draws.length * DRAW_WORDS; u[w++] = draws.length;
     if (w + draws.length * DRAW_WORDS + 8 > u.length) throw new Error(`fastrender-three: command buffer too small for ${draws.length} draws`);

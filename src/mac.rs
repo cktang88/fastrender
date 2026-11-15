@@ -859,6 +859,14 @@ impl Renderer {
             (0, Some(c)) => c.distance(eye) > 40.0,
             (n, Some(_)) => self.frame % n as u64 == 0,
         };
+        // three.js scenes: the game's own shadow camera, every frame (objects may move)
+        if let Content::Three(s) = &self.content {
+            if let Some(vp) = s.view.shadow_vp {
+                self.shadow_vp = vp;
+                self.shadow_center = Some(eye);
+                return true;
+            }
+        }
         if due {
             // texel-snapped ortho box around the camera
             let texel = 2.0 * SHADOW_HALF / SHADOW_SIZE as f32;
@@ -899,7 +907,7 @@ impl Renderer {
         let planes = frustum_planes(&vp);
         let shadow_planes = frustum_planes(&self.shadow_vp);
         if let Content::Three(s) = &mut self.content {
-            self.last_draws = s.prepare(&self.dev, slot, &planes, eye);
+            self.last_draws = s.prepare(&self.dev, slot, &planes, &shadow_planes, eye);
         }
         if self.cfg.gpu_cull {
             let f = &self.frames[slot];
