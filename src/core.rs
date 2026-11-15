@@ -13,6 +13,14 @@ pub enum RenderPath {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneKind {
+    /// procedural Manhattan grid of instanced boxes (GPU-culled, one indirect draw)
+    City,
+    /// voxel island meshed natively by voxel-castle-defense's greedy mesher (one draw per chunk)
+    Voxel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Upscale {
     /// bilinear full-screen pass from the internal resolution to the output
     Bilinear,
@@ -22,6 +30,7 @@ pub enum Upscale {
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub scene: SceneKind,
     pub path: RenderPath,
     /// transient attachments (depth, G-buffer) memoryless (true) or stored to DRAM (false)
     pub memoryless: bool,
@@ -44,6 +53,8 @@ pub struct Config {
     /// print fps every n seconds of the run (bench mode, for thermal-throttling runs)
     pub log_every_s: f32,
     pub seed: u64,
+    /// matrix: rounds over all rows (interleaved, so heat affects every row alike); median reported
+    pub rounds: u32,
     /// bench mode: save the final frame as PNG
     pub shot: Option<String>,
 }
@@ -51,6 +62,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            scene: SceneKind::City,
             path: RenderPath::Deferred,
             memoryless: true,
             scale: 0.5,
@@ -68,6 +80,7 @@ impl Default for Config {
             dynres_ms: 0.0,
             log_every_s: 0.0,
             seed: 20261115,
+            rounds: 3,
             shot: None,
         }
     }
@@ -76,7 +89,8 @@ impl Default for Config {
 impl Config {
     pub fn label(&self) -> String {
         format!(
-            "{} {} scale={:.2} up={} shadow={} lights={} cull={} props={}",
+            "{} {} {} scale={:.2} up={} shadow={} lights={} cull={} props={}",
+            match self.scene { SceneKind::City => "city", SceneKind::Voxel => "voxel" },
             match self.path { RenderPath::Forward => "forward", RenderPath::Deferred => "deferred" },
             if self.memoryless { "memoryless" } else { "stored" },
             self.scale,
@@ -96,6 +110,7 @@ impl Config {
             let v = args.get(i + 1).ok_or_else(|| format!("missing value for --{k}"))?;
             let num = |s: &str| s.parse::<f64>().map_err(|_| format!("bad number for --{k}: {s}"));
             match k {
+                "scene" => self.scene = match v.as_str() { "city" => SceneKind::City, "voxel" => SceneKind::Voxel, _ => return Err(format!("bad --scene {v}")) },
                 "path" => self.path = match v.as_str() { "forward" => RenderPath::Forward, "deferred" => RenderPath::Deferred, _ => return Err(format!("bad --path {v}")) },
                 "memoryless" => self.memoryless = num(v)? != 0.0,
                 "scale" => self.scale = (num(v)? as f32).clamp(0.25, 1.0),
@@ -115,6 +130,7 @@ impl Config {
                 "dynres" => self.dynres_ms = num(v)? as f32,
                 "log-every" => self.log_every_s = num(v)? as f32,
                 "seed" => self.seed = num(v)? as u64,
+                "rounds" => self.rounds = (num(v)? as u32).max(1),
                 "shot" => self.shot = Some(v.clone()),
                 _ => return Err(format!("unknown option --{k}")),
             }
@@ -243,21 +259,31 @@ pub fn build_city(props: u32, lights: u32, seed: u64) -> Scene {
             inst.push(Instance { a: [px, s, pz, rng.range(0.0, 6.28)], b: [s, s, s * 0.6, pack_rgba(rng.f32(), rng.f32(), rng.f32())] });
         }
     }
-    // street lights at intersections, then mid-block
-    let mut ls = Vec::new();
-    let mut i = 0u32;
-    'outer: for pass in 0..4 {
-        for bx in -BLOCKS / 2..=BLOCKS / 2 {
-            for bz in -BLOCKS / 2..=BLOCKS / 2 {
-                if ls.len() as u32 >= lights { break 'outer; }
-                let x = bx as f32 * pitch_x + (pass % 2) as f32 * pitch_x * 0.5;
-                let z = bz as f32 * pitch_z + (pass / 2) as f32 * pitch_z * 0.5;
-                let hue = (i % 3) as f32;
-                ls.push(Light { pos_radius: [x, 5.0, z, 18.0], color: [3.0 + hue * 0.2, 2.2, 1.2 + hue * 0.3, 0.0] });
-                i += 1;
+    // street lights: a lamp every 25 m on both kerbs of every north-south street, nearest to the
+    // camera's avenue first, so the first N lights are the ones the camera actually sees
+    // (review finding: lights placed column by column were all 400-800 m away)
+    let (avenue_x, _) = camera_at(0.0);
+    let mut cands: Vec<Vec3> = Vec::new();
+    for sx in -BLOCKS / 2..=BLOCKS / 2 {
+        let x = sx as f32 * pitch_x;
+        for side in [-1.0f32, 1.0] {
+            let mut z = -extent + 12.0;
+            while z < extent {
+                cands.push(Vec3::new(x + side * (STREET * 0.5 - 1.0), 5.0, z + if side > 0.0 { 12.5 } else { 0.0 }));
+                z += 25.0;
             }
         }
     }
+    cands.sort_by(|a, b| ((a.x - avenue_x.x).abs(), a.z.abs()).partial_cmp(&((b.x - avenue_x.x).abs(), b.z.abs())).unwrap());
+    let ls: Vec<Light> = cands
+        .iter()
+        .take(lights as usize)
+        .enumerate()
+        .map(|(i, p)| {
+            let hue = (i % 3) as f32;
+            Light { pos_radius: [p.x, p.y, p.z, 18.0], color: [3.0 + hue * 0.2, 2.2, 1.2 + hue * 0.3, 0.0] }
+        })
+        .collect();
     Scene { instances: inst, lights: ls, extent }
 }
 
@@ -372,7 +398,7 @@ pub fn bench_matrix(base: &Config) -> Vec<(String, Config)> {
     v.push(("I deferred 0.5x, 32 lights (volumes)".into(), mk(&|c| { c.path = Deferred; c.scale = 0.5; c.upscale = Spatial; c.lights = 32; })));
     v.push(("J deferred 0.5x, 256 lights".into(), mk(&|c| { c.path = Deferred; c.scale = 0.5; c.upscale = Spatial; c.lights = 256; })));
     v.push(("K shadow every frame (vs G)".into(), mk(&|c| { c.path = Deferred; c.scale = 0.5; c.upscale = Spatial; c.lights = 0; c.shadow_every = 1; })));
-    v.push(("L no GPU culling (vs G)".into(), mk(&|c| { c.path = Deferred; c.scale = 0.5; c.upscale = Spatial; c.lights = 0; c.gpu_cull = false; })));
+    v.push(("L no culling at all: frustum + prop distance off (vs G)".into(), mk(&|c| { c.path = Deferred; c.scale = 0.5; c.upscale = Spatial; c.lights = 0; c.gpu_cull = false; })));
     v
 }
 
@@ -390,6 +416,14 @@ mod tests {
         assert!(a.instances.len() > 1000 + BLOCKS as usize * BLOCKS as usize * 4);
         assert_eq!(std::mem::size_of::<Instance>(), 32);
         assert_eq!(std::mem::size_of::<FrameUniforms>() % 16, 0);
+    }
+
+    #[test]
+    fn lights_are_where_the_camera_drives() {
+        let s = build_city(0, 64, 1);
+        let (eye, _) = camera_at(0.0);
+        let near = s.lights.iter().filter(|l| (l.pos_radius[0] - eye.x).abs() < 15.0).count();
+        assert!(near >= 48, "only {near} of 64 lights line the camera's avenue");
     }
 
     #[test]

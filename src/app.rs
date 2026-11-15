@@ -5,6 +5,7 @@ use std::time::Instant;
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
 use objc2_core_foundation::CGSize;
+use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::CAMetalLayer;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -17,7 +18,10 @@ use winit::window::{Window, WindowId};
 use crate::core::*;
 use crate::mac::Renderer;
 
-const HELP: &str = "keys: 1 forward/deferred  2 memoryless  3 metalfx/bilinear  -/= scale  4 shadow cache  5 gpu cull  L/K lights x2 /2  D dynres  V vsync  Space pause";
+const HELP: &str = "keys: 1 forward/deferred  2 memoryless  3 metalfx/bilinear  -/= scale  4 shadow cache  5 gpu cull  6 city/voxel  L/K lights x2 /2  D dynres  V vsync  Space pause";
+
+/// frames allowed in flight when interactive: 2 keeps input latency down (bench uses 3)
+const IN_FLIGHT: usize = 2;
 
 struct App {
     cfg: Config,
@@ -29,41 +33,31 @@ struct App {
     last: Instant,
     stat_start: Instant,
     stat_frames: u32,
+    stat_gpu: Vec<f64>,
     dynres: Option<DynRes>,
-    gpu_seen: usize,
+    /// a resize waits until the size has been stable for a moment (no rebuild per drag step)
+    pending_size: Option<(u32, u32, Instant)>,
 }
 
 impl App {
-    fn apply(&mut self, mut c: Config) {
+    fn apply(&mut self, c: Config) {
         let Some(r) = self.r.as_mut() else { return };
-        c.width = self.cfg.width;
-        c.height = self.cfg.height;
-        match r.reconfigure(c.clone()) {
-            Ok(()) => { self.cfg = c; println!("config: {}", self.cfg.label()); }
+        match r.set_config(c.clone()) {
+            Ok(()) => {
+                self.cfg = r.cfg.clone();
+                println!("config: {}", self.cfg.label());
+            }
             Err(e) => println!("{e}"),
-        }
-    }
-
-    fn resize(&mut self) {
-        let (Some(w), Some(layer)) = (&self.window, &self.layer) else { return };
-        let s = w.inner_size();
-        layer.setDrawableSize(CGSize { width: s.width as f64, height: s.height as f64 });
-        layer.setContentsScale(w.scale_factor());
-        if (s.width, s.height) != (self.cfg.width, self.cfg.height) && s.width > 0 && s.height > 0 {
-            let mut c = self.cfg.clone();
-            c.width = s.width;
-            c.height = s.height;
-            self.cfg.width = s.width;
-            self.cfg.height = s.height;
-            self.apply(c);
         }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.window.is_some() { return; }
-        // cfg.width/height are physical pixels; the window is sized in logical points
+        if self.window.is_some() {
+            return;
+        }
+        // cfg.width/height are physical pixels
         let attrs = Window::default_attributes()
             .with_title("fastrender")
             .with_inner_size(winit::dpi::PhysicalSize::new(self.cfg.width, self.cfg.height));
@@ -71,16 +65,24 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         self.cfg.width = size.width;
         self.cfg.height = size.height;
-        let r = match Renderer::new(self.cfg.clone()) {
+        let r = match Renderer::new(self.cfg.clone(), IN_FLIGHT) {
             Ok(r) => r,
-            Err(e) => { eprintln!("{e}"); el.exit(); return; }
+            Err(e) => {
+                eprintln!("{e}");
+                el.exit();
+                return;
+            }
         };
         let layer = CAMetalLayer::new();
         layer.setDevice(Some(&r.dev));
         layer.setPixelFormat(objc2_metal::MTLPixelFormat::BGRA8Unorm);
+        // MetalFX and the bilinear pass write straight into the drawable
         layer.setFramebufferOnly(false);
         layer.setMaximumDrawableCount(3);
         layer.setDisplaySyncEnabled(self.cfg.vsync);
+        // the Air's panel is P3: tag our output as sRGB so colours aren't stretched
+        let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }));
+        layer.setColorspace(srgb.as_deref());
         layer.setDrawableSize(CGSize { width: size.width as f64, height: size.height as f64 });
         layer.setContentsScale(window.scale_factor());
         if let Ok(h) = window.window_handle() {
@@ -90,8 +92,13 @@ impl ApplicationHandler for App {
                 view.setLayer(Some(&layer));
             }
         }
-        println!("{} | {}\n{HELP}", r.dev.name(), self.cfg.label());
-        if self.cfg.dynres_ms > 0.0 { self.dynres = Some(DynRes::new(self.cfg.dynres_ms, self.cfg.scale)); }
+        println!("{} | {}\n{HELP}", r.dev.name(), r.cfg.label());
+        if let Some(ms) = r.content_mesh_ms() {
+            println!("voxel meshing: {ms:.0} ms");
+        }
+        if self.cfg.dynres_ms > 0.0 {
+            self.dynres = Some(DynRes::new(self.cfg.dynres_ms, self.cfg.scale));
+        }
         self.window = Some(window);
         self.layer = Some(layer);
         self.r = Some(r);
@@ -101,76 +108,109 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
         match ev {
             WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resize(),
+            WindowEvent::Resized(s) => {
+                if let (Some(layer), Some(w)) = (&self.layer, &self.window) {
+                    layer.setDrawableSize(CGSize { width: s.width as f64, height: s.height as f64 });
+                    layer.setContentsScale(w.scale_factor());
+                }
+                if s.width > 0 && s.height > 0 {
+                    self.pending_size = Some((s.width, s.height, Instant::now()));
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let PhysicalKey::Code(k) = event.physical_key else { return };
                 let mut c = self.cfg.clone();
                 match k {
                     KeyCode::Escape => el.exit(),
-                    KeyCode::Space => { self.paused = !self.paused; return; }
+                    KeyCode::Space => {
+                        self.paused = !self.paused;
+                        return;
+                    }
                     KeyCode::Digit1 => c.path = if c.path == RenderPath::Forward { RenderPath::Deferred } else { RenderPath::Forward },
                     KeyCode::Digit2 => c.memoryless = !c.memoryless,
                     KeyCode::Digit3 => c.upscale = if c.upscale == Upscale::Spatial { Upscale::Bilinear } else { Upscale::Spatial },
                     KeyCode::Digit4 => c.shadow_every = if c.shadow_every == 0 { 1 } else { 0 },
                     KeyCode::Digit5 => c.gpu_cull = !c.gpu_cull,
-                    KeyCode::Minus => { c.scale = (c.scale - 0.05).max(0.25); self.dynres = None; }
-                    KeyCode::Equal => { c.scale = (c.scale + 0.05).min(1.0); self.dynres = None; }
+                    KeyCode::Digit6 => c.scene = if c.scene == SceneKind::City { SceneKind::Voxel } else { SceneKind::City },
+                    KeyCode::Minus => {
+                        c.scale = (c.scale - 0.05).max(0.25);
+                        self.dynres = None;
+                    }
+                    KeyCode::Equal => {
+                        c.scale = (c.scale + 0.05).min(1.0);
+                        self.dynres = None;
+                    }
                     KeyCode::KeyL => c.lights = (c.lights.max(1) * 2).min(MAX_LIGHTS),
                     KeyCode::KeyK => c.lights /= 2,
                     KeyCode::KeyD => {
-                        self.dynres = if self.dynres.is_some() { None } else { Some(DynRes::new(if c.dynres_ms > 0.0 { c.dynres_ms } else { 14.0 }, c.scale)) };
+                        let target = if c.dynres_ms > 0.0 { c.dynres_ms } else { 14.0 };
+                        self.dynres = if self.dynres.is_some() { None } else { Some(DynRes::new(target, c.scale)) };
                         println!("dynres {}", if self.dynres.is_some() { "on" } else { "off" });
                         return;
                     }
                     KeyCode::KeyV => {
                         self.cfg.vsync = !self.cfg.vsync;
-                        if let Some(l) = &self.layer { l.setDisplaySyncEnabled(self.cfg.vsync); }
+                        if let Some(l) = &self.layer {
+                            l.setDisplaySyncEnabled(self.cfg.vsync);
+                        }
                         println!("vsync {}", self.cfg.vsync);
                         return;
                     }
                     _ => return,
                 }
-                // scale changes need no new resources: targets are allocated at full size
-                if c.path == self.cfg.path && c.memoryless == self.cfg.memoryless && c.upscale == self.cfg.upscale
-                    && c.lights == self.cfg.lights && c.props == self.cfg.props
-                {
-                    if let Some(r) = self.r.as_mut() { r.content_scale = c.scale; r.cfg.shadow_every = c.shadow_every; r.cfg.gpu_cull = c.gpu_cull; }
-                    self.cfg = c;
-                    println!("config: {}", self.cfg.label());
-                } else {
-                    self.apply(c);
-                }
+                self.apply(c);
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
                 self.last = now;
-                if !self.paused { self.t += dt; }
-                let (Some(r), Some(layer)) = (self.r.as_mut(), &self.layer) else { return };
-                if r.frame_count() % 30 == 0 {
-                    if let Some(msg) = r.poll_shader_reload() { println!("{msg}"); }
+                if !self.paused {
+                    self.t += dt;
                 }
-                if let Some(d) = layer.nextDrawable() {
-                    r.render(self.t, Some(&d));
-                }
-                self.stat_frames += 1;
-                // feed dynamic resolution with completed GPU times
-                let times = r.gpu_times.lock().unwrap().clone();
-                if let Some(dr) = self.dynres.as_mut() {
-                    for &ms in &times[self.gpu_seen.min(times.len())..] {
-                        if dr.update(ms as f32) { r.content_scale = dr.scale; self.cfg.scale = dr.scale; }
+                // debounced resize: rebuild targets once the size has settled for 150 ms
+                if let Some((w, h, at)) = self.pending_size {
+                    if at.elapsed().as_millis() > 150 {
+                        self.pending_size = None;
+                        let mut c = self.cfg.clone();
+                        c.width = w;
+                        c.height = h;
+                        self.apply(c);
                     }
                 }
-                self.gpu_seen = times.len();
+                if self.pending_size.is_some() {
+                    return; // the drawable size and the targets disagree until the resize lands
+                }
+                let (Some(r), Some(layer)) = (self.r.as_mut(), &self.layer) else { return };
+                if r.frame_count() % 30 == 0 {
+                    if let Some(msg) = r.poll_shader_reload() {
+                        println!("{msg}");
+                    }
+                }
+                r.render(self.t, || layer.nextDrawable());
+                self.stat_frames += 1;
+                let times = r.take_gpu_times();
+                if let Some(dr) = self.dynres.as_mut() {
+                    for &ms in &times {
+                        if dr.update(ms as f32) {
+                            let s = dr.scale;
+                            if let Err(e) = r.set_scale(s) {
+                                println!("{e}");
+                            }
+                            self.cfg.scale = s;
+                        }
+                    }
+                }
+                self.stat_gpu.extend(times);
                 let el_s = self.stat_start.elapsed().as_secs_f32();
                 if el_s >= 0.5 {
-                    let recent = &times[times.len().saturating_sub(self.stat_frames as usize)..];
-                    let gpu = if recent.is_empty() { 0.0 } else { recent.iter().sum::<f64>() / recent.len() as f64 };
-                    let title = format!("fastrender {:.0} fps | GPU {:.2} ms | {}", self.stat_frames as f32 / el_s, gpu, self.cfg.label());
-                    if let Some(w) = &self.window { w.set_title(&title); }
+                    let gpu = if self.stat_gpu.is_empty() { 0.0 } else { self.stat_gpu.iter().sum::<f64>() / self.stat_gpu.len() as f64 };
+                    let title = format!("fastrender {:.0} fps | GPU {:.2} ms | draws {} | {}", self.stat_frames as f32 / el_s, gpu, r.last_draws, r.cfg.label());
+                    if let Some(w) = &self.window {
+                        w.set_title(&title);
+                    }
                     self.stat_frames = 0;
+                    self.stat_gpu.clear();
                     self.stat_start = Instant::now();
-                    if times.len() > 10_000 { r.gpu_times.lock().unwrap().clear(); self.gpu_seen = 0; }
                 }
             }
             _ => {}
@@ -178,7 +218,9 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
-        if let Some(w) = &self.window { w.request_redraw(); }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 }
 
@@ -194,8 +236,9 @@ pub fn run(cfg: Config) {
         last: Instant::now(),
         stat_start: Instant::now(),
         stat_frames: 0,
+        stat_gpu: Vec::new(),
         dynres: None,
-        gpu_seen: 0,
+        pending_size: None,
     };
     el.run_app(&mut app).expect("run");
 }

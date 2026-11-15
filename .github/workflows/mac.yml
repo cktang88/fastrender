@@ -32,8 +32,13 @@ jobs:
           ./target/release/fastrender bench --path forward --upscale metalfx --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --props 60000 --lights 16 --shot shot-forward-metalfx.png
           ./target/release/fastrender bench --path forward --upscale bilinear --scale 1 --size 1280x800 --frames 40 --warmup 5 --props 60000 --shot shot-forward-native.png
           ./target/release/fastrender bench --path deferred --size 1280x800 --frames 40 --warmup 5 --shot shot-deferred.png || true
+          ./target/release/fastrender bench --scene voxel --path forward --upscale metalfx --scale 0.5 --size 1280x800 --frames 40 --warmup 5 --lights 16 --shot shot-voxel-metalfx.png
+          ./target/release/fastrender bench --scene voxel --path forward --upscale bilinear --scale 1 --size 1280x800 --frames 40 --warmup 5 --shot shot-voxel-native.png
       - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
-        run: ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000
+        run: |
+          ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000 --rounds 1
+          ./target/release/fastrender voxel-mesh
+          ./target/release/fastrender selftest --scene voxel --path forward --upscale metalfx --scale 0.5 --size 640x400
       - uses: actions/upload-artifact@v4
         if: always()
         with:

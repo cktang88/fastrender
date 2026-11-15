@@ -7,6 +7,8 @@ edition = "2024"
 glam = "0.34.3"
 png = "0.18.1"
 raw-window-handle = "0.6.2"
+rayon = "1.12.0"
+voxel-core = { git = "https://github.com/cktang88/voxel-castle-defense", rev = "9c77553beb8543b42382b2bb70b964806e852178", version = "0.1.0" }
 winit = "0.30.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -14,6 +16,7 @@ block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
 objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-metal = "0.3.2"
 objc2-metal-fx = "0.3.2"

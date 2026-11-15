@@ -1,4 +1,5 @@
 mod core;
+mod voxel;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
@@ -9,18 +10,23 @@ const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
   bench    offscreen benchmark of one config
   matrix   offscreen benchmark of the hypothesis matrix (A..L), writes bench-results.json
   probe    print GPU capabilities
+  voxel-mesh  generate a 512x128x512 island and greedy-mesh it natively (any OS)
   selftest stage-by-stage render diagnostics (writes selftest-*.png)
-options: --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|bilinear
+options: --scene city|voxel --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|bilinear
          --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
-         --warmup n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
+         --warmup n --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mode, rest) = match args.first().map(String::as_str) {
-        Some("run" | "bench" | "matrix" | "probe" | "selftest") => (args[0].clone(), &args[1..]),
+        Some("run" | "bench" | "matrix" | "probe" | "selftest" | "voxel-mesh") => (args[0].clone(), &args[1..]),
         Some("-h" | "--help") => { println!("{USAGE}"); return; }
         _ => ("run".to_string(), &args[..]),
     };
+    if mode == "voxel-mesh" {
+        voxel_mesh_bench();
+        return;
+    }
     let mut cfg = core::Config::default();
     if let Err(e) = cfg.apply_args(rest) {
         eprintln!("{e}\n\n{USAGE}");
@@ -39,11 +45,7 @@ fn run(mode: &str, cfg: core::Config) {
             mac::print_results(&mac::device_name(), &[r]);
         }
         "matrix" => {
-            let mut out = Vec::new();
-            for (name, c) in core::bench_matrix(&cfg) {
-                eprintln!("running {name} ...");
-                out.push(mac::bench(&c, &name));
-            }
+            let out = mac::matrix(&cfg);
             mac::print_results(&mac::device_name(), &out);
         }
         _ => app::run(cfg),
@@ -53,4 +55,18 @@ fn run(mode: &str, cfg: core::Config) {
 #[cfg(not(target_os = "macos"))]
 fn run(_mode: &str, _cfg: core::Config) {
     eprintln!("fastrender's renderer is macOS (Metal) only; `cargo test` runs the portable core here.");
+}
+
+fn voxel_mesh_bench() {
+    let t = std::time::Instant::now();
+    let world = voxel::generate(16, 4, 16, 7);
+    let gen_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let m = voxel::mesh_world(&world);
+    let tris = m.indices.len() / 3;
+    println!("world {}x{}x{}: generate {:.0} ms", world.w, world.h, world.d, gen_ms);
+    println!(
+        "mesh {} chunks on {} threads: {:.0} ms total, {:.3} ms/chunk wall ({} non-empty), {} verts ({:.1} MB), {} tris",
+        m.chunks_meshed, rayon::current_num_threads(), m.mesh_ms, m.mesh_ms / m.chunks_meshed as f64, m.chunks.len(),
+        m.vertices.len(), (m.vertices.len() * 8 + m.indices.len() * 4) as f64 / 1e6, tris
+    );
 }

@@ -21,18 +21,21 @@ struct DrawArgs { uint index_count; atomic_uint instance_count; uint index_start
 
 // ------------------------------------------------------------------ GPU culling
 
+// one kernel for the camera list and the shadow-caster list: the caller passes the 6 planes
+struct CullParams { float4 planes[6]; float4 cam_pos_prop_dist; uint count; };
+
 kernel void cull(device const Instance* inst [[buffer(0)]],
-                 constant Frame& f [[buffer(1)]],
+                 constant CullParams& cp [[buffer(1)]],
                  device uint* visible [[buffer(2)]],
                  device DrawArgs& args [[buffer(3)]],
                  uint id [[thread_position_in_grid]]) {
-    if (id >= f.counts.x) return;
+    if (id >= cp.count) return;
     float3 c = inst[id].a.xyz;
     float r = length(inst[id].b.xyz);
     for (int p = 0; p < 6; p++)
-        if (dot(f.frustum[p].xyz, c) + f.frustum[p].w < -r) return;
-    // distance cull of small props (fog hides them anyway)
-    if (r < 1.5 && distance(c, f.cam_pos.xyz) > 220.0) return;
+        if (dot(cp.planes[p].xyz, c) + cp.planes[p].w < -r) return;
+    // distance cull of small props (where fog has mostly hidden them)
+    if (r < 1.5 && distance(c, cp.cam_pos_prop_dist.xyz) > cp.cam_pos_prop_dist.w) return;
     uint slot = atomic_fetch_add_explicit(&args.instance_count, 1, memory_order_relaxed);
     visible[slot] = id;
 }
@@ -42,8 +45,8 @@ kernel void cull(device const Instance* inst [[buffer(0)]],
 struct VOut {
     float4 pos [[position]];
     float3 wpos;
-    half3 nrm;
-    half3 albedo;
+    half3 nrm [[flat]];   // faces are flat: no interpolation, fewer varyings to bin
+    half3 albedo;         // interpolated: voxel vertices carry baked AO
 };
 
 static float3 rotate_y(float3 p, float yaw) {
@@ -79,11 +82,47 @@ struct ShadowOut { float4 pos [[position]]; };
 vertex ShadowOut vs_shadow(uint vid [[vertex_id]], uint iid [[instance_id]],
                            device const Vertex* verts [[buffer(0)]],
                            device const Instance* inst [[buffer(1)]],
+                           device const uint* visible [[buffer(2)]],
                            constant Frame& f [[buffer(3)]]) {
-    Instance i = inst[iid];
+    Instance i = inst[visible[iid]];
     float3 w = rotate_y(float3(verts[vid].pos) * i.b.xyz, i.a.w) + i.a.xyz;
     ShadowOut o;
     o.pos = f.shadow_vp * float4(w, 1.0);
+    return o;
+}
+
+// ------------------------------------------------------------------ voxel chunks
+// 8-byte vertices from src/voxel.rs `pack`: w0 = x|y<<6|z<<12 (chunk-local) | face dir<<18 | emit<<21,
+// w1 = linear rgb 10:10:10 with the mesher's AO baked in. [[vertex_id]] includes baseVertex and
+// [[instance_id]] includes baseInstance, which is the chunk index (origin lookup).
+
+constant half3 FACE_N[6] = { half3(1, 0, 0), half3(-1, 0, 0), half3(0, 1, 0), half3(0, -1, 0), half3(0, 0, 1), half3(0, 0, -1) };
+
+static float3 voxel_pos(uint w0, int4 origin) {
+    return float3(w0 & 63u, (w0 >> 6) & 63u, (w0 >> 12) & 63u) + float3(origin.xyz);
+}
+
+vertex VOut vs_voxel(uint vid [[vertex_id]], uint iid [[instance_id]],
+                     device const uint2* verts [[buffer(0)]],
+                     device const int4* chunks [[buffer(1)]],
+                     constant Frame& f [[buffer(3)]]) {
+    uint2 v = verts[vid];
+    float3 w = voxel_pos(v.x, chunks[iid]);
+    VOut o;
+    o.pos = f.view_proj * float4(w, 1.0);
+    o.wpos = w;
+    o.nrm = FACE_N[min((v.x >> 18) & 7u, 5u)];
+    o.albedo = half3(half(v.y & 1023u), half((v.y >> 10) & 1023u), half((v.y >> 20) & 1023u)) / 1023.0h;
+    o.albedo += o.albedo * half((v.x >> 21) & 127u) / 127.0h * 3.0h; // emissive blocks glow
+    return o;
+}
+
+vertex ShadowOut vs_voxel_shadow(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                 device const uint2* verts [[buffer(0)]],
+                                 device const int4* chunks [[buffer(1)]],
+                                 constant Frame& f [[buffer(3)]]) {
+    ShadowOut o;
+    o.pos = f.shadow_vp * float4(voxel_pos(verts[vid].x, chunks[iid]), 1.0);
     return o;
 }
 
@@ -95,7 +134,10 @@ static half sun_shadow(float3 wpos, depth2d<float> sm, constant Frame& f) {
     float2 uv = p.xy * float2(0.5, -0.5) + 0.5;
     if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0) return 1.0h;
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);
-    return half(sm.sample_compare(s, uv, p.z - 0.0008));
+    half sh = half(sm.sample_compare(s, uv, p.z - 0.0008));
+    // fade out toward the edge of the shadow box instead of a hard cut-off
+    float edge = max(abs(uv.x * 2.0 - 1.0), abs(uv.y * 2.0 - 1.0));
+    return mix(sh, 1.0h, half(smoothstep(0.8, 1.0, edge)));
 }
 
 static half3 sky(half3 n) {
@@ -109,7 +151,7 @@ static half3 sun_light(float3 wpos, half3 n, half3 albedo, half sh, constant Fra
     return c;
 }
 
-static half3 point_light(float3 wpos, half3 n, half3 albedo, Light L) {
+static half3 point_light(float3 wpos, half3 n, half3 albedo, constant Light& L) {
     float3 d = L.pos_radius.xyz - wpos;
     float dist2 = dot(d, d);
     float r = L.pos_radius.w;
@@ -136,16 +178,17 @@ static half3 tonemap(half3 c) {
 
 fragment half4 fs_forward(VOut in [[stage_in]],
                           constant Frame& f [[buffer(0)]],
-                          device const Light* lights [[buffer(1)]],
+                          constant Light* lights [[buffer(1)]],
                           depth2d<float> sm [[texture(0)]]) {
-    half3 n = normalize(in.nrm);
+    half3 n = in.nrm;
     half3 c = sun_light(in.wpos, n, in.albedo, sun_shadow(in.wpos, sm, f), f);
     for (uint i = 0; i < f.counts.y; i++) c += point_light(in.wpos, n, in.albedo, lights[i]);
     return half4(tonemap(apply_fog(c, in.wpos, f)), 1.0h);
 }
 
 // ------------------------------------------------------------------ single-pass deferred
-// Attachments: 0 hdr (rgba16f), 1 albedo+shadow (rgba8), 2 normal (rgba8), 3 linear depth (r32f),
+// Attachments: 0 hdr (rg11b10f), 1 albedo (rgba8), 2 normal (rgba8), 3 depth copy (r32f, NDC z:
+// the depth attachment itself can't be read in-tile),
 // 4 output (bgra8, the only one stored when memoryless is on).
 
 struct GBuffer {
@@ -159,9 +202,9 @@ fragment GBuffer fs_gbuffer(VOut in [[stage_in]],
                             constant Frame& f [[buffer(0)]],
                             depth2d<float> sm [[texture(0)]]) {
     GBuffer g;
-    half3 n = normalize(in.nrm);
+    half3 n = in.nrm;
     half sh = sun_shadow(in.wpos, sm, f);
-    g.albedo = half4(in.albedo, sh);
+    g.albedo = half4(in.albedo, 0.0h);
     g.normal = half4(n * 0.5h + 0.5h, 0.0h);
     g.depth = in.pos.z;
     // sun + sky are resolved here already: the full-screen pass only adds fog, the light
@@ -190,14 +233,12 @@ struct LightVOut { float4 pos [[position]]; uint light [[flat]]; };
 
 vertex LightVOut vs_light(uint vid [[vertex_id]], uint iid [[instance_id]],
                           device const Vertex* verts [[buffer(0)]],
-                          device const Light* lights [[buffer(1)]],
+                          constant Light* lights [[buffer(1)]],
                           constant Frame& f [[buffer(3)]]) {
     Light L = lights[iid];
     float3 w = float3(verts[vid].pos) * L.pos_radius.w + L.pos_radius.xyz;
     LightVOut o;
     o.pos = f.view_proj * float4(w, 1.0);
-    // volumes that cross the near plane: clamp so the back faces still rasterise
-    o.pos.z = min(o.pos.z, o.pos.w * 0.9999);
     o.light = iid;
     return o;
 }
@@ -211,8 +252,9 @@ struct GRead {
 // additive (hardware blend) into color(0), reading the G-buffer from tile memory
 fragment half4 fs_light(LightVOut in [[stage_in]], GRead g,
                         constant Frame& f [[buffer(0)]],
-                        device const Light* lights [[buffer(1)]]) {
-    if (g.depth >= 1.0) discard_fragment();
+                        constant Light* lights [[buffer(1)]]) {
+    // additive 0 is a no-op; discard would cost more on TBDR than the add
+    if (g.depth >= 1.0) return 0.0h;
     float3 wpos = world_from_depth(in.pos, g.depth, f);
     half3 n = normalize(g.normal.xyz * 2.0h - 1.0h);
     return half4(point_light(wpos, n, g.albedo.rgb, lights[in.light]), 0.0h);
@@ -235,6 +277,8 @@ fragment TonemapOut fs_tonemap(FsqOut in [[stage_in]], TonemapIn t, constant Fra
 fragment half4 fs_blit(FsqOut in [[stage_in]],
                        texture2d<half> src [[texture(0)]],
                        constant float4& scale [[buffer(0)]]) {
+    // scale.xy = content / texture size, scale.zw = half a texel: clamp to the content edge so the
+    // stale texels outside the content rectangle never bleed in
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-    return src.sample(s, in.uv * scale.xy);
+    return src.sample(s, min(in.uv * scale.xy, scale.xy - scale.zw));
 }
