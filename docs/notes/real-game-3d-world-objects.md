@@ -125,6 +125,13 @@ What it took, in run order (all CI runs on the macos-26 paravirtual GPU, Metal A
 | 43705569293 | patched game on r187, golden regenerated on r187; every GLB failed in JSC (`AbortSignal` missing) | 49.9 |
 | 43706682669 | AbortSignal polyfill (r187, models load) | **50.5** (gated < 60) |
 
+**Run 43707913649 (with the render-target work's wrapper change: renders into targets go through FastRenderer): MAE
+46.9, gate < 60 passes; 93/93 programs translate + compile.** Breakdown of that image vs the r187 golden: sky 1.1;
+left facade 61.5, right buildings 55.0, sidewalk 30.1, road + cars 25.3 (mean abs error per region); pixels near-black
+natively but lit in the browser (glass / window panels, car glass) are 19 % of the image and **55 % of the error**;
+the rest is a slightly cooler / lighter IBL tint on lit surfaces (native mean 137 vs 146), missing people (Sprites
+19/frame, crowd), tree leaves and canvas textures in JSC (75 bindings/frame).
+
 All 64 (r170) / 84 (r187) programs of the spawn view translate with src/xlat.rs and compile with Apple's `metal`
 (CI step "every program translates"). What remains visible in the r170 IBL image: glass / window panels and car
 bodies black (the game's window materials sample render targets that are never rendered: `render target texture never

@@ -31,6 +31,13 @@ sent, 1,175 after culling, 121 material instances, 2 CSM maps / 1 pass per frame
 programs + 232 native depth-only, ring 1.35 MB/frame, 0 refused ring writes. The golden frames (12–14) still cost
 1.7 s of JS each (streaming + 57 Metal compiles under validation, 27 s total).
 
+**Run 43707913649 (with the render-target work's wrapper change: renders into targets go through FastRenderer): MAE
+46.9, gate < 60 passes; 93/93 programs translate + compile.** Breakdown of that image vs the r187 golden: sky 1.1;
+left facade 61.5, right buildings 55.0, sidewalk 30.1, road + cars 25.3 (mean abs error per region); pixels near-black
+natively but lit in the browser (glass / window panels, car glass) are 19 % of the image and **55 % of the error**;
+the rest is a slightly cooler / lighter IBL tint on lit surfaces (native mean 137 vs 146), missing people (Sprites
+19/frame, crowd), tree leaves and canvas textures in JSC (75 bindings/frame).
+
 What the remaining 50 is (docs/notes/real-game-3d-world-objects.md): glass / window panels and car bodies black
 (`render target texture never bound` ~101 bindings/frame), no people (Sprites 19/frame, the crowd), tree leaves, the
 r187 golden's brighter sky/env, canvas textures in JSC (51/frame).
