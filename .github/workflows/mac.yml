@@ -195,13 +195,14 @@ jobs:
           bash .github/annotate.sh notice "IBL bloom selftest (exit $rc2)" ibl-bloom-selftest.txt 25
           # render-target probe (src/mac_targets.rs): the boot frame's passes and every target's mean colour
           FASTRENDER_RT_PROBE=1 ./target/release/fastrender selftest --three js/dist/ibl.js --upscale bilinear --scale 1 --size 640x400 > ibl-probe.txt 2>&1 || true
-          grep "rt probe" ibl-probe.txt > ibl-probe-rt.txt || true
-          bash .github/annotate.sh notice "IBL render-target probe" ibl-probe-rt.txt 180
+          grep "rt probe: pass" ibl-probe.txt > ibl-probe-passes.txt || true
+          grep "rt probe: rt" ibl-probe.txt > ibl-probe-targets.txt || true
+          bash .github/annotate.sh notice "IBL render-target probe: targets (mean RGBA)" ibl-probe-targets.txt 30
+          bash .github/annotate.sh notice "IBL render-target probe: passes" ibl-probe-passes.txt 60
           grep -q "three-programs selftest: PASS" ibl-selftest.txt
           grep -q "three-programs selftest: PASS" ibl-bloom-selftest.txt
-      - name: golden IBL + bloom (render targets; MAE printed, not gating yet)
+      - name: golden IBL + bloom (render targets)
         if: always()
-        continue-on-error: true
         run: |
           set -o pipefail
           test -s js/dist/ibl.js || node js/build.mjs js/examples/ibl-scene.entry.mjs js/dist/ibl.js
@@ -216,6 +217,10 @@ jobs:
           echo "::notice title=golden IBL (PMREM)::$(cat golden-ibl.json)"
           echo "::notice title=golden IBL bloom (EffectComposer)::$(cat golden-ibl-bloom.json)"
           grep "three programs:" golden-ibl-bench.txt golden-ibl-bloom-bench.txt >> "$GITHUB_STEP_SUMMARY" || true
+      # first native runs (run 43705587015): PMREM 0.10, bloom 0.22
+      - name: golden IBL + bloom MAE<1.5 (PMREM, EffectComposer)
+        if: always()
+        run: node -e "for(const f of ['golden-ibl.json','golden-ibl-bloom.json']){const r=JSON.parse(require('fs').readFileSync(f,'utf8'));console.log(f,'MAE',r.mae);if(!(r.mae<1.5))process.exit(1)}"
       - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
         run: |
           ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000 --rounds 1

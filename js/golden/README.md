@@ -54,3 +54,6 @@ node js/build.mjs js/examples/ibl-scene.entry.mjs js/dist/ibl.js        # ibl-bl
 cargo run --release -- bench --three js/dist/ibl.js --time 1 --scale 1 --upscale bilinear --size 960x600 \
   --frames 3 --warmup 2 --shot golden-ibl-t1.png
 ```
+
+CI gates both at MAE < 1.5 (Nov 2026, first native runs: PMREM 0.10, bloom 0.22). `FASTRENDER_RT_PROBE=1` prints
+the first frame's passes (draws, drawn, uniform blocks) and every render target's mean colour per face / mip level.

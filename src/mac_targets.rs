@@ -711,8 +711,8 @@ impl ThreeScene {
             let (draws, vis) = if self.targets.cur == Some(k) { (self.draws.len(), self.vis3.len()) } else { (p.draws.len(), p.vis3.len()) };
             let blocks = if self.targets.cur == Some(k) { self.uni.len() } else { p.uni.len() };
             eprintln!(
-                "rt probe: pass {k}: target {} face {} level {} flags {:#x} viewport {:?} clear {:?} draws {draws} drawn {vis} blocks {blocks} prepared {}",
-                h.target, h.face, h.level, h.flags, h.viewport, h.clear_color, p.prepared
+                "rt probe: pass {k}: rt {} f{} l{} flags {:#x} vp {} draws {draws} drawn {vis} blocks {blocks}{}",
+                h.target, h.face, h.level, h.flags, h.viewport[2], if p.prepared { "" } else { " UNPREPARED" }
             );
         }
         let Some(b) = cb.blitCommandEncoder() else { return };

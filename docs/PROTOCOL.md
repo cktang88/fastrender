@@ -197,6 +197,12 @@ its frame). A `render()` inside a `render()` (three converting an equirect `scen
 program) writes its passes where the outer pass began; the outer pass stops writing at once and is rendered again
 after them (its programs are cached by then).
 
+**Releases wait a frame.** WebGL runs each call at once; here a frame's GPU work runs after its JS. three's
+`pmrem.fromScene(...)` followed by `pmrem.dispose()` releases the source cube target and the blur / GGX materials
+before the passes that use them have run (they run in the first frame). The native side therefore applies each
+batch of `host.release` calls together with the next batch (`three::defer_releases`), after the frame written before
+them has been encoded; a release followed by an upload of the same (kind, id) in one batch keeps the upload.
+
 **readRenderTargetPixels** is asynchronous in nature here: the GPU work of a frame runs after the frame's JS. A host
 with `readRenderTarget(id, x, y, w, h, buffer, face, textureIndex)` fills the buffer from the last completed frame (one
 frame late); without it (the JavaScriptCore host today) the buffer is left unchanged and the call is counted.
