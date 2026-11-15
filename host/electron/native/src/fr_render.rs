@@ -12,18 +12,22 @@
 //!   thermal state and Low Power Mode lower the scale ceiling and cap the presented rate (`{"thermal": 0}` to opt
 //!   out); `{"gpu-passes": 1}` logs per-pass GPU ms. A `shot` frame is rendered offscreen and read back from there
 //!   (it is not presented), so no drawable is ever read.
-//! - Pipelines are created here, synchronously, from the programs the renderer process translated (H5: an async
-//!   compile later only changes this side; the wire protocol stays).
+//! - Programs arrive translated (MSL) from the renderer process; their libraries and pipelines compile on worker
+//!   threads (src/mac_programs.rs), and this thread waits only where a skipped draw would leave a wrong result.
+//! - Stall log (`frame_log`, play mode): one `fastrender::hitch::FrameRec` per frame; the long ones wait as JSON
+//!   lines for the main process (`take_frame_log`), with this thread's own notes (renderer line, compile line).
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use fastrender::core::{Config, DynRes, LoopStats, PassStats};
+use fastrender::hitch::{FrameLog, FrameRec};
 use fastrender::host::{Feed, FeedSource};
+use fastrender::three::{Array, Resource};
 use fastrender::mac::{PowerWatch, Renderer};
 use fastrender::qos::{Qos, set_thread_qos};
 use objc2::rc::{Retained, autoreleasepool};
@@ -33,6 +37,36 @@ use objc2_quartz_core::CAMetalLayer;
 
 use crate::fr_queue::Shared;
 use crate::shm::Slot;
+
+/// The stall log (play mode): None until the main process asks for it (`frame_log(over_ms)`).
+pub static FRAME_LOG: Mutex<Option<FrameLog>> = Mutex::new(None);
+/// Lines waiting for the main process: a long frame's JSON record, or `{"note": "..."}`.
+pub static LOG_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A line of this thread for the terminal and, in play mode, for the log file.
+fn note(s: String) {
+    println!("[fastrender] {s}");
+    if FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        LOG_LINES.lock().unwrap_or_else(|e| e.into_inner()).push(serde_json::json!({ "note": s }).to_string());
+    }
+}
+
+fn resource_bytes(res: &[Resource]) -> u64 {
+    let mut n = 0;
+    for r in res {
+        if let Resource::Upload { arrays, .. } = r {
+            for a in arrays.iter().flatten() {
+                n += match a {
+                    Array::F32(v) => v.len() * 4,
+                    Array::U16(v) => v.len() * 2,
+                    Array::U32(v) => v.len() * 4,
+                    Array::U8(v) => v.len(),
+                } as u64;
+            }
+        }
+    }
+    n
+}
 
 struct SendWrap<T>(T);
 // SAFETY: CAMetalLayer.nextDrawable / drawableSize are documented as callable from a render thread.
@@ -99,7 +133,13 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
     let (mut loop_stats, mut passes) = (LoopStats::default(), PassStats::default());
     let mut limit = 2;
     let t0 = Instant::now();
-    while let Some(b) = shared.next_batch() {
+    // stall log: the end of the frame before, the frames that completed on the GPU with their per-pass times
+    let mut last_end: Option<Instant> = None;
+    let mut pass_queue: std::collections::VecDeque<[f64; 4]> = Default::default();
+    loop {
+        let idle_from = Instant::now();
+        let Some(b) = shared.next_batch() else { break };
+        let idle_ms = idle_from.elapsed().as_secs_f64() * 1000.0;
         autoreleasepool(|_| {
             let shm = slot.current();
             let h = shm.header();
@@ -111,6 +151,7 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                 failed = None;
             }
             let n_programs = b.programs.len() as u32;
+            let (n_resources, n_bytes) = (b.resources.len() as u32, resource_bytes(&b.resources));
             {
                 let mut f = feed.borrow_mut();
                 f.resources.extend(b.resources);
@@ -129,7 +170,7 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                     Ok(mut nr) => {
                         // Metal 4: the drawables are resident through the layer's residency set (a no-op on Metal 3)
                         nr.attach_layer(layer);
-                        println!("[fastrender] renderer {}x{} {} on {}, backend {}", dw, dh, nr.cfg.label(), fastrender::mac::device_name(), nr.backend_label());
+                        note(format!("renderer {}x{} {} on {}, backend {}", dw, dh, nr.cfg.label(), fastrender::mac::device_name(), nr.backend_label()));
                         dynres = (nr.cfg.dynres_ms > 0.0).then(|| DynRes::new(nr.cfg.dynres_ms, nr.cfg.scale));
                         base_scale = nr.cfg.scale;
                         limit = nr.in_flight_limit();
@@ -155,7 +196,7 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
             // thermal state / Low Power Mode (polled once a second): scale ceiling and presented-rate cap
             if let Some(state) = power.poll() {
                 let l = state.limits();
-                println!("[fastrender] power: {} -> scale <= {:.2}, frame cap {:?}", state.label(), l.max_scale, l.fps_cap);
+                note(format!("power: {} -> scale <= {:.2}, frame cap {:?}", state.label(), l.max_scale, l.fps_cap));
                 rr.set_present_cap(l.fps_cap);
                 let scale = match dynres.as_mut() {
                     Some(d) => {
@@ -185,7 +226,8 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                     Err(e) => eprintln!("[fastrender] shot {path}: {e}"),
                 }
             }
-            for ms in rr.take_gpu_times() {
+            let gpu_done = rr.take_gpu_times();
+            for &ms in &gpu_done {
                 h.gpu_us.fetch_add((ms * 1000.0) as u64, Ordering::Relaxed);
                 h.gpu_frames.fetch_add(1, Ordering::Relaxed);
                 if let Some(d) = dynres.as_mut() {
@@ -194,13 +236,52 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                     }
                 }
             }
-            loop_stats.merge(&rr.take_loop_stats());
+            let ls = rr.take_loop_stats();
+            loop_stats.merge(&ls);
             for ms in rr.take_pass_times() {
                 passes.push(ms);
-                if passes.frames % 300 == 0 {
+                pass_queue.push_back(ms);
+                // (every 5 s at 60 fps is noise in a play session: once a minute)
+                if passes.frames % 3600 == 0 {
                     println!("[fastrender] gpu passes (ms avg over {} frames): {}", passes.frames, passes.line());
                 }
             }
+            // stall log: this frame's record; the frames the GPU completed get their GPU ms (they complete in order)
+            let end = Instant::now();
+            if let Some(log) = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                let mut out = Vec::new();
+                let timed = rr.cfg.gpu_passes;
+                for &ms in &gpu_done {
+                    log.completed(ms, if timed { pass_queue.pop_front() } else { None }, &mut out);
+                }
+                let mut rec = FrameRec {
+                    seq: b.seq,
+                    at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64() * 1000.0),
+                    interval_ms: last_end.map_or(0.0, |l| end.duration_since(l).as_secs_f64() * 1000.0),
+                    idle_ms: if last_end.is_some() { idle_ms } else { 0.0 },
+                    cpu_ms: cpu.as_secs_f64() * 1000.0,
+                    fence_ms: ls.fence_wait_ms,
+                    drawable_ms: ls.drawable_wait_ms,
+                    resources: n_resources,
+                    resource_bytes: n_bytes,
+                    programs: n_programs,
+                    draws: rr.last_draws as u32,
+                    skipped_frames: b.skipped as u32,
+                    ..Default::default()
+                };
+                if let Some(s) = rr.three() {
+                    log.diff(s.hitch_counters(), &mut rec);
+                    (rec.apply_ms, rec.target_passes, rec.pending, rec.persisting) = s.hitch_frame();
+                    rec.shadow_passes = s.counts.shadow_passes;
+                    rec.shadow_draws = s.counts.shadow_draws;
+                }
+                log.submitted(rec, &mut out);
+                if !out.is_empty() {
+                    LOG_LINES.lock().unwrap_or_else(|e| e.into_inner()).append(&mut out);
+                }
+            }
+            pass_queue.truncate(64);
+            last_end = Some(end);
             h.render_ns.fetch_add(cpu.as_nanos() as u64, Ordering::Relaxed);
             h.cpu_us_last.store(cpu.as_micros() as u64, Ordering::Relaxed);
             h.last_draw_count.store(rr.last_draws as u32, Ordering::Relaxed);
@@ -216,14 +297,23 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
     }
     if let Some(r) = r {
         r.wait_idle();
-        println!("[fastrender] frame loop: {}; fence: {}; render thread QoS {:?}; framebufferOnly {fb_only}", loop_stats.line(limit), r.fence_label(), fastrender::qos::thread_qos());
+        note(format!("frame loop: {}; fence: {}; render thread QoS {:?}; framebufferOnly {fb_only}", loop_stats.line(limit), r.fence_label(), fastrender::qos::thread_qos()));
         if passes.frames > 0 {
-            println!("[fastrender] gpu passes (ms avg over {} frames): {}", passes.frames, passes.line());
+            note(format!("gpu passes (ms avg over {} frames): {}", passes.frames, passes.line()));
+        }
+        if let Some(log) = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            let mut out = Vec::new();
+            log.flush(&mut out);
+            LOG_LINES.lock().unwrap_or_else(|e| e.into_inner()).append(&mut out);
+        }
+        // launch and hitch counters of the compile pipeline (waits on this thread, skipped draws, frames over 50 ms)
+        if let Some(t) = r.three().filter(|t| t.view.v3) {
+            note(t.compile_line());
         }
         // what the last frame drew (instances tested against the frustum, discarding draws): the evidence that a
         // FASTRENDER_V3_DEBUG switch took effect (bench variants fastrender-bare / -trimonly, scripts/bench-3way.sh)
         if let Some(t) = r.three().filter(|t| t.view.v3) {
-            println!("[fastrender] draws per pass (last frame): {}; FASTRENDER_V3_DEBUG={}", t.counts.line(), std::env::var("FASTRENDER_V3_DEBUG").unwrap_or_default());
+            note(format!("draws per pass (last frame): {}; FASTRENDER_V3_DEBUG={}", t.counts.line(), std::env::var("FASTRENDER_V3_DEBUG").unwrap_or_default()));
         }
     }
 }

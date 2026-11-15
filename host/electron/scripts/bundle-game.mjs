@@ -12,9 +12,16 @@
 //                                requestAnimationFrame), `three` = game/play/three.<variant>.mjs. With --play only
 //                                boot.js and the play bundles are built.
 //
+//   game/dist/workers/<n>.js     (--world) the game's module workers, `new Worker(new URL('./x.ts', import.meta.url))`:
+//                                Vite bundles each as its own chunk; here each is its own ESM bundle, and
+//                                game/dist/workers.json maps the URL the page asks for to it (game/main.js serves
+//                                it as JavaScript; without this the request is a 404 and Chromium reports "Failed
+//                                to load module script ... MIME type text/plain"). import.meta.url is one constant
+//                                (app://game/src/main.ts) in the bundle, so the URL is /src/<the relative path>.
+//
 //   node scripts/bundle-game.mjs [--world ../3d-world-objects] [--play fastrender,webgl]
 import { build } from 'esbuild';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -66,6 +73,37 @@ const gameBuild = (entry, outfile, shim) => build({
     __WORLD_TARGET__: '"electron"',
   },
 });
+// the game's module workers (see the header): every `new Worker(new URL('<relative>', import.meta.url)` under src/
+if (world) {
+  const found = new Map(); // URL path the page requests -> source file
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const f = path.join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(f); continue; }
+      if (!/\.(ts|js|mjs)$/.test(e.name)) continue;
+      for (const m of readFileSync(f, 'utf8').matchAll(/new\s+Worker\(\s*new\s+URL\(\s*['"]([^'"]+)['"]\s*,\s*import\.meta\.url\s*\)/g)) {
+        const url = path.posix.join('/src', m[1]);
+        const src = path.resolve(path.dirname(f), m[1]);
+        if (found.has(url) && found.get(url) !== src) console.warn(`bundle-game: two workers share the URL ${url}: ${found.get(url)} and ${src} (the first is served)`);
+        else found.set(url, src);
+      }
+    }
+  };
+  walk(path.join(world, 'src'));
+  const map = {};
+  mkdirSync(out('workers'), { recursive: true });
+  let n = 0;
+  for (const [url, src] of found) {
+    const file = `workers/${n++}-${path.basename(src).replace(/\.[^.]+$/, '')}.js`;
+    await build({
+      ...common, format: 'esm', entryPoints: [src], outfile: out(file), platform: 'neutral', mainFields: ['module', 'main'], plugins: [threeSrc(null)],
+      define: { 'import.meta.env.BASE_URL': '"/"', 'import.meta.env.DEV': 'false', 'import.meta.env.PROD': 'true', 'import.meta.env.MODE': '"production"' },
+    });
+    map[url] = file;
+  }
+  writeFileSync(out('workers.json'), JSON.stringify(map, null, 1));
+  console.log(`bundled ${n} module workers -> game/dist/workers/ (${Object.keys(map).join(', ')})`);
+}
 if (play) {
   for (const v of play) {
     await gameBuild(path.join(world, 'src/main.ts'), out(`play-${v}.js`), path.join(root, 'game', 'play', `three.${v}.mjs`));

@@ -107,6 +107,7 @@ const abOn = abProp === 'staticSubtrees' ? Number(opt('--check', '8')) : true, a
 const staticSubtrees = Number(opt('--static-subtrees', '0'));
 const matrixCheckN = Number(opt('--matrix-check', '0'));
 const walk = opt('--walk', '').split(',').map(Number);
+const wantDoor = args.includes('--door');
 const wantProfile = args.includes('--profile'), wantMatrixStats = args.includes('--matrix-stats');
 const program0 = fixName ? (k, vs, fs, id) => program0x(k, vs.replace(/^#define SHADER_NAME .*$/m, ''), fs.replace(/^#define SHADER_NAME .*$/m, ''), id) : program0x;
 const allPrograms = new Map(); // every program asked for (also the ones that fail): --dump-programs
@@ -450,8 +451,56 @@ async function meshCensus(top) {
   }
   return out.join('\n');
 }
+// --door: after the measured frames, enter the two nearest interiors of different shops through the game's own
+// enter() (what the E key does) and leave each again (goBack, the Q key). Per leg: programs translated, three's light
+// counts before and after, uploads, and the frames in which something happened. The programs a leg brings are its
+// hitch on a host that compiles them; a leg on a street that was drawn before should bring none (docs/LOG.md).
+let door = null;
+if (wantDoor) {
+  const w = W(), tp = renderer._tp, pl = w.player;
+  const counts = () => { const st = tp && tp.lights ? tp.lights.state : null; return st ? `${st.point.length}p ${st.spot.length}s ${st.directional.length}d, shadows ${st.numPointShadows | 0}p ${st.numSpotShadows | 0}s ${st.numDirectionalShadows | 0}d` : ''; };
+  const sceneLights = () => { let lit = 0, dark = 0; w.scene.traverseVisible((o) => { if (o.isPointLight || o.isSpotLight) { if (o.intensity === 0 || (o.color.r === 0 && o.color.g === 0 && o.color.b === 0)) dark++; else lit++; } }); return `${lit} lit + ${dark} dark point/spot`; };
+  const uploadsN = () => hstats.uploads[1] + hstats.uploads[2] + hstats.uploads[3] + hstats.uploads[4];
+  const cands = [...w.level.portals()].filter((p) => p.target && p.target.kind === 'interior');
+  cands.sort((a, b) => a.box.distanceToPoint(pl.pos) - b.box.distanceToPoint(pl.pos));
+  const picked = [];
+  for (const p of cands) if (picked.length < 2 && !picked.some((q) => q.target.shop === p.target.shop)) picked.push(p);
+  door = { portals: cands.length, programsBefore: hstats.programs, legs: [] };
+  // one leg: start `act`, step frames until it is over and `settle` more frames have passed
+  const leg = async (name, act, settle) => {
+    const h0 = { programs: hstats.programs, ms: hstats.programMs, up: uploadsN(), bytes: hstats.uploadBytes, picks };
+    const L = { leg: name, before: { lights: counts(), scene: sceneLights(), place: w.lighting.place }, frames: [] };
+    let prev = { ...h0 }, lastCounts = counts(), done = false, after = 0;
+    Promise.resolve(act()).then(() => { done = true; }, (e) => { done = true; errors.push(String(e)); });
+    for (let i = 0; i < 1500 && after < settle; i++) {
+      renderMs = 0;
+      const t = hrNow();
+      globalThis.__worldStep(1 / 60);
+      const c = counts();
+      const d = { i, ms: +(hrNow() - t).toFixed(1), programs: hstats.programs - prev.programs, picks: picks - prev.picks, uploads: uploadsN() - prev.up, uploadMB: +((hstats.uploadBytes - prev.bytes) / 1e6).toFixed(2), lights: c };
+      if (d.programs || d.uploadMB > 0.5 || c !== lastCounts) L.frames.push(d);
+      lastCounts = c;
+      prev = { programs: hstats.programs, ms: hstats.programMs, up: uploadsN(), bytes: hstats.uploadBytes, picks };
+      if (done) after++;
+      await tick(); await sleep(2); // (the game's fades and its staged build run on real timers)
+    }
+    L.after = { lights: counts(), scene: sceneLights(), place: w.lighting.place, level: w.desc && `${w.desc.kind} ${w.desc.name || ''}` };
+    L.programsTranslated = hstats.programs - h0.programs;
+    L.uploads = uploadsN() - h0.up; L.uploadMB = +((hstats.uploadBytes - h0.bytes) / 1e6).toFixed(1);
+    if (L.frames.length > 12) L.frames = [...L.frames.slice(0, 8), { more: L.frames.length - 12 }, ...L.frames.slice(-4)];
+    door.legs.push(L);
+    console.log(`door: ${name}: ${L.programsTranslated} programs translated, ${L.uploads} uploads (${L.uploadMB} MB); lights ${L.before.lights} -> ${L.after.lights}; scene ${L.before.scene} -> ${L.after.scene}`);
+  };
+  for (const p of picked) {
+    await leg(`enter ${p.target.shop || p.target.name}`, () => w.enter(p), 150);
+    await leg(`leave ${p.target.shop || p.target.name}`, () => w.goBack(), 200); // (longer than TRIM_HOLD: the kept light counts shrink back)
+  }
+  if (picked[0]) { await leg(`enter ${picked[0].target.shop || picked[0].target.name} again`, () => w.enter(picked[0]), 150); await leg('leave again', () => w.goBack(), 200); }
+  door.programsTranslated = hstats.programs - door.programsBefore;
+  door.lightHold = tp ? { ...tp.holdStats } : null;
+}
 const result = {
-  three: pkg, search, frames, bootFrames: boot,
+  three: pkg, search, frames, bootFrames: boot, door,
   perFrameMs: { gameFrameMedian: med(per.map((p) => p.total)), gameFrameP95: p95(per.map((p) => p.total)), renderMedian: med(per.map((p) => p.render)), renderP95: p95(per.map((p) => p.render)), updateMedian: med(per.map((p) => p.total - p.render)),
     // the same in CPU time of this process (see cpuNow)
     gameFrameCpuMedian: med(per.map((p) => p.totalCpu)), gameFrameCpuP95: p95(per.map((p) => p.totalCpu)), renderCpuMedian: med(per.map((p) => p.renderCpu)), renderCpuP95: p95(per.map((p) => p.renderCpu)) },

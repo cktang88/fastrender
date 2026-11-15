@@ -17,6 +17,7 @@ pub mod bindlist; // id tables, program / stream plans, bind lists, last-bound f
 pub mod ring; // v3 per-slot ring layout + bounds-checked writes (src/mac_three.rs)
 pub mod image; // __fr.readFile / __fr.decodeImage for real web games (JavaScriptCore host)
 pub mod pipeline_manifest; // async compile queue, stage dedupe, persisted pipeline manifest (src/mac_programs.rs)
+pub mod hitch; // play mode's stall log: one record per frame, the long ones as JSON lines, percentiles (docs/HOST.md)
 pub mod host; // FrameSource (host -> renderer boundary) + the Electron wire codec
 pub mod qos; // thread QoS classes (render thread on P cores); a no-op off macOS
 pub mod gpu; // the backend seam: Metal 4 / Metal 3 choice, the frame-indexed graveyard; on macOS the encoder traits (src/gpu_encoder.rs)

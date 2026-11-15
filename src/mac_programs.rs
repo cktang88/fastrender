@@ -144,6 +144,13 @@ pub struct CompileStats {
     /// times the render thread waited for a pipeline or a program (blocking mode, render targets, shadow maps)
     pub waits: u64,
     pub wait_ms: f64,
+    /// the same per reason (`hitch::WAIT_*`: a main-pass pipeline that replaces one on screen, a shadow map's, a
+    /// render target's; a program waited for in blocking mode counts as main)
+    pub waits_by: [u64; 3],
+    pub wait_ms_by: [f64; 3],
+    /// manifest + archive writes finished (they run on a compile worker), their ms from request to result
+    pub persists: u64,
+    pub persist_ms: f64,
     /// the end of the first frame
     pub first_frame_ms: Option<f64>,
     /// the end of the first frame that drew with a pipeline, skipped nothing and left nothing pending
@@ -194,6 +201,8 @@ pub struct Programs {
     stats: CompileStats,
     last_poll: Option<Instant>,
     last_persist: Instant,
+    /// a persist is under way since then
+    persist_from: Option<Instant>,
     /// what the last persist said (the binary archive's line, or its error)
     archive_note: Option<String>,
 }
@@ -388,6 +397,7 @@ impl Programs {
             stats: CompileStats { blocking, workers, ..Default::default() },
             last_poll: None,
             last_persist: Instant::now(),
+            persist_from: None,
             archive_note: None,
         })
     }
@@ -448,6 +458,12 @@ impl Programs {
         let mut finished = false;
         for ev in self.compiler.poll() {
             finished |= !matches!(ev, Event::Persisted(_));
+            if matches!(ev, Event::Persisted(_)) {
+                if let Some(t) = self.persist_from.take() {
+                    self.stats.persists += 1;
+                    self.stats.persist_ms += t.elapsed().as_secs_f64() * 1000.0;
+                }
+            }
             match ev {
                 Event::Program { hash, result } => {
                     for name in self.waiting_progs.remove(&hash).unwrap_or_default() {
@@ -528,9 +544,35 @@ impl Programs {
         self.skipped_at_poll = skipped;
         if pending == 0 && q.prewarm_queued == 0 && self.last_persist.elapsed().as_secs_f32() > 1.0 && self.unsaved() {
             self.last_persist = now;
+            self.persist_from.get_or_insert(now);
             self.compiler.persist();
         }
     }
+
+    fn waited(&mut self, why: usize, n: usize, t: Instant) {
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        self.stats.waits += n as u64;
+        self.stats.wait_ms += ms;
+        self.stats.waits_by[why] += n as u64;
+        self.stats.wait_ms_by[why] += ms;
+    }
+
+    /// Cumulative counters for the per-frame stall log (src/hitch.rs).
+    pub fn counters(&self) -> crate::hitch::Counters {
+        let q = self.compiler.stats();
+        crate::hitch::Counters {
+            waits: self.stats.waits_by,
+            wait_ms: self.stats.wait_ms_by,
+            libraries: q.libraries as u64,
+            pipelines: q.pipelines as u64,
+            skipped_draws: self.skipped.get(),
+            persists: self.stats.persists,
+            persist_ms: self.stats.persist_ms,
+        }
+    }
+
+    /// An archive / manifest write is under way on a worker.
+    pub fn persisting(&self) -> bool { self.persist_from.is_some() }
 
     fn unsaved(&self) -> bool { self.compiler.dirty() || self.compiler.backend().unsaved() > 0 }
 
@@ -548,6 +590,7 @@ impl Programs {
         self.drain();
         if self.unsaved() {
             self.last_persist = Instant::now();
+            self.persist_from.get_or_insert(self.last_persist);
             self.compiler.persist();
             self.compiler.wait_demand();
             self.drain();
@@ -638,8 +681,7 @@ impl Programs {
         if self.blocking {
             let t = Instant::now();
             self.compiler.wait_program(hash);
-            self.stats.waits += 1;
-            self.stats.wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+            self.waited(crate::hitch::WAIT_MAIN, 1, t);
         }
         self.drain();
     }
@@ -680,8 +722,7 @@ impl Programs {
         for k in &keys {
             self.compiler.wait_pipeline(k);
         }
-        self.stats.waits += keys.len() as u64;
-        self.stats.wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+        self.waited(crate::hitch::WAIT_MAIN, keys.len(), t);
         self.drain();
         keys.len()
     }
@@ -753,8 +794,12 @@ impl Programs {
                 if wait {
                     let t = Instant::now();
                     self.compiler.wait_pipeline(&pk);
-                    self.stats.waits += 1;
-                    self.stats.wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+                    let why = match target {
+                        Target::Main => crate::hitch::WAIT_MAIN,
+                        Target::Rt(_) => crate::hitch::WAIT_TARGET,
+                        _ => crate::hitch::WAIT_SHADOW,
+                    };
+                    self.waited(why, 1, t);
                     self.drain();
                 }
             }

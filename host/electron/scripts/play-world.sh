@@ -24,6 +24,14 @@
 #                        host/electron/.bench/3d-world-objects, the copy bench-3way.sh uses)
 #     --no-build         skip npm ci / the addon / the bundle (reuse the previous run's)
 #     --play-seconds N   CI: run unattended for N seconds (resize, click, W), print PASS / FAIL, exit
+#     --doors N          CI, with --play-seconds: then go in and out of the N nearest shops and print what each cost
+#     --hitch-ms N       the stall log's threshold (default 25): every frame over N ms is one [hitch] line
+#     --log FILE         where the stall log goes (default host/electron/play-out/play-<time>-<variant>.log)
+#     --params '{..}'    FastRenderer switches for an A/B, e.g. '{"dynamicLights":0}' or '{"trimLights":0}'
+#
+# STALL LOG: every long frame is printed as it happens ("[hitch] 12:01:33.120 frame 48 ms, <cause> | ...") and
+# written to host/electron/play-out/ (last.log = the latest session). Quit with cmd-Q or Ctrl-C: the summary
+# (p50 / p95 / p99 / max frame time, long frames per cause) is printed last. To report a stutter, send last.log.
 #
 # In the game: click the view to capture the mouse (Esc releases it and pauses), WASD / arrows move, Shift runs,
 # Space jumps, E enters / shrinks in, Q backs out, hold Z to zoom, T time of day, Y weather, M map, C credits.
@@ -44,10 +52,10 @@ while [ $# -gt 0 ]; do
     --no-build) build=0; shift;;
     --game-mode) game_mode=1; shift;;
     --fps|--online|--no-aa) pass+=("$1"); shift;;
-    --search|--renderer|--size|--dpr|--frame|--play-seconds|--out|--tag|--timeout)
+    --search|--renderer|--size|--dpr|--frame|--play-seconds|--out|--tag|--timeout|--hitch-ms|--log|--doors|--params)
       [ $# -ge 2 ] || { echo "$1 needs a value"; exit 2; }
       pass+=("$1" "$2"); shift 2;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0;;
     *) echo "unknown option $1 (--help)"; exit 2;;
   esac
 done
@@ -105,5 +113,6 @@ if [ "$game_mode" = 1 ]; then node scripts/game-mode.mjs || true; fi
 say "play ($variant)"
 echo "click the view to capture the mouse (Esc releases it) - WASD move, Shift run, Space jump, E enter, Q back,"
 echo "Z zoom, T time of day, Y weather, M map - ctrl-cmd-F full screen, \` fps overlay, cmd-Q quit"
+echo "long frames are logged as [hitch] lines; after quitting (cmd-Q or Ctrl-C) the log is $el/play-out/last.log"
 # shellcheck disable=SC2086
 exec $electron game/main.js --play --variant "$variant" --html "$world/index.html" --assets "$world/public" ${pass[@]+"${pass[@]}"}

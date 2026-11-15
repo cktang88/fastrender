@@ -642,6 +642,18 @@ impl ThreeScene {
     /// Programs whose libraries are still compiling, pipelines requested and not ready (their draws are skipped).
     pub fn pending_programs(&self) -> (usize, usize) { (self.progs.pending_programs(), self.progs.pending_pipelines()) }
 
+    /// Cumulative compile / wait counters (src/hitch.rs: the play-mode stall log takes differences per frame).
+    pub fn hitch_counters(&self) -> crate::hitch::Counters { self.progs.counters() }
+
+    /// Of the frame just rendered: ms applying resources, passes into render targets, programs + pipelines still
+    /// compiling, and whether an archive write is under way on a worker.
+    pub fn hitch_frame(&self) -> (f64, u32, u32, bool) {
+        (self.apply_ms, self.targets.stats[1] as u32, (self.progs.pending_programs() + self.progs.pending_pipelines()) as u32, self.progs.persisting())
+    }
+
+    /// The compile pipeline's launch and hitch line (`Programs::compile_line`).
+    pub fn compile_line(&self) -> String { self.progs.compile_line() }
+
     /// Wait for every queued compile and persist the pipeline manifest (a harness, before it captures or exits).
     /// True when the last frame skipped draws: render one more before capturing.
     pub fn settle(&mut self) -> bool { self.progs.settle() }

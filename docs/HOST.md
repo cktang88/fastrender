@@ -177,7 +177,7 @@ What `--play` changes against the golden run:
 | Clock, `Math.random`, `requestAnimationFrame` | virtual, seeded, stepped (`world-objects.drive.mjs`) | real (`game/dist/play-<variant>.js` has no driver) |
 | Window | frameless, fixed 1280x800, always on top | traffic lights over the game (`titleBarStyle: 'hidden'`; the top 24 points drag it), resizable, full screen (`ctrl-cmd-F`, `fn-F11`); default size = the screen's work area |
 | Permissions | all denied | pointer lock and fullscreen granted; the window takes the focus |
-| Renderer options | `{"scale":1,"upscale":"bilinear"}` | the same plus `"vsync":1`; `--renderer '{...}'` is merged over them |
+| Renderer options | `{"scale":1,"upscale":"bilinear"}` | the same plus `"vsync":1` and `"gpu-passes":1` (GPU ms per pass group for the stall log); `--renderer '{...}'` is merged over them |
 | URL parameters | `?mode=world&quality=low&weather=clear&tod=noon&seamless=0` | `?mode=world&quality=low&seamless=0&nodyn` (the game's own time of day and weather); `--search` replaces them |
 | Capture, timeout, exit | golden PNG, JSON, exits | none; runs until the window closes |
 
@@ -201,10 +201,58 @@ What `--play` changes against the golden run:
   the flush), and for fastrender GPU ms, draws, drawable size, frames shown, skipped and waited ticks.
 - **Network.** Remote requests are refused, as in the golden and the benchmark. `--online` lets the game stream its
   objects from Hugging Face; that content has never been through fastrender.
+- **Workers.** The game starts module workers with `new Worker(new URL('./x.ts', import.meta.url))` (its USDA
+  parser pool, the mesh simplifier, the museum's z-fight fixer). `scripts/bundle-game.mjs` bundles each as its own
+  file and `game/main.js` serves it as JavaScript at the URL the page asks for. Before, those requests were 404s
+  ("Failed to load module script ... MIME type text/plain", four times: the parser pool). A script the page asks
+  for and the bundle lacks is now named in the terminal (`[game] missing script /src/...`).
+- **Pointer lock.** The game asks for the mouse when the world starts, without a click; the browser refuses that one
+  request. Play mode prints one line ("the mouse is not captured yet: click the view once") instead of an unhandled
+  rejection.
+- **Quitting.** cmd-Q, the close button and Ctrl-C in the terminal all stop the render thread and print the stall
+  log's summary (`before-quit`: cmd-Q and SIGINT do not emit `window-all-closed`).
 - **CI.** `--play-seconds N` runs unattended: waits for the world, resizes the window, clicks, holds `W`, runs N
-  seconds, goes full screen and back, and prints PASS / FAIL lines (plus a `screencapture` of the screen).
-  `.github/workflows/play-smoke.yml` runs it for both variants when play mode's
-  files change. It gates nothing.
+  seconds, goes full screen and back, and prints PASS / FAIL lines (plus a `screencapture` of the screen). With
+  `--doors N` it then goes in and out of the N nearest shops through the game's own `enter()` / `goBack()` (the `E`
+  and `Q` keys) and prints one `DOOR` line per leg: seconds until the game let go, long frames, the longest and its
+  cause, light counts, programs translated. `.github/workflows/play-smoke.yml` runs both variants when play mode's
+  files change and puts the door legs, the summary and the longest frames in an annotation. It gates nothing.
+
+#### Stall log: what to send when the game stutters
+
+Play mode logs every frame over 25 ms (`--hitch-ms N`) as one line, on the console as it happens and in
+`host/electron/play-out/play-<time>-<variant>.log`; `host/electron/play-out/last.log` is the latest session
+(`--log FILE` chooses the file). Quit with cmd-Q or Ctrl-C and the summary is the last thing printed. **To report a
+stutter: play until it happens, quit, send `host/electron/play-out/last.log`.**
+
+```
+[hitch] 12:01:33.120 frame 7213 ms, pipeline wait: main pass (seq 4821) | render thread 7150 ms, waited for
+  pipelines: main 61 (7100 ms), 12 resources applied (3.1 MB, 4.2 ms), 16 programs added, workers finished 32
+  libraries + 61 pipelines, 0 still compiling | waited for the page 20 ms | GPU 9.1 ms (targets 0.1, shadow 1.2, main
+  7.8, upscale 0.0) | 1420 draws, 3 shadow passes (232 draws), 0 render-target passes | page: JS 31 ms (game 28, send
+  3), since the frame before 49 ms, 16 programs translated (71 ms), 2 canvas readbacks (8.3 MB, 11 ms), lights 0 point
+  0 spot 2 directional -> 3 point 0 spot 2 directional | events: [seamless] built {"kind":"interior",...} in 27.2 ms
+[summary] fastrender, 312 s
+[summary] frames shown: 18650; frame interval p50 16.7, p95 16.9, p99 33.4, max 7213 ms; render thread ...; GPU ...
+[summary] long frames (over 25 ms): 41 of 18650 (0.22 %)
+[summary]   pipeline wait: main pass: 3 frames, 9100 ms in total, longest 7213 ms
+[summary] page: 18700 game frames; JS per frame p50 4.1, ... ; 16 programs translated (71 ms), ...
+```
+
+| Part of a `[hitch]` line | Where it is measured | Meaning |
+|---|---|---|
+| `frame N ms, <cause>` | render thread | time since the frame before was handed to the GPU (what the player sees), and the largest part of it |
+| `render thread` | render thread | its own time for the frame: pipelines it waited for (`main`: a pipeline that replaces one on screen; `shadow`, `target`: a shadow map's or a render target's, waited for one at a time), resources applied, programs added, what the compile workers finished, draws skipped while their pipeline compiles, the binary archive being written (on a worker), waits for a frame slot (GPU behind) and for the drawable |
+| `waited for the page` | render thread | idle until the page's frame arrived: the game's JS, or the page's pacing |
+| `GPU` | GPU timestamps | the frame's GPU ms, per pass group with `"gpu-passes": 1` (on in play; `--renderer '{"gpu-passes":0}'` switches it off: one command buffer per frame instead of one per group) |
+| draws, shadow passes, render-target passes | render thread | shadow maps re-rendered in the frame (cube faces count one each), passes into render targets (PMREM, post-processing) |
+| `page:` | the page | JS ms of the game's frame callback and of sending the frame, programs translated (GLSL -> MSL, synchronous), canvas readbacks (`imagePixels`), uploads, renders into render targets and who asked, three's light counts when they changed, `GC?` (the JS heap shrank by more than 4 MB), long tasks, display ticks the page waited for the render thread |
+| `events:` | the page | the game's own `console.info` lines of that frame (`[seamless] built ...`); every one is also an `[event]` line in the file |
+
+Causes: `pipeline wait: main pass | shadow map | render target`, `uploads`, `render thread (prepare / encode)`,
+`GPU`, `GPU behind (frame slot)`, `drawable (vsync / compositor)`, `page (JS / pacing)`. With `--webgl` only the
+page's half exists. The code: `src/hitch.rs` (records, causes, percentiles; unit-tested), the render loop in
+`host/electron/native/src/fr_render.rs`, the page's half in `game/boot.mjs`, the join and the file in `game/main.js`.
 
 Not covered: `contentsScale` is read once when the view is created, so a window dragged to a display with another
 scale factor keeps the old one until restart. The game's `G` key switches to its `high` / `ultra` tiers

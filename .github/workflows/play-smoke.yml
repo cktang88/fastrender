@@ -17,11 +17,21 @@ on:
       - host/electron/scripts/play-world.sh
       - host/electron/scripts/bundle-game.mjs
       - host/electron/scripts/world-game.sh
+      - host/electron/native/src/**
+      - host/electron/host.js
+      - js/three-programs.js
+      - js/fastrender-three.js
+      - src/hitch.rs
+      - src/mac_programs.rs
+      - src/mac_three.rs
+      - src/pipeline_manifest.rs
+      - patches/**
       - .github/workflows/play-smoke.yml
   workflow_dispatch:
 concurrency:
   group: play-smoke-${{ github.ref }}
-  cancel-in-progress: true
+  # a started run finishes (the door numbers of each push are wanted); a waiting one is replaced by the newest push
+  cancel-in-progress: false
 jobs:
   play-smoke:
     runs-on: macos-26
@@ -35,10 +45,14 @@ jobs:
         timeout-minutes: 40
         run: |
           sw_vers; sysctl -n machdep.cpu.brand_string
-          rc=0; bash host/electron/scripts/play-world.sh --fps --play-seconds 15 --out "$GITHUB_WORKSPACE/play-out" --timeout 900 > play-fastrender.log 2>&1 || rc=$?
+          # --doors 2: after the checks, in and out of the two nearest shops through the game's enter() / goBack()
+          rc=0; bash host/electron/scripts/play-world.sh --fps --play-seconds 15 --doors 2 --out "$GITHUB_WORKSPACE/play-out" --log "$GITHUB_WORKSPACE/play-out/play-fastrender-stall.log" --timeout 900 > play-fastrender.log 2>&1 || rc=$?
           echo "play-world.sh exit $rc"; echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE)|^\[fastrender\]|pointer lock|MISSING|Assertion|signal|^== " play-fastrender.log | cut -c1-900; } > play-fastrender-summary.txt
+          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE)|^\[fastrender\]|pointer lock|mouse is not|MISSING|Assertion|signal|^== " play-fastrender.log | cut -c1-900; } > play-fastrender-summary.txt
           bash .github/annotate.sh notice "play-smoke fastrender (exit $rc)" play-fastrender-summary.txt 40
+          # the stall log: what each door leg cost, the summary, and the longest frames with their cause
+          { grep -E "^\[game\] DOOR|^\[summary\]" play-fastrender.log | cut -c1-600; echo "-- the 12 longest frames:"; grep -E "^\[hitch\]" play-fastrender.log | sed -E 's/^\[hitch\] [0-9:.]+ frame ([0-9.]+) ms/\1 &/' | sort -rn | head -12 | cut -d' ' -f2- | cut -c1-900; echo "-- scripts the page could not load, unhandled rejections:"; grep -cE "missing script|non-JavaScript MIME|unhandled rejection" play-fastrender.log; grep -E "missing script|non-JavaScript MIME|unhandled rejection" play-fastrender.log | head -5 | cut -c1-300; } > play-fastrender-stall.txt
+          bash .github/annotate.sh notice "play-smoke fastrender stall log: doors (PARAVIRTUAL GPU)" play-fastrender-stall.txt 60
           grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" play-fastrender.log | tail -80
       # which of play mode's differences from the golden run the failure depends on (the runner's paravirtual GPU
       # driver has its own assertions: a crash here need not be one on real hardware)
@@ -60,9 +74,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: 15
         run: |
-          rc=0; bash host/electron/scripts/play-world.sh --webgl --fps --play-seconds 10 --out "$GITHUB_WORKSPACE/play-out" --timeout 600 > play-webgl.log 2>&1 || rc=$?
+          rc=0; bash host/electron/scripts/play-world.sh --webgl --fps --play-seconds 10 --doors 2 --out "$GITHUB_WORKSPACE/play-out" --log "$GITHUB_WORKSPACE/play-out/play-webgl-stall.log" --timeout 600 > play-webgl.log 2>&1 || rc=$?
           echo "play-world.sh exit $rc"
-          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE)|pointer lock|MISSING|^== " play-webgl.log | cut -c1-900; } > play-webgl-summary.txt
+          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE|DOOR)|^\[summary\]|pointer lock|mouse is not|MISSING|^== " play-webgl.log | cut -c1-900; } > play-webgl-summary.txt
           bash .github/annotate.sh notice "play-smoke webgl (exit $rc)" play-webgl-summary.txt 40
           grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" play-webgl.log | tail -60
       - uses: actions/upload-artifact@v7

@@ -35,7 +35,7 @@ const api = {
     send: (ch, payload) => ipcRenderer.send(ch, payload),
     on: (ch, fn) => { ipcRenderer.on(ch, (_e, payload) => fn(payload)); },
   },
-  cfg: { shmName, isolated, kind: arg('fr-kind') || 'world', costFrames: Number(arg('fr-cost-frames')) || 0, params, play },
+  cfg: { hitchMs: Number(arg('fr-hitch-ms')) || 25, shmName, isolated, kind: arg('fr-kind') || 'world', costFrames: Number(arg('fr-cost-frames')) || 0, params, play },
 };
 
 if (isolated) contextBridge.exposeInMainWorld('__frNative', api);

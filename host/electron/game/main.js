@@ -28,7 +28,14 @@
 // three WebGLRenderer in an opaque window, no addon. --fps: frame-rate overlay (` or F3 toggles). Remote requests stay
 // refused, as in the golden and the benchmark, unless --online (the game then streams objects from its CDNs; not
 // tested on fastrender). --play-seconds N (CI): wait for the world, resize the window, click (pointer lock), hold W,
-// run N seconds, print PASS/FAIL lines, write <out>/<tag>.json, exit.
+// run N seconds, print PASS/FAIL lines, write <out>/<tag>.json, exit. --doors N (with --play-seconds): then enter and
+// leave the N nearest shops through the game's own enter() / goBack() (the E and Q keys) and print what each leg cost.
+// STALL LOG (play): every frame over --hitch-ms (default 25) is one `[hitch]` line on the console and in
+// host/electron/play-out/play-<time>-<variant>.log (--log FILE; play-out/last.log is a copy of the latest): what the
+// player saw (frame interval), the page's side (JS ms, programs translated, canvas readbacks, uploads, render-target
+// renders, a GC guess, the game's own events) and the render thread's (pipelines waited for, uploads applied, GPU ms
+// per pass group, shadow and render-target passes), with the largest part named. At quit (cmd-Q, the window's close
+// button, Ctrl-C): p50 / p95 / p99 / max and the long frames per cause. docs/HOST.md "Play mode".
 const { app, BrowserWindow, Menu, ipcMain, nativeImage, protocol, screen, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -56,12 +63,17 @@ const isolated = opt('isolation', 'on') !== 'off';
 let rendererJson = opt('renderer', '{"scale":1,"upscale":"bilinear"}');
 if (play) {
   // vsync on: the display's rate is the cap (power); any fastrender option overrides ({"vsync":0}, MetalFX, dynres)
-  try { rendererJson = JSON.stringify({ scale: 1, upscale: 'bilinear', vsync: 1, ...JSON.parse(opt('renderer', '{}')) }); } catch (e) { console.error(`game: --renderer is not JSON: ${e.message}`); process.exit(2); }
+  // gpu-passes: GPU ms per pass group for the stall log (one command buffer per group instead of one per frame)
+  try { rendererJson = JSON.stringify({ scale: 1, upscale: 'bilinear', vsync: 1, ...(fr ? { 'gpu-passes': 1 } : {}), ...JSON.parse(opt('renderer', '{}')) }); } catch (e) { console.error(`game: --renderer is not JSON: ${e.message}`); process.exit(2); }
 }
 const costFrames = opt('cost-frames', '');
 const timeoutS = Number(opt('timeout', '900'));
 const params = JSON.parse(opt('params', '{}'));
+const hitchMs = Number(opt('hitch-ms', '25')) || 25;
+const doors = play ? Number(opt('doors', '0')) : 0;
 
+// play: performance.memory in steps of bytes, not of megabytes (the stall log's GC guess)
+if (play) app.commandLine.appendSwitch('enable-precise-memory-info');
 for (const s of ['disable-renderer-backgrounding', 'disable-background-timer-throttling', 'disable-backgrounding-occluded-windows']) app.commandLine.appendSwitch(s);
 if (play && !fr) {
   app.commandLine.appendSwitch('ignore-gpu-blocklist');
@@ -74,11 +86,125 @@ const results = { kind, tag, ...(play ? { play: true, variant } : {}), electron:
 let win = null, native = null, finished = false;
 const log = (...a) => console.log('[game]', ...a);
 
+// ---------------------------------------------------------------- play: the stall log
+const two = (n, w = 2) => String(n).padStart(w, '0');
+const clock = (ms) => { const d = new Date(ms); return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}.${two(d.getMilliseconds(), 3)}`; };
+const f1 = (v) => (typeof v === 'number' ? (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1)) : '-');
+const hitch = { fd: null, path: '', started: Date.now(), page: [], pageStats: null, lines: 0, recs: [], events: [] };
+function logOpen() {
+  if (!play) return;
+  try {
+    const d = new Date();
+    const def = path.join(__dirname, '..', 'play-out', `play-${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}-${variant}.log`);
+    hitch.path = path.resolve(opt('log', def));
+    fs.mkdirSync(path.dirname(hitch.path), { recursive: true });
+    hitch.fd = fs.openSync(hitch.path, 'w');
+  } catch (e) { log(`stall log: cannot write ${hitch.path}: ${e.message} (console only)`); hitch.fd = null; }
+  const os = require('os');
+  const sh = (cmd, args) => { try { return require('child_process').execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim(); } catch { return ''; } };
+  const commit = sh('git', ['-C', __dirname, 'rev-parse', '--short', 'HEAD']); // ('' outside a checkout)
+  const model = process.platform === 'darwin' ? sh('sysctl', ['-n', 'hw.model']) : '';
+  fileLine(`# fastrender play log, ${new Date().toString()}`);
+  fileLine(`# ${variant}${commit ? `, commit ${commit}` : ''}, ${model || os.arch()}, ${os.type()} ${os.release()}, ${os.cpus().length} cores, Electron ${process.versions.electron}; renderer ${fr ? rendererJson : 'three WebGLRenderer'}; ${search}`);
+  fileLine(`# a [hitch] line is a frame over ${hitchMs} ms: what the player saw, then where it went; the summary is at the end`);
+}
+function fileLine(s) { if (hitch.fd !== null) { try { fs.writeSync(hitch.fd, s + '\n'); } catch { hitch.fd = null; } } }
+function logLine(s) { console.log(s); fileLine(s); }
+const pagePart = (p) => {
+  const a = [`JS ${f1(p.js)} ms (game ${f1(p.cb)}, send ${f1(p.flush)})`, `since the frame before ${f1(p.gap)} ms`];
+  if (p.progs) a.push(`${p.progs} programs translated (${f1(p.progMs)} ms)`);
+  if (p.canvas) a.push(`${p.canvas} canvas readbacks (${f1(p.canvasMB)} MB, ${f1(p.canvasMs)} ms)`);
+  if (p.uploads) a.push(`${p.uploads} uploads (${f1(p.uploadMB)} MB)`);
+  if (p.rt) a.push(`${p.rt} render-target renders${p.rtWho ? ` (${p.rtWho})` : ''}`);
+  if (p.lights) a.push(`lights ${p.lights}`);
+  if (p.heapDrop) a.push(`GC? heap -${f1(p.heapDrop)} MB`);
+  if (p.longtasks) a.push(`${p.longtasks} long tasks outside the frame (${f1(p.longtaskMs)} ms)`);
+  if (p.waited) a.push(`${p.waited} display ticks waited for the render thread`);
+  if (p.calls) a.push(`${p.calls} draws`);
+  return a.join(', ');
+};
+function hitchLine(n, pages) {
+  const ev = pages.flatMap((p) => p.events || []);
+  const parts = [];
+  if (n) {
+    const names = ['main', 'shadow', 'target'];
+    const waits = n.waits.map((c, i) => (c ? `${names[i]} ${c} (${f1(n.wait_ms[i])} ms)` : '')).filter(Boolean).join(', ');
+    const rt = [`render thread ${f1(n.cpu_ms)} ms`];
+    if (waits) rt.push(`waited for pipelines: ${waits}`);
+    if (n.resources) rt.push(`${n.resources} resources applied (${f1(n.resource_mb)} MB, ${f1(n.apply_ms)} ms)`);
+    if (n.programs) rt.push(`${n.programs} programs added`);
+    if (n.libraries || n.pipelines || n.pending) rt.push(`workers finished ${n.libraries} libraries + ${n.pipelines} pipelines, ${n.pending} still compiling`);
+    if (n.skipped_draws) rt.push(`${n.skipped_draws} draws skipped (pipeline not ready)`);
+    if (n.persist_ms || n.persisting) rt.push(n.persist_ms ? `archive written in ${f1(n.persist_ms)} ms (on a worker)` : 'archive being written (on a worker)');
+    if (n.fence_ms >= 1) rt.push(`frame slot ${f1(n.fence_ms)} ms`);
+    if (n.drawable_ms >= 1) rt.push(`drawable ${f1(n.drawable_ms)} ms`);
+    parts.push(rt.join(', '));
+    parts.push(`waited for the page ${f1(n.idle_ms)} ms`);
+    parts.push(`GPU ${n.gpu_ms === null ? 'n/a' : `${f1(n.gpu_ms)} ms`}${n.pass_ms ? ` (targets ${f1(n.pass_ms[0])}, shadow ${f1(n.pass_ms[1])}, main ${f1(n.pass_ms[2])}, upscale ${f1(n.pass_ms[3])})` : ''}`);
+    parts.push(`${n.draws} draws, ${n.shadow_passes} shadow passes (${n.shadow_draws} draws), ${n.target_passes} render-target passes${n.skipped_frames ? `, ${n.skipped_frames} page frames dropped` : ''}`);
+  }
+  for (const p of pages) parts.push(`page: ${pagePart(p)}`);
+  if (ev.length) parts.push(`events: ${ev.join(' ; ').slice(0, 400)}`);
+  const ms = n ? Math.max(n.interval_ms, n.cpu_ms) : Math.max(...pages.map((p) => p.gap));
+  const at = n ? n.at_ms : pages[pages.length - 1].at;
+  const cause = n ? n.cause : 'page (JS / pacing)';
+  hitch.lines++;
+  hitch.recs.push({ at, ms, cause });
+  if (hitch.recs.length > 20000) hitch.recs.splice(0, 10000);
+  return `[hitch] ${clock(at)} frame ${f1(ms)} ms, ${cause}${n ? ` (seq ${n.seq})` : ''} | ${parts.join(' | ')}`;
+}
+function logDrain(last) {
+  if (!play) return;
+  const now = Date.now();
+  if (native && native.takeFrameLog) {
+    let lines = [];
+    try { lines = native.takeFrameLog(); } catch { /* */ }
+    for (const l of lines) {
+      let o = null;
+      try { o = JSON.parse(l); } catch { continue; }
+      if (o.note !== undefined) { fileLine(`[fastrender] ${o.note}`); continue; } // (the render thread printed it itself)
+      // the page's own record of that frame (and of the frames dropped for it)
+      const mine = hitch.page.filter((p) => p.seq <= o.seq);
+      hitch.page = hitch.page.filter((p) => p.seq > o.seq);
+      logLine(hitchLine(o, mine.slice(-3)));
+    }
+  }
+  // page frames no long native frame took: stock WebGL has only these; on fastrender a long JS frame the display
+  // did not show (a tick the render thread filled with the frame before)
+  const old = hitch.page.filter((p) => last || !fr || now - p.at > 2000);
+  hitch.page = hitch.page.filter((p) => !old.includes(p));
+  for (const p of old) if (!fr || p.js > hitchMs) logLine(hitchLine(null, [p]));
+}
+function logSummary() {
+  if (!play) return;
+  logDrain(true);
+  const secs = (Date.now() - hitch.started) / 1000;
+  const q = (a) => (a ? `p50 ${f1(a[0])}, p95 ${f1(a[1])}, p99 ${f1(a[2])}, max ${f1(a[3])} ms` : 'n/a');
+  let s = null;
+  try { s = native && native.frameSummary ? JSON.parse(native.frameSummary() || 'null') : null; } catch { s = null; }
+  logLine(`[summary] ${fr ? 'fastrender' : 'stock three WebGLRenderer'}, ${secs.toFixed(0)} s`);
+  if (s) {
+    logLine(`[summary] frames shown: ${s.frames}; frame interval ${q(s.interval_ms)}; render thread ${q(s.cpu_ms)}; GPU ${q(s.gpu_ms)}`);
+    logLine(`[summary] long frames (over ${s.over_ms} ms): ${s.long} of ${s.frames}${s.frames ? ` (${((100 * s.long) / s.frames).toFixed(2)} %)` : ''}`);
+    for (const c of s.causes) logLine(`[summary]   ${c.cause}: ${c.frames} frames, ${f1(c.ms)} ms in total, longest ${f1(c.max_ms)} ms`);
+  }
+  const p = hitch.pageStats;
+  if (p) logLine(`[summary] page: ${p.frames} game frames; JS per frame ${q(p.js)}; time between frames ${q(p.gap)}; ${p.long} over ${hitchMs} ms; ${p.progs} programs translated (${f1(p.progMs)} ms), ${p.canvas} canvas readbacks (${f1(p.canvasMB)} MB, ${f1(p.canvasMs)} ms), ${p.uploads} uploads (${f1(p.uploadMB)} MB)`);
+  if (hitch.fd !== null) {
+    logLine(`[summary] log: ${hitch.path}`);
+    try { fs.closeSync(hitch.fd); fs.copyFileSync(hitch.path, path.join(path.dirname(hitch.path), 'last.log')); } catch { /* */ }
+    hitch.fd = null;
+  }
+  results.stall_log = { path: hitch.path, hitch_lines: hitch.lines, native: s, page: p };
+}
+
 function finish(code, why) {
   if (finished) return;
   finished = true;
   if (why) { results.error = why; log('FATAL', why); }
   try { native && native.shutdown(); } catch (e) { log('shutdown error', e.message); }
+  // (after shutdown: the render thread's last lines, the compile summary among them, are in the log)
+  try { logSummary(); } catch (e) { log('stall log summary failed', e.message); }
   results.ok = code === 0;
   // playing writes nothing (the CI smoke, --play-seconds, does)
   if (!play || playSeconds) { try { fs.mkdirSync(outDir, { recursive: true }); fs.writeFileSync(path.join(outDir, `${tag}.json`), JSON.stringify(results, null, 2)); } catch (e) { log('cannot write json', e.message); } }
@@ -119,6 +245,9 @@ async function serve(req) {
     if (u.pathname === '/__fr/game.js') return send(fs.readFileSync(bundle), 'x.js');
     if (u.pathname === '/__fr/game.css') return send(fs.readFileSync(bundle.replace(/\.js$/, '.css')), 'x.css');
     if (u.pathname === '/__fr/fr.css') return send(fs.readFileSync(path.join(__dirname, 'fr.css')), 'x.css');
+    // the game's module workers (scripts/bundle-game.mjs): `new Worker(new URL('./x.ts', import.meta.url))`
+    if (workers === null) { try { workers = JSON.parse(fs.readFileSync(path.join(__dirname, 'dist', 'workers.json'), 'utf8')); } catch { workers = {}; } }
+    if (workers[u.pathname]) return send(fs.readFileSync(path.join(__dirname, 'dist', workers[u.pathname])), 'x.js');
     if (assets) {
       const f = path.join(assets, decodeURIComponent(u.pathname));
       if (f.startsWith(assets + path.sep) && fs.existsSync(f) && fs.statSync(f).isFile()) {
@@ -130,9 +259,12 @@ async function serve(req) {
     log('serve', u.pathname, e.message);
   }
   results.requests.missing++;
+  // a script the page will fail to load (Chromium: "Failed to load module script ... MIME type text/plain"): name it
+  if (/\.(m?js|ts)$/.test(u.pathname)) log(`missing script ${u.pathname} (a worker or a dynamic import the bundle does not have: scripts/bundle-game.mjs)`);
   return new Response('', { status: 404 });
 }
 
+let workers = null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const run = (cmd, args) => new Promise((res) => execFile(cmd, args, { timeout: 30000 }, (err, so, se) => res({ err, so, se })));
 
@@ -161,6 +293,10 @@ ipcMain.on('capture', async (e, msg) => {
 });
 ipcMain.on('done', (e, r) => { Object.assign(results, r); log('results', JSON.stringify({ cost: r.cost, draws: r.draws, images: r.images, unsupported: r.unsupported, programs: r.programs, xlat: r.xlat })); finish(0); });
 ipcMain.on('fatal', (e, msg) => finish(2, `page: ${msg}`));
+// play, the stall log: a long frame as the page saw it; its numbers so far (the page is gone at quit); a game event
+ipcMain.on('play-frame', (e, r) => { if (r && typeof r === 'object') { hitch.page.push(r); if (hitch.page.length > 2000) hitch.page.splice(0, 1000); } });
+ipcMain.on('play-stats', (e, r) => { hitch.pageStats = r; });
+ipcMain.on('play-event', (e, r) => { if (r && r.text) { fileLine(`[event] ${clock(r.at)} ${String(r.text).slice(0, 600)}`); hitch.events.push(r); if (hitch.events.length > 2000) hitch.events.splice(0, 1000); } });
 
 /**
  * --play-seconds N (CI smoke of play mode; needs no human): the world starts on the real clock, the drawable follows a
@@ -205,6 +341,22 @@ async function smoke() {
   check('W moves the player', moved > 0.2, `${moved.toFixed(2)} m`);
   await sleep(playSeconds * 1000);
   if (process.platform === 'darwin') { fs.mkdirSync(outDir, { recursive: true }); await run('screencapture', ['-x', path.join(outDir, `${tag}-screen.png`)]); }
+  // --doors N: in and out of the N nearest shops (the game's own enter() / goBack()), and what each leg cost
+  if (doors > 0) {
+    const legs = (results.doors = []);
+    for (let k = 0; k < doors * 2 && !finished; k++) {
+      const t0 = Date.now();
+      const r = await js(`window.__frPlay.door(${k >> 1}, ${k & 1})`);
+      await sleep(2500); // (the frames after the switch: programs first drawn, the kept light counts)
+      logDrain(false);
+      const t1 = Date.now();
+      const mine = hitch.recs.filter((h) => h.at >= t0 - 50 && h.at <= t1);
+      const worst = mine.reduce((a, h) => (h.ms > a.ms ? h : a), { ms: 0, cause: '-' });
+      const leg = { ...(r || {}), long_frames: mine.length, long_ms: +mine.reduce((a, h) => a + h.ms, 0).toFixed(0), longest_ms: +worst.ms.toFixed(0), longest_cause: worst.cause };
+      legs.push(leg);
+      log(`DOOR ${leg.leg || (r && r.error) || '?'}: ${leg.ms !== undefined ? `${(leg.ms / 1000).toFixed(2)} s until the game let go` : ''}, ${leg.long_frames} frames over ${hitchMs} ms (${leg.long_ms} ms in total), longest ${leg.longest_ms} ms: ${leg.longest_cause}; lights ${leg.lights_before || '?'} -> ${leg.lights_after || '?'}; ${leg.programs || 0} programs translated`);
+    }
+  }
   // full screen and back (the View menu's action)
   const f0 = await rep();
   win.setFullScreen(true);
@@ -246,7 +398,7 @@ app.whenReady().then(() => {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false, contextIsolation: isolated, sandbox: false, backgroundThrottling: false,
       webSecurity: true, webviewTag: false, spellcheck: false,
-      additionalArguments: [`--fr-shm=${shmName}`, `--fr-isolated=${isolated ? 1 : 0}`, `--fr-kind=${kind}`, `--fr-cost-frames=${costFrames}`, `--fr-shot=${encodeURIComponent(path.join(outDir, tag))}`, `--fr-params=${encodeURIComponent(JSON.stringify(params))}`, ...(play ? [`--fr-play=${encodeURIComponent(JSON.stringify(playCfg))}`] : [])],
+      additionalArguments: [`--fr-hitch-ms=${hitchMs}`, `--fr-shm=${shmName}`, `--fr-isolated=${isolated ? 1 : 0}`, `--fr-kind=${kind}`, `--fr-cost-frames=${costFrames}`, `--fr-shot=${encodeURIComponent(path.join(outDir, tag))}`, `--fr-params=${encodeURIComponent(JSON.stringify(params))}`, ...(play ? [`--fr-play=${encodeURIComponent(JSON.stringify(playCfg))}`] : [])],
     },
   });
   if (!play) win.setAlwaysOnTop(true, 'floating');
@@ -260,13 +412,19 @@ app.whenReady().then(() => {
     ]));
   }
   let logged = 0;
+  const cap = play ? 20000 : 600; // (a play session streams for a long time; the stall log does not come this way)
   win.webContents.on('console-message', (...a) => {
     const d = a[0] && a[0].message !== undefined ? a[0] : { message: a[2] };
-    if (logged++ < 600) console.log(`[page] ${String(d.message).slice(0, 600)}`);
+    if (logged++ < cap) console.log(`[page] ${String(d.message).slice(0, 600)}`);
   });
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('render-process-gone', (e, d) => finish(2, `renderer gone: ${d.reason}`));
+  if (play) {
+    logOpen();
+    setInterval(() => { try { logDrain(false); } catch (e) { log('stall log', e.message); } }, 250);
+    try { if (fr && native.frameLog) native.frameLog(hitchMs); } catch (e) { log('frameLog', e.message); }
+  }
   if (fr) {
     try {
       // 64 MB ring: frames travel through it in fastrender mode (a big frame of the real game is a few MB)
@@ -287,7 +445,12 @@ app.whenReady().then(() => {
   if (!play) setTimeout(() => finish(2, `timeout ${timeoutS} s`), timeoutS * 1000).unref();
   else {
     log(`play: ${fr ? `fastrender ${rendererJson}` : 'stock three WebGLRenderer'}, ${search || '(no URL parameters)'}; click the view to capture the mouse, Esc releases it, cmd-Q quits`);
+    log(`stall log: every frame over ${hitchMs} ms is a [hitch] line here and in ${hitch.path || '(no file)'}; the summary is printed at quit (cmd-Q or Ctrl-C)`);
     if (playSeconds) smoke();
   }
 });
 app.on('window-all-closed', () => (play && !playSeconds ? finish(0) : finish(finished ? 0 : 2, 'window closed')));
+// cmd-Q (app.quit) does not emit window-all-closed, and Chromium turns SIGINT / SIGTERM into a quit as well: every
+// way out of play mode goes through finish(), so the render thread is stopped and the stall log's summary written
+app.on('before-quit', (e) => { if (play && !finished) { e.preventDefault(); finish(playSeconds ? 2 : 0, playSeconds ? 'quit' : undefined); } });
+if (play) for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { log(sig); finish(playSeconds ? 2 : 0, playSeconds ? sig : undefined); });

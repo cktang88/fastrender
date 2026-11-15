@@ -320,6 +320,43 @@ pub fn stats() -> Result<Stats> {
     })
 }
 
+/// Main process, play mode (game/main.js): switch the render thread's stall log on. A frame is long when its
+/// interval, its render-thread time or its GPU time is over `over_ms`.
+#[napi]
+pub fn frame_log(over_ms: f64) {
+    #[cfg(target_os = "macos")]
+    {
+        *fr_render::FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner()) = Some(fastrender::hitch::FrameLog::new(over_ms));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = over_ms;
+}
+
+/// Main process: the stall log's lines since the last call. Each is a JSON object: a long frame's record
+/// (`fastrender::hitch::FrameRec::json`: seq, interval_ms, idle_ms, cpu_ms, waits, gpu_ms, cause...) or
+/// `{"note": "..."}` (a line of the render thread: the renderer, the compile summary at shutdown).
+#[napi]
+pub fn take_frame_log() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::mem::take(&mut *fr_render::LOG_LINES.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+/// Main process: every frame so far as JSON (`fastrender::hitch::FrameLog::summary_json`: frames, long frames,
+/// p50 / p95 / p99 / max of the frame interval, render-thread ms and GPU ms, long frames per cause); "" when off.
+#[napi]
+pub fn frame_summary() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        fr_render::FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map_or(String::new(), |l| l.summary_json())
+    }
+    #[cfg(not(target_os = "macos"))]
+    String::new()
+}
+
 /// Main process, at quit: stop the render thread and unlink the mailbox. Never hangs: the render
 /// thread is woken (semaphore + flags) and joined for at most 1.5 s, then detached.
 #[napi]
