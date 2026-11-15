@@ -2,6 +2,31 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: GPU cost of the real game: 27 dark lights in every lit fragment, 73 % of instanced triangles off screen. Not yet timed on an Air
+
+Details, tables and the Air command: docs/notes/gpu-cost.md.
+
+- **Air data** (`bench-results/`): the main pass is the whole frame (179.7 of 179.9 ms at 2940x1912; shadow 0.19).
+  Fits: ~30 ns per pixel of fragment work + ~20 ms that does not depend on the resolution.
+- **Census** (`js/gpu-census.js`, node run of the game, same view): three's light state held 2 directional + 17 point
+  + 10 spot lights; all 27 point / spot lights have intensity 0 (the game's `LIGHT_BUDGET` padding, there to keep
+  shader variants fixed) and one of them a cube shadow. three unrolls a full BRDF per light: 29 per lit fragment, 2
+  of them lit. 3.68 M of the frame's 5.07 M triangles are instanced; 27 % of those are inside the frustum.
+- **Shipped** (picture unchanged):
+  - `trimLights` (default on): dark point / spot lights leave the light state; counts step up at once (0 1 2 3 4 6
+    8 12 16...) and shrink after 120 frames. Lit programs: `main()` 209 -> 110 lines, 29 -> 2 BRDF evaluations, no
+    cube shadow lookup. `render()` JS in node 20.5 -> 13.3 ms. Price: a place that switches lights on compiles new
+    variants once (the game's padding avoided that).
+  - Instanced draws draw only the runs of instances in view (base instance, buffers untouched): 3.68 -> 1.23 M
+    instanced triangles in 791 runs (node estimate), frame 5.07 -> 2.62 M.
+  - Draws that can discard go after the other opaque draws, nearest first (89 of 1427 here).
+- **Diagnostics**: `scripts/gpu-ablate.sh` rows `alllights` (the frame before), `name@N` (FASTRENDER_V3_DEBUG: 512
+  discard order, 1024 no discard draws, 2048 instanced draws whole, 4 no instanced draws), `[census]` lines; the
+  bench prints draws per pass and instance runs; CI annotates an A/B of the same rows.
+- **Verified**: `js` tests (r187 + r170, new: trimLights), `cargo test` (new: instance runs, discard key), type-check
+  for `aarch64-apple-darwin`. **Not verified at the time of writing**: the macOS goldens and the CI A/B for these
+  commits (run queued behind macOS capacity), and every ms: no Air run yet.
+
 ## 2026-11-15: M-0, backend seam + graveyard; Metal 4 port paused (the real game is GPU-bound). CI goldens not yet seen
 
 Details: docs/notes/metal4-port.md.
