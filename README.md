@@ -1,6 +1,17 @@
 # fastrender
 
-A Mac-only Metal renderer, built as a **benchmark harness**: it tests the claims about what is
+**A pipeline that runs three.js games on a native Metal renderer, built for weak Apple GPUs (MacBook Air).**
+The game's JS and its real three.js scene graph stay as they are; only `WebGLRenderer` is swapped for
+`FastRenderer` (`js/fastrender-three.js`), which feeds the native renderer. See **[docs/PIPELINE.md](docs/PIPELINE.md)**
+for the stages and their status, [docs/PROTOCOL.md](docs/PROTOCOL.md) for the JS↔native protocol, and
+[docs/HOST.md](docs/HOST.md) for where the JS runs.
+
+```bash
+(cd js && npm ci) && node js/build.mjs js/examples/three-city.entry.mjs js/dist/three-city.js
+cargo run --release -- run --three js/dist/three-city.js      # a real three.js city, rendered natively
+```
+
+It is also a Metal renderer built as a **benchmark harness**: it tests the claims about what is
 fast on base Apple Silicon GPUs (MacBook Air M1–M5). Background is in [docs/RESEARCH.md](docs/RESEARCH.md);
 the estimates and the review that challenged them are in [docs/FPS_ESTIMATES.md](docs/FPS_ESTIMATES.md).
 
