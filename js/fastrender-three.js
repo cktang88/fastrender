@@ -22,6 +22,9 @@
 
 import { ThreePrograms, TEX, shadowDraw, writeShadows, writeShadowDraws, textureDim, uploadCompressedTexture } from './three-programs.js';
 import { Color } from 'three/src/math/Color.js';
+import { Frustum } from 'three/src/math/Frustum.js';
+import { Matrix4 } from 'three/src/math/Matrix4.js';
+import { Sphere } from 'three/src/math/Sphere.js';
 
 export const PROTOCOL = 2;
 const MAGIC = 0x46524d32; // 'FRM2'
@@ -50,7 +53,10 @@ function materialModel(m) {
 }
 
 export class FastRenderer {
-  /** @param {{host?: object, commandWords?: number, programs?: 'three', dfgLUT?: object}} opts */
+  /**
+   * @param {{host?: object, commandWords?: number, programs?: 'three', dfgLUT?: object, frustumCulling?: boolean,
+   *   compressedTextures?: string[] | false}} opts
+   */
   constructor(opts = {}) {
     this.host = opts.host || globalThis.__fr;
     if (!this.host || !this.host.upload) throw new Error('fastrender-three: no host (globalThis.__fr with upload/attach)');
@@ -69,7 +75,7 @@ export class FastRenderer {
     this.autoClear = true; this.sortObjects = true; this.localClippingEnabled = false; this.clippingPlanes = [];
     this.info = { render: { calls: 0, triangles: 0, frame: 0 }, memory: { geometries: 0, textures: 0 }, programs: [], unsupported: {} };
     this.capabilities = { isWebGL2: true, maxTextureSize: 16384, maxAnisotropy: 16, getMaxAnisotropy: () => 16 };
-    this.extensions = { get: () => null, has: () => false };
+    this.extensions = { get: () => null, has: () => false }; // (v3: compressed texture formats, set below)
     this._ids = new WeakMap();      // three object -> native id
     this._versions = new Map();     // native id -> uploaded version key
     this._nextId = 1;
@@ -85,6 +91,13 @@ export class FastRenderer {
     this._drawObjects = [];         // the object drawn by each DRAWS record this frame (debugging, tests)
     this._shadowRecs = [];          // v3: per DRAWS record, { shadowDepth, shadowDistance } (shadowDraw, writeShadowDraws)
     this._w = 0; this._tris = 0;
+    // v3: the camera frustum of the pass being written (three's own Frustum, as WebGLRenderer.projectObject uses it)
+    this._frustum = new Frustum(); this._projScreen = new Matrix4(); this._sphere = new Sphere(); this._nCulled = 0;
+    this._planes = new Float64Array(24); // the frustum's 6 planes (normal, constant) for _inView
+    // v3: three's frustum test in JS before any per-object work (_inView); false leaves all culling to the native side
+    this.frustumCulling = opts.frustumCulling !== false;
+    this._rawInstances = true;      // (false: v3 instance matrices as 3x4 rows, the wire format before raw 4x4; for A/B runs)
+    this.info.render.culled = 0;    // objects skipped this pass: outside the camera frustum and every shadow frustum
     this.info.uniformBlocks = { total: 0, changed: 0 };
     // protocol v3: three's own programs + uniform blocks
     this._tp = null;
@@ -95,6 +108,7 @@ export class FastRenderer {
         releaseInstance: (inst) => { if (this.host.release) this.host.release(KIND.MATERIAL, inst.id); },
       });
       this._textureId = (t) => this._texture(t);
+      this.extensions = compressedTextureExtensions(opts.compressedTextures ?? (this.host.params && this.host.params.compressedTextures));
     }
     this._initTargets();
     // the host's output size (native owns resolution): what getSize / getDrawingBufferSize report until setSize
@@ -375,10 +389,20 @@ export class FastRenderer {
     const ic = mesh.instanceColor || null, cv = ic ? ic.version : -1;
     if (rec.mv !== mesh.instanceMatrix.version || rec.c !== ic || rec.cv !== cv || rec.count !== mesh.count) {
       rec.mv = mesh.instanceMatrix.version; rec.c = ic; rec.cv = cv; rec.count = mesh.count;
-      const n = mesh.count, src = mesh.instanceMatrix.array, rows = new Float32Array(n * 12);
-      for (let i = 0; i < n; i++) to3x4(src, i * 16, rows, i * 12);
-      const colors = mesh.instanceColor ? new Float32Array(mesh.instanceColor.array.buffer, mesh.instanceColor.array.byteOffset, n * 3) : null;
-      this.host.upload(KIND.INSTANCES, id, { count: n }, rows, colors);
+      const n = mesh.count, im = mesh.instanceMatrix, src = im.array;
+      const colors = ic ? new Float32Array(ic.array.buffer, ic.array.byteOffset, n * 3) : null;
+      if (this._tp && this._rawInstances && src instanceof Float32Array && !im.isInterleavedBufferAttribute && src.length >= n * 16) {
+        // v3: three's own array as it is (column-major 4x4 per instance, what three's `instanceMatrix` attribute
+        // reads): no copy and no conversion here, none natively (the host copies the bytes during the call)
+        const meta = rec.meta || (rec.meta = { count: 0, mat4: true });
+        meta.count = n;
+        this.host.upload(KIND.INSTANCES, id, meta, src.length === n * 16 ? src : src.subarray(0, n * 16), colors);
+      } else {
+        const rows = new Float32Array(n * 12);
+        if (src instanceof Float32Array && !im.isInterleavedBufferAttribute) for (let i = 0; i < n; i++) to3x4(src, i * 16, rows, i * 12);
+        else { const m = dense(im, 16); for (let i = 0; i < n; i++) to3x4(m, i * 16, rows, i * 12); }
+        this.host.upload(KIND.INSTANCES, id, { count: n }, rows, colors);
+      }
     }
     return id;
   }
@@ -643,6 +667,11 @@ export class FastRenderer {
       this._nUsed = 0;
     }
     this._scene = scene; this._camera = camera;
+    if (tp) {
+      this._frustum.setFromProjectionMatrix(this._projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      setPlanes(this._planes, this._frustum);
+    }
+    this._nCulled = 0;
     // draws, written straight into the command buffer (the count is patched in after the walk). The ops are
     // order-independent; DRAWS comes before the ops that depend on what the draws used (MATERIAL_UNIFORMS).
     u[w++] = OP.DRAWS; this._drawsAt = w; w += 2;
@@ -694,6 +723,7 @@ export class FastRenderer {
     if (tp) w = writeShadowDraws(this, w, this._shadowRecs); // after DRAWS' count is known (three-programs.js, shadow section)
     if (tp) this._commit(w, true);
     else { u[0] = MAGIC; u[1] = w; }
+    this.info.render.culled = this._nCulled;
     this.info.render.calls = nDraws; this.info.render.triangles = this._tris | 0; this.info.render.frame++;
     if (tp) { this.info.uniformBlocks.total = tp.stats.blocks; this.info.uniformBlocks.changed = tp.stats.changed; }
     if (this.host.present) this.host.present(w);
@@ -747,6 +777,8 @@ export class FastRenderer {
     // BatchedMesh: three draws it with multi-draw (gl_DrawID -> batchingIdTexture -> batchingTexture matrices). v3
     // draws each visible instance as its own draw of its geometry range with the plain (non-batching) program;
     // per-instance batch colours are not applied (counted). v2: skipped, counted.
+    // v3: three's frustum test, where WebGLRenderer.projectObject does it: before any geometry / material / hook work
+    if (this._tp && this.frustumCulling && o.frustumCulled !== false && !this._inView(o, g)) { this._nCulled++; return; }
     if (o.isBatchedMesh) { if (this._tp) this._batched(o); else this._unsupported('BatchedMesh'); return; }
     if (o.isSkinnedMesh && !this._tp) this._unsupported('SkinnedMesh (drawn in bind pose)');
     if (!this._tp && g.morphAttributes && hasKeys(g.morphAttributes)) this._unsupported('morph targets');
@@ -769,6 +801,46 @@ export class FastRenderer {
     }
     // WebGLRenderer passes a null group for a single-material object
     this._draw(o, g, mat, null, geometry, inst, g.drawRange.start, Math.min(g.drawRange.count, indexCount), indexCount);
+  }
+
+  /**
+   * Whether a frustum-culled object must be sent (v3). In the camera frustum: WebGLRenderer.projectObject's test
+   * (Frustum.intersectsObject / intersectsSprite: the object's own boundingSphere when it has one (InstancedMesh,
+   * SkinnedMesh, BatchedMesh), else its geometry's, in world space). Outside it, a shadow caster is still sent when
+   * it reaches a shadow map that is rendered this frame (WebGLShadowMap.renderObject tests the same sphere against
+   * the light's shadow frustum); the native side culls per pass as before, so the main pass does not draw it.
+   */
+  _inView(o, g) {
+    if (o.isSprite) return this._frustum.intersectsSprite(o); // (sprites cast no shadows)
+    let bs = o.boundingSphere;
+    if (bs === undefined) { bs = g.boundingSphere; if (bs === null) { g.computeBoundingSphere(); bs = g.boundingSphere; } }
+    else if (bs === null) { o.computeBoundingSphere(); bs = o.boundingSphere; }
+    // Sphere.applyMatrix4 and Frustum.intersectsSphere written out (the same arithmetic in the same order, so the same
+    // answer as three's; test/three-programs.test.mjs holds them together): no calls, no temporaries per plane
+    const e = o.matrixWorld.elements, c = bs.center, x = c.x, y = c.y, z = c.z;
+    const w = 1 / (e[3] * x + e[7] * y + e[11] * z + e[15]);
+    const cx = (e[0] * x + e[4] * y + e[8] * z + e[12]) * w, cy = (e[1] * x + e[5] * y + e[9] * z + e[13]) * w, cz = (e[2] * x + e[6] * y + e[10] * z + e[14]) * w;
+    const r = bs.radius * Math.sqrt(Math.max(e[0] * e[0] + e[1] * e[1] + e[2] * e[2], e[4] * e[4] + e[5] * e[5] + e[6] * e[6], e[8] * e[8] + e[9] * e[9] + e[10] * e[10]));
+    const p = this._planes, nr = -r;
+    let inside = true;
+    for (let i = 0; i < 24; i += 4) if (p[i] * cx + p[i + 1] * cy + p[i + 2] * cz + p[i + 3] < nr) { inside = false; break; }
+    if (inside) return true;
+    const sm = this.shadowMap;
+    if (!sm.enabled) return false;
+    const shadows = this._tp.shadows;
+    if (shadows.length === 0 || !(o.castShadow || (o.receiveShadow && sm.type === 3 /* VSM draws receivers too */))) return false;
+    const s = this._sphere;
+    s.center.set(cx, cy, cz); s.radius = r;
+    for (let i = 0; i < shadows.length; i++) {
+      const l = shadows[i], sh = l.shadow;
+      if (sh._frKeep === true) continue; // the native side keeps this map as it is: no caster is drawn into it
+      if (l.isPointLight) {
+        // a cube map: everything within the shadow camera's range of the light
+        const le = l.matrixWorld.elements, dx = cx - le[12], dy = cy - le[13], dz = cz - le[14], d = sh.camera.far + r;
+        if (dx * dx + dy * dy + dz * dz <= d * d) return true;
+      } else if (sh.getFrustum().intersectsSphere(s)) return true;
+    }
+    return false;
   }
 
   /**
@@ -808,8 +880,9 @@ export class FastRenderer {
       words: u.slice(start, end), start, w: end, drawsAt: this._drawsAt, tris: this._tris, nDraws: this._nDraws, nUsed: this._nUsed,
       scene: this._scene, camera: this._camera, passNested: this._passNested, aborted: this._aborted, inHook: this._inHook, depth: this._renderDepth,
       meshes: this._meshes, lights: this._lights, lightsCopy: this._lightsCopy, used: this._used, drawObjects: this._drawObjects, shadowRecs: this._shadowRecs,
-      tp: this._tp.saveFrame(),
+      tp: this._tp.saveFrame(), frustum: this._frustum, planes: this._planes, nCulled: this._nCulled,
     };
+    this._frustum = new Frustum(); this._planes = new Float64Array(24); // (the hook's render has its own camera)
     this._meshes = []; this._lights = []; this._lightsCopy = []; this._used = []; this._drawObjects = []; this._shadowRecs = [];
     // the hook's render is a top-level render of its own; its passes start where this pass began
     this._renderDepth = 0; this._inHook = 0; this._aborted = false;
@@ -830,6 +903,7 @@ export class FastRenderer {
     this._frameNo++;
     for (let i = 0; i < this._nUsed; i++) this._used[i].frame = this._frameNo;
     this._tp.restoreFrame(s.tp);
+    this._frustum = s.frustum; this._planes = s.planes; this._nCulled = s.nCulled;
     this._hookSusp = null;
   }
 
@@ -968,6 +1042,29 @@ function targetNeedsMipmaps(rt) {
     if (t.generateMipmaps && isMipmapFilter(t.minFilter) && t.mipmapsAutoUpdate !== false) return true;
   }
   return false;
+}
+
+/**
+ * renderer.extensions for v3: the compressed texture formats the native upload takes as they are (uploadCompressedTexture),
+ * under the WebGL extension names loaders ask for (KTX2Loader.detectSupport, DDSLoader users), so KTX2 / Basis
+ * textures are transcoded to a GPU block format (4-8x less memory and sampling bandwidth than RGBA8) instead of to
+ * RGBA. `families`: which to advertise, from 'astc', 'etc2' (ETC1, ETC2, EAC) and 'bc' (S3TC, RGTC, BPTC); default all
+ * three (every Apple Silicon Mac GPU has them); a host on another GPU passes its own list as params.compressedTextures
+ * ([] or false: none). PVRTC is not advertised.
+ */
+export function compressedTextureExtensions(families) {
+  const on = families === undefined || families === null || families === true ? ['astc', 'etc2', 'bc'] : families || [];
+  const ext = new Map();
+  if (on.includes('astc')) ext.set('WEBGL_compressed_texture_astc', { getSupportedProfiles: () => ['ldr'] });
+  if (on.includes('etc2')) { ext.set('WEBGL_compressed_texture_etc', {}); ext.set('WEBGL_compressed_texture_etc1', {}); } // (ETC1 decodes as ETC2 RGB)
+  if (on.includes('bc')) for (const n of ['WEBGL_compressed_texture_s3tc', 'WEBGL_compressed_texture_s3tc_srgb', 'EXT_texture_compression_rgtc', 'EXT_texture_compression_bptc']) ext.set(n, {});
+  return { get: (name) => ext.get(name) || null, has: (name) => ext.has(name) };
+}
+
+/** a Frustum's planes as 6 x (normal x, y, z, constant) */
+function setPlanes(out, frustum) {
+  const planes = frustum.planes;
+  for (let i = 0; i < 6; i++) { const pl = planes[i], n = pl.normal; out[i * 4] = n.x; out[i * 4 + 1] = n.y; out[i * 4 + 2] = n.z; out[i * 4 + 3] = pl.constant; }
 }
 
 /** column-major 4x4 (three.js) -> 3 rows of 4 into dst */

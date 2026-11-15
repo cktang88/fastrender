@@ -38,6 +38,82 @@ A steady frame builds no bind list (asserted by the benchmark; the macOS bench p
 macOS CI, before (run 43717991507, paravirtual GPU): real game after streaming, no validation: prepare 0.652 ms,
 encode 2.010 ms at 1506 draws; three-city golden run (API validation on): prepare 0.160 ms, encode 0.153 ms at 288
 draws. After: see the entry's update below once the run is in.
+## 2026-11-15: WP7 (JS): frustum test before per-object work, raw instance matrices, compressed formats advertised; where `updateMatrixWorld` goes
+
+Perf audit WP7 (docs/research/perf-audit-2026-11.md J2-J4, U1, U10), minus the JavaScriptCore JIT question. All
+numbers V8 (node 22) on the shared x86 container, which was busy with other builds all day: the same binary measured
+12.0 ms and 20.4 ms of `render()` an hour apart. So every comparison below is interleaved (base / new alternating, or
+switched every 10 frames inside one run: `world-objects.node.mjs --ab <property>`), and only the ratios mean anything.
+
+**1. Frustum test in JS before any per-object work** (`FastRenderer._inView`, v3). three's own test
+(`Frustum.intersectsObject` / `intersectsSprite`, written out with the same arithmetic; the test holds 8000 probes per
+three version to three's answer), where `WebGLRenderer.projectObject` does it: before hooks, geometry / instance
+checks, the material instance and the draw record. A shadow caster outside the view is still sent when its sphere
+reaches a shadow map rendered this frame (directional / spot: the light's shadow frustum; point: its range; VSM:
+receivers too; maps kept by SHADOW_KEEP need none), and the native side culls per pass as before.
+
+| real game (r187, spawn view, after streaming) | before | after |
+|---|---:|---:|
+| draws sent per frame | 2,837 | 1,470 (809 of 2,364 visible objects not sent) |
+| material instances per frame | 335 | 283 |
+| geometry uploads per frame | 4 | 3 |
+| `render()` median, 6 interleaved runs of 300 frames (median of the 6) | 20.9 ms | 18.6 ms (-11 %) |
+| `render()` p95, same runs | 31.5 ms | 27.8 ms (-12 %) |
+| the quietest pair of the day | 12.00 (p95 18.8) | 12.03 (p95 13.6) |
+| `--ab frustumCulling`, 800 frames, quiet: off / on | 18.09 (p95 29.8) | 17.66 (p95 26.2): -2.4 % |
+| `--ab frustumCulling`, 600 frames, busy: off / on | 22.07 (p95 32.0) | 20.42 (p95 30.1): -7.5 % |
+
+So in V8 it is worth 0.4-1.6 ms of this frame (2-8 %), less than the audit's estimate (1.5-2.5 ms at ~3 us per draw):
+the earlier per-frame work had already brought a draw down to ~1 us, and the test itself costs a fraction of a microsecond per object. What
+it removes for certain is native input: half the draws and 15 % of the uniform blocks never reach the ring. On
+`three-programs.bench.mjs` (5000 meshes, the camera at the corner of the grid, so ~75 % are outside the view), v3,
+new vs base in one process:
+
+| materials | mode | V8 base -> new (ms/frame) | JavaScriptCore (bun) base -> new |
+|---:|---|---|---|
+| 20 | static / camera / lights | 2.27 -> 1.73 / 1.99 -> 1.44 / 2.19 -> 1.64 | 1.01 -> 0.86 / 0.98 -> 0.85 / 0.95 -> 0.80 |
+| 200 | static / camera / lights | 3.01 -> 1.95 / 2.60 -> 1.61 / 3.25 -> 2.10 | |
+| 1000 | static / camera / lights | 6.30 -> 2.06 / 6.49 -> 2.18 / 7.32 -> 2.55 | 1.89 -> 1.00 / 2.65 -> 1.34 / 2.70 -> 1.20 |
+
+(blocks in use: 1000 -> 224-297; allocation per frame unchanged, 2-7 KB, none per draw).
+
+**2. `scene.updateMatrixWorld()`: measured, documented, not replaced.** It is the largest item of `render()` (4.2-4.6
+of ~12 ms; `--matrix-stats`, 240 frames): of 25,424 objects 22,875 (90 %) never change their world matrix (22,787 of
+them have `matrixAutoUpdate = true`), 2,230 change every frame, 319 sometimes; 2,481 matrices change per frame.
+In one run: 5.49 ms as it is; 2.04 ms with `matrixAutoUpdate = false` on the static objects (three's own switch);
+**0.65 ms** when three does not walk the 730 subtrees (22,862 objects) in which nothing moves. That is the input for the
+GPU step: 10 % of the matrices change per frame, and the 90 % cost 4.8 of 5.5 ms of JS to rediscover as unchanged.
+- Tried and not shipped: our own walk that compares position / quaternion / scale with what it last composed
+  (`js/test/transforms.bench.mjs` "cached walk"; exact, including re-parenting, via a per-object record with parent id
+  and world versions). 4.49 -> 3.64 ms with nothing moving, but no measurable change in the real frame (`--ab`: 19.36
+  vs 19.00 ms), and on the synthetic 25k scene 2.48 -> 2.00 (V8), 2.51 -> 1.99 (JSC) where three's switch gives 2.09 /
+  2.05. Reading ten numbers per object to learn that it did not move costs about what composing it costs (V8 boxes
+  every non-integer field), and the walk itself is bound by memory. three's vectors have no change notification, so
+  JS cannot know without the read.
+- Our own per-object work for unchanged transforms: the 12-float world matrix in the DRAWS record is cheaper to write
+  than to compare, so nothing is skipped there.
+- For games: docs/notes/three-programs.md "Static transforms" (`matrixAutoUpdate = false` after `updateMatrix()`, a
+  no-op `updateMatrixWorld` on baked static blocks as the game already does for frozen people,
+  `Object3D.DEFAULT_MATRIX_AUTO_UPDATE`). Applied to this game's static blocks that is -3.9 to -4.8 ms of JS per frame.
+
+**3. Instance matrices raw** (docs/PROTOCOL.md "INSTANCES (kind 4) in v3"). v3 sends three's `instanceMatrix.array`
+as it is (`{ count, mat4: true }`): no `Float32Array(n * 12)` per upload, no 4x4 -> 3x4 in JS, no 3x4 -> 4x4 natively,
+one MTLBuffer per upload instead of two (`src/mac_upload.rs`). The real game re-uploads 52 instance buffers per frame
+(0.28 MB as rows, 0.30 MB raw): `--ab _rawInstances` 20.79 -> 20.61 ms (-1 %, inside the noise; the JS half was ~0.1
+ms); the native half (52 fewer buffer creations and conversions per frame) needs the macOS bench. Dirty ranges
+(`updateRanges`) are not sent: writing into a buffer a frame in flight reads needs the per-slot arena of WP6.
+
+**4. Compressed texture formats advertised** (PC4's JS half): `renderer.extensions` has / get answer for ASTC (ldr),
+ETC1 / ETC2 / EAC and S3TC / RGTC / BPTC in v3, so `KTX2Loader.detectSupport(renderer)` keeps Basis / KTX2 textures in a
+block format; the native upload existed. `host.params.compressedTextures` (or the constructor option) narrows the
+families for a GPU without them (the paravirtual CI GPU reports no Apple GPU family 7-9 and may lack ASTC / ETC2; the
+native upload then rejects the texture), so a host that can run there
+should pass what its device supports. The real game calls `detectSupport` but ships no KTX2 (0 of 1,991 GLBs use
+`KHR_texture_basisu`), so nothing changes for it.
+
+`npm test`: the two new sections (10: frustum test and shadow casters; 11: instances, extensions) pass on r187 and
+r170 with the rest. New tools: `world-objects.node.mjs --profile` (V8 sampling profiler aggregated in process),
+`--matrix-stats`, `--ab`, CPU-time columns; `js/test/transforms.bench.mjs`.
 
 ## 2026-11-15: Electron host runs the real renderer: three-city 0.97, 3d-world-objects 2.96, JS 14-25 ms/frame (JSC 64-74)
 

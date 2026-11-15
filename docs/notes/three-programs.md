@@ -115,13 +115,73 @@ How the per-frame path works now:
   values is in `WebGLUniforms`. Games set `material.color` / `opacity` / `uniforms.x.value` without `needsUpdate`, so
   skipping it on `material.version` would drop those edits. `refreshFogUniforms` (whose inputs are only the scene fog
   and the output colour space) is skipped while those are unchanged, except for ShaderMaterials.
-- **Scene walk:** WebGLRenderer's `projectObject` + `WebGLRenderLists` add frustum culling and sorting, which the native
-  side does; `WebGLObjects.update` updates GL buffers. Reusing them would add work, so the walk stays ours (same
-  traversal order and visibility/layers rules).
+- **Scene walk:** ours (same traversal order and visibility/layers rules as `projectObject`), with three's frustum
+  test before any per-object work since WP7 (Nov 2026): `_inView` is `Frustum.intersectsObject` written out (same
+  arithmetic, checked against three's on 8000 probes per three version), so an object outside the view costs one sphere
+  test instead of hooks, geometry / instance checks, the material instance and a draw record. Shadow casters outside
+  the view are still sent when they reach a shadow map rendered this frame (docs/PROTOCOL.md "Per frame"). Sorting
+  stays native; `WebGLObjects.update` (GL buffers) has no counterpart.
 
 Where the 1000-material v3 frame goes (V8): three's `refreshMaterialUniforms` ≈ 1.1 µs per material, the per-draw
 program/instance lookup (object signature, as `setProgram` checks every draw) ≈ 0.05–0.2 µs per draw, compare-pack
 ≈ 0.5 µs per block. Blocks are 300–800 bytes (Standard with one shadowed light: 416 B).
+
+## Static transforms: what `scene.updateMatrixWorld()` costs and what a game can do (WP7, Nov 2026)
+
+`render()` starts with three's `scene.updateMatrixWorld()`, as WebGLRenderer does. For every object with
+`matrixAutoUpdate` (the default) it composes `matrix` from position / quaternion / scale and multiplies `matrixWorld`,
+every frame, moved or not. In the real game (25,424 objects) that is the largest single item of `render()`: 4.2-4.6 ms
+of ~12 ms in V8 (`js/test/world-objects.node.mjs --matrix-stats`, 240 frames at the spawn view):
+
+| | objects |
+|---|---:|
+| in the scene graph | 25,424 |
+| matrixWorld never changed | 22,875 (90 %); 22,787 of them have `matrixAutoUpdate = true` |
+| changed every frame | 2,230 |
+| changed on some frames | 319 |
+| matrices that change per frame (mean) | 2,481 |
+| meshes: static / moving | 13,033 / 1,972 |
+
+| `scene.updateMatrixWorld()` (V8, best of 5 x 10 calls, one run) | ms | |
+|---|---:|---|
+| as the game runs it | 5.49 | (4.2-4.6 on a quiet machine) |
+| `matrixAutoUpdate = false` on the 22,787 static objects | 2.04 | -63 % |
+| the walk skipped for the 730 subtrees in which nothing moves (22,862 objects) | 0.65 | -88 % |
+
+So about 60 % of the walk is composing and multiplying matrices that do not change, most of the rest is visiting 25k
+objects (pointer chasing: the cost is memory, not arithmetic), and what the 2,500 objects that do move need is 0.65 ms. What a game does about it, with three's own API
+(works under WebGLRenderer too):
+
+```js
+// an object that will not move: compose once, then tell three to leave it alone
+obj.updateMatrix();
+obj.matrixAutoUpdate = false;            // three no longer composes it; its world matrix is only re-multiplied
+                                         // when an ancestor moves
+// if it does move later: change position / quaternion / scale, then
+obj.updateMatrix();                      // (sets matrixWorldNeedsUpdate; or set matrixAutoUpdate = true while it animates)
+
+// a whole block that will not move (a building with 300 parts): bake it and take it out of the walk
+block.updateMatrixWorld(true);
+block.traverse((o) => { o.matrixAutoUpdate = false; });
+block.updateMatrixWorld = () => {};      // three does not descend into it (the game already does this for frozen
+                                         // people); only for blocks whose ancestors do not move either
+// to move it again: delete block.updateMatrixWorld; then block.updateMatrixWorld(true)
+```
+
+(`Object3D.DEFAULT_MATRIX_AUTO_UPDATE = false` before the level is built flips the default for everything created
+after it; `scene.matrixWorldAutoUpdate = false` makes the renderer skip the walk altogether, the game then calls
+`updateMatrixWorld()` on what it moved.) Fewer objects helps the same way: InstancedMesh / BatchedMesh / merged
+geometry for static props are one object each.
+
+**What the renderer cannot do for the game** (measured, not shipped): a walk of our own that remembers each object's
+position / quaternion / scale and skips compose + multiply when they are unchanged (`js/test/transforms.bench.mjs`
+"cached walk") is exact under a small contract, but finding out that an object did not move means reading ten numbers
+per object, which costs about what composing it costs: 4.5 -> 3.6 ms with nothing moving, no measurable change in the
+real frame (2,481 movers per frame pay the compare on top), -11 % in JavaScriptCore on the synthetic scene. three's
+vectors have no change notification, so "did it move" cannot be answered without the read. The per-draw world matrix
+(12 floats into the DRAWS record) is likewise cheaper to write than to compare. The real fix is the game-side switch
+above, or the planned GPU step: the numbers above are its input (2,481 changed matrices per frame out of 25,424; the
+other 90 % can live in a persistent GPU buffer and be re-sent only on change).
 
 ## Per-frame shared block (buffer(3))
 

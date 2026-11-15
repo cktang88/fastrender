@@ -361,7 +361,20 @@ impl ThreeScene {
 
     fn upload_instances(&mut self, dev: &Device, id: u32, meta: &str, a: &[Option<Array>]) -> Result<(), String> {
         let m: InstancesMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
-        let rows = f32s(a.first().unwrap_or(&None)).ok_or("no instance rows")?;
+        let data = f32s(a.first().unwrap_or(&None)).ok_or("no instance matrices")?;
+        let colors = f32s(a.get(1).unwrap_or(&None)).map(|v| buffer_with(dev, v));
+        if m.mat4 {
+            // v3: three's `instanceMatrix.array` as it is (column-major 4x4 per instance), which is the layout the
+            // translated programs read: one buffer, no conversion. Only v3 pipelines draw these (`rows` is the v2
+            // layout; a v3 renderer never binds it, so it shares the buffer).
+            if data.len() < m.count * 16 {
+                return Err("short instance matrices".into());
+            }
+            let cols = if m.count == 0 { buffer_with(dev, &[0.0f32; 16]) } else { buffer_with(dev, &data[..m.count * 16]) };
+            self.insts.insert(id, Inst { rows: cols.clone(), cols, colors });
+            return Ok(());
+        }
+        let rows = data;
         if rows.len() < m.count * 12 {
             return Err("short instance rows".into());
         }
@@ -374,7 +387,7 @@ impl ThreeScene {
         if cols.is_empty() {
             cols.extend_from_slice(&[0.0; 16]);
         }
-        self.insts.insert(id, Inst { rows: buffer_with(dev, &rows[..m.count * 12]), cols: buffer_with(dev, &cols), colors: f32s(a.get(1).unwrap_or(&None)).map(|v| buffer_with(dev, v)) });
+        self.insts.insert(id, Inst { rows: buffer_with(dev, &rows[..m.count * 12]), cols: buffer_with(dev, &cols), colors });
         Ok(())
     }
 

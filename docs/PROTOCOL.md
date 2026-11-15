@@ -12,7 +12,7 @@ A real three.js scene graph is walked by `FastRenderer` (a drop-in `WebGLRendere
 | 1 GEOMETRY | `{vertices, indexed, colorSize, sphere:[x,y,z,r]}` | position f32×3, normal f32×3, uv f32×2 or null, color f32×3/4 or null, index u16/u32 or null |
 | 2 TEXTURE | `{width, height, srgb, repeat, offset, wrap, flipY, mipmaps}` | RGBA8 pixels |
 | 3 MATERIAL | `{model: 1 basic, 2 lambert, 3 standard, 4 phong; color, opacity, roughness, metalness, emissive, map, normalMap, roughnessMap, emissiveMap, alphaTest, flags}` | none |
-| 4 INSTANCES | `{count}` | 3×4 rows f32×12 per instance, colours f32×3 or null |
+| 4 INSTANCES | `{count}` (v3: `{count, mat4: true}`) | 3×4 rows f32×12 per instance (v3: 4×4 column-major f32×16 per instance, see "INSTANCES (kind 4) in v3"), colours f32×3 or null |
 
 Materials are deduplicated by content. Texture ids inside a material refer to uploaded textures.
 
@@ -113,6 +113,26 @@ meta gains `format`, `type` (three constants) and `depth`; the data is the raw b
 bone/morph textures, Uint16 half floats, ...), and `flipRows: true` when `texture.flipY` (WebGL flips rows at upload;
 three's shaders sample the texture as stored). Native formats: RGBA/RG/Red × UnsignedByte/HalfFloat/Float; 2D only.
 
+Compressed textures: meta `{ compressed: true, levels, format }` with three's format constant, one array per mip level,
+blocks unchanged (ASTC, ETC1/ETC2/EAC, S3TC/RGTC/BPTC). `renderer.extensions` advertises them under the WebGL names
+loaders ask for (`WEBGL_compressed_texture_astc` with the `ldr` profile, `WEBGL_compressed_texture_etc`, `_etc1`,
+`_s3tc`, `EXT_texture_compression_rgtc`, `_bptc`), so `KTX2Loader.detectSupport(renderer)` transcodes Basis / KTX2
+to a block format instead of RGBA8. A host whose GPU lacks a family passes the list it has as
+`host.params.compressedTextures` (from `'astc'`, `'etc2'`, `'bc'`; `[]` for none; default all three, which every Apple
+Silicon Mac has); `new FastRenderer({ compressedTextures })` overrides it. The native upload rejects (and logs) a format
+the device cannot sample.
+
+### INSTANCES (kind 4) in v3
+
+meta is `{ count, mat4: true }` and the first array is three's own `instanceMatrix.array` (its first `count`
+matrices): column-major 4×4, 16 floats per instance, which is exactly what three's `instanceMatrix` attribute (a
+`mat4`, 4 float4 columns) reads. JS sends the array as it is (no copy, no 4×4 → 3×4 conversion; the host copies the
+bytes during the call) and the native side creates one buffer from it (`src/mac_upload.rs` `upload_instances`; before,
+JS converted to 3×4 rows and the native side converted back and created two buffers). Without `mat4` the array is 3×4
+rows (v2). A re-upload still replaces the whole buffer (`instanceMatrix.version` changed); partial updates
+(`instanceMatrix.updateRanges`) are not on the wire: writing a range into a buffer that a frame in flight still reads
+needs the per-frame-slot instance arena planned for the upload channel (docs/research/perf-audit-2026-11.md U1).
+
 ### GEOMETRY (kind 1) additions
 
 meta gains `attributes: [{ name, itemSize }]`: every attribute besides position/normal/uv/color (uv1.., tangent,
@@ -121,6 +141,16 @@ by NAME to the location the program reflected; an attribute the program reads bu
 (0,0,0,1) (an identity matrix for `instanceMatrix`). `instanceMatrix` / `instanceColor` come from INSTANCES.
 
 ### Per frame
+
+Which objects are sent: the visible ones (three's `visible` / `layers` rules) that pass three's frustum test, done in
+JS before any per-object work (`FastRenderer._inView`: `Frustum.intersectsObject` / `intersectsSprite` as
+`WebGLRenderer.projectObject` runs them; `frustumCulled = false` objects always pass; `onBeforeRender` runs only for
+what is sent, as in three). An object outside the camera frustum is still sent when it casts shadows (with VSM: or
+receives them) and its sphere reaches the frustum of a shadow map that is rendered this frame (a point light: its
+range), as `WebGLShadowMap.renderObject` tests it; maps kept by `SHADOW_KEEP` need no casters. The native side culls
+per pass as before (main pass and each shadow map), so such a caster costs no main-pass draw. `renderer.info.render
+.culled` counts the objects not sent; `new FastRenderer({ frustumCulling: false })` (or `renderer.frustumCulling =
+false`) sends every visible object and leaves all culling to the native side.
 
 | op | payload |
 |---|---|

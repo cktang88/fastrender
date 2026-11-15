@@ -750,6 +750,10 @@ pub fn blend_of(m: &ProgramMaterialMeta) -> Option<[u32; 6]> {
 #[derive(Deserialize, Debug, Clone)]
 pub struct InstancesMeta {
     pub count: usize,
+    /// v3: the matrices are three's `instanceMatrix.array` as it is (column-major 4x4, 16 floats per instance);
+    /// otherwise 3x4 rows (12 floats per instance, the v2 layout)
+    #[serde(default)]
+    pub mat4: bool,
 }
 
 /// RENDER_TARGET (kind 5) meta: a three render target; its textures keep their own texture ids, so a material
@@ -1021,6 +1025,9 @@ mod tests {
         assert_eq!(blend_of(&opaque), None);
         let add = ProgramMaterialMeta { blending: 2, premultiplied_alpha: true, ..m.clone() };
         assert_eq!(blend_of(&add), Some([201, 201, 201, 201, 100, 100]));
+        let i: InstancesMeta = serde_json::from_str(r#"{"count":3,"mat4":true}"#).unwrap();
+        assert_eq!((i.count, i.mat4), (3, true));
+        assert!(!serde_json::from_str::<InstancesMeta>(r#"{"count":3}"#).unwrap().mat4);
         let g: GeometryMeta = serde_json::from_str(r#"{"vertices":3,"indexed":false,"sphere":[0,0,0,1],"attributes":[{"name":"skinIndex","itemSize":4},{"name":"aSize","itemSize":2,"perInstance":true}]}"#).unwrap();
         assert_eq!((g.attributes[0].name.as_str(), g.attributes[0].item_size, g.attributes[0].per_instance), ("skinIndex", 4, false));
         assert_eq!((g.attributes[1].name.as_str(), g.attributes[1].item_size, g.attributes[1].per_instance), ("aSize", 2, true));

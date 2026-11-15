@@ -547,3 +547,152 @@ function decode(buf) {
   assert.deepEqual(Object.keys(r.info.unsupported), [], 'nothing counted');
   console.log(`[three r${REV}] BatchedMesh: three's batching program (colours), one draw per multi-draw entry, one uniform block`);
 }
+
+// ------------------------------------------------------------------ 10. frustum test before any per-object work; shadow casters outside the view
+{
+  const h = makeHost();
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20 });
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(50, 1.6, 0.1, 100); cam.position.set(0, 2, 10); cam.lookAt(0, 0, 0);
+  const mat = new THREE.MeshStandardMaterial();
+  const box = () => new THREE.Mesh(new THREE.BoxGeometry(), mat);
+  const hooks = [];
+  const named = (o, name, x, y, z) => { o.name = name; o.position.set(x, y, z); o.onBeforeRender = () => hooks.push(name); scene.add(o); return o; };
+  const front = named(box(), 'front', 0, 0, 0);
+  const behind = named(box(), 'behind', 0, 0, 40);
+  const pinned = named(box(), 'pinned', 0, 0, 41); pinned.frustumCulled = false;
+  const sprite = named(new THREE.Sprite(new THREE.SpriteMaterial()), 'sprite', 0, 0, 42);
+  // an InstancedMesh is tested with its own bounding sphere (over its instances), as in three
+  const im = named(new THREE.InstancedMesh(new THREE.BoxGeometry(), mat, 2), 'instanced', 0, 0, 43);
+  im.setMatrixAt(0, new THREE.Matrix4()); im.setMatrixAt(1, new THREE.Matrix4().makeTranslation(0, 0, -43));
+  r.render(scene, cam);
+  const drawn = () => r._drawObjects.map((o) => o.name).sort();
+  assert.deepEqual(drawn(), ['front', 'instanced', 'pinned'], 'outside the camera frustum: not sent (frustumCulled = false and the instanced mesh reaching into view are)');
+  assert.deepEqual([...hooks].sort(), ['front', 'instanced', 'pinned'], 'onBeforeRender only for what is drawn, as in WebGLRenderer');
+  assert.equal(r.info.render.culled, 2, 'info.render.culled');
+  assert.equal(h.uploads.filter((x) => x.kind === KIND.GEOMETRY).length, 3, 'no geometry upload for a culled mesh');
+  cam.position.set(0, 2, 60); cam.updateMatrixWorld();
+  r.render(scene, cam);
+  assert.deepEqual(drawn(), ['behind', 'front', 'instanced', 'pinned', 'sprite'], 'in view after the camera moved');
+
+  // the JS test is three's own: the same answer as Frustum.intersectsObject for any matrix and camera
+  {
+    const frustum = new THREE.Frustum(), probe = box();
+    let seed = 7, culled = 0;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1;
+    for (const c of [cam, new THREE.OrthographicCamera(-8, 8, 5, -5, 0.1, 60)]) {
+      c.position.set(3, 4, 30); c.lookAt(1, 0, 0); c.updateMatrixWorld();
+      r.render(new THREE.Scene(), c); // (the pass's frustum)
+      frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(c.projectionMatrix, c.matrixWorldInverse));
+      for (let i = 0; i < 4000; i++) {
+        probe.position.set(rnd() * 40, rnd() * 25, rnd() * 60); probe.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3); probe.scale.set(0.2 + Math.abs(rnd()) * 6, 0.2 + Math.abs(rnd()) * 6, 0.2 + Math.abs(rnd()) * 6);
+        probe.updateMatrixWorld();
+        const ours = r._inView(probe, probe.geometry), theirs = frustum.intersectsObject(probe);
+        assert.equal(ours, theirs, `frustum test differs from three's (object ${i})`);
+        if (!ours) culled++;
+      }
+    }
+    assert.ok(culled > 1000 && culled < 7000, `the probes straddle the frustum (${culled} of 8000 outside)`);
+  }
+
+  // shadows: a caster outside the camera frustum still reaches a shadow map that is rendered this frame
+  cam.position.set(0, 2, 10); cam.lookAt(0, 0, 0); cam.updateMatrixWorld();
+  r.shadowMap.enabled = true;
+  const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(0, 20, 30); sun.target.position.set(0, 0, 30); sun.castShadow = true;
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -6; sun.shadow.camera.right = sun.shadow.camera.top = 6; sun.shadow.camera.updateProjectionMatrix();
+  scene.add(sun, sun.target);
+  const caster = named(box(), 'caster', 0, 0, 30); caster.castShadow = true;             // behind the camera, under the light
+  const farCaster = named(box(), 'farCaster', 60, 0, 30); farCaster.castShadow = true;    // behind the camera, outside the light's frustum
+  const receiver = named(box(), 'receiver', 1, 0, 30); receiver.receiveShadow = true;     // behind the camera, casts nothing
+  r.render(scene, cam);
+  assert.deepEqual(drawn(), ['caster', 'front', 'instanced', 'pinned'], 'a caster in a shadow frustum is sent; one outside every frustum and a non-caster are not');
+  {
+    const u = new Uint32Array(r.cmd);
+    let w = 2, flags = null;
+    while (w < u[1]) { if (u[w] === OP.DRAWS) flags = r._drawObjects.map((o, i) => [o.name, u[w + 3 + i * 20 + 2]]); w += 2 + u[w + 1]; }
+    assert.equal(Object.fromEntries(flags).caster & 1, 1, 'sent with the cast-shadow flag (the native side culls it from the main pass)');
+  }
+  // VSM draws receivers into the map too
+  r.shadowMap.type = THREE.VSMShadowMap;
+  r.render(scene, cam);
+  assert.ok(drawn().includes('receiver') && !drawn().includes('farCaster'), 'VSM: a receiver in the shadow frustum is sent');
+  r.shadowMap.type = THREE.PCFShadowMap;
+  // a map three would not re-render (shadow.autoUpdate = false) needs no casters
+  r.render(scene, cam);
+  sun.shadow.autoUpdate = false;
+  r.render(scene, cam);
+  assert.ok(!drawn().includes('caster'), 'kept shadow map: its casters outside the view are not sent');
+  sun.shadow.needsUpdate = true;
+  r.render(scene, cam);
+  assert.ok(drawn().includes('caster'), 'shadow.needsUpdate: sent for that frame');
+  sun.castShadow = false;
+  // a point light's cube map: everything within its range
+  const lamp = new THREE.PointLight(0xffffff, 5, 12); lamp.position.set(60, 3, 30); lamp.castShadow = true; scene.add(lamp);
+  r.render(scene, cam);
+  assert.ok(drawn().includes('farCaster') && !drawn().includes('caster'), 'point light: casters within the light\'s range');
+  // shadows off: nothing outside the view is sent
+  r.shadowMap.enabled = false;
+  r.render(scene, cam);
+  assert.deepEqual(drawn(), ['front', 'instanced', 'pinned']);
+  // frustumCulling: false leaves all culling to the native side
+  r.frustumCulling = false;
+  r.render(scene, cam);
+  assert.equal(r._drawObjects.length, 8, 'frustumCulling = false: every visible object is sent');
+  assert.equal(r.info.render.culled, 0);
+  console.log(`[three r${REV}] frustum test before per-object work = three's Frustum.intersectsObject (8000 probes); shadow casters outside the view still sent (directional, VSM receivers, point range, kept maps)`);
+}
+
+// ------------------------------------------------------------------ 11. instance matrices as three stores them; compressed texture formats advertised
+{
+  const h = makeHost();
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20 });
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(50, 1.6, 0.1, 100); cam.position.z = 10;
+  const im = new THREE.InstancedMesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial(), 4);
+  for (let i = 0; i < 4; i++) im.setMatrixAt(i, new THREE.Matrix4().makeTranslation(i - 1.5, 0, 0));
+  im.setColorAt(0, new THREE.Color(1, 0, 0));
+  scene.add(im);
+  r.render(scene, cam);
+  const ups = () => h.uploads.filter((x) => x.kind === KIND.INSTANCES);
+  assert.equal(ups().length, 1);
+  assert.deepEqual(ups()[0].meta, { count: 4, mat4: true }, 'meta says raw 4x4');
+  assert.equal(ups()[0].data[0], im.instanceMatrix.array, "three's own array, not a copy");
+  assert.equal(ups()[0].data[1].length, 12, 'colours: 3 floats per instance');
+  r.render(scene, cam);
+  assert.equal(ups().length, 1, 'unchanged: no re-upload');
+  // fewer instances drawn than allocated: a view of the first `count` matrices (no copy)
+  im.count = 2; im.setMatrixAt(1, new THREE.Matrix4().makeTranslation(0, 1, 0)); im.instanceMatrix.needsUpdate = true;
+  r.render(scene, cam);
+  const last = ups().at(-1);
+  assert.equal(ups().length, 2);
+  assert.deepEqual(last.meta, { count: 2, mat4: true });
+  assert.equal(last.data[0].length, 32);
+  assert.equal(last.data[0].buffer, im.instanceMatrix.array.buffer, 'a view, not a copy');
+  assert.equal(last.data[0][16 + 13], 1, 'column-major: translation y of instance 1 at element 13');
+  // v2 keeps 3x4 rows
+  const h2 = makeHost();
+  const r2 = new FastRenderer({ host: h2 });
+  r2.render(scene, cam);
+  const v2 = h2.uploads.find((x) => x.kind === KIND.INSTANCES);
+  assert.deepEqual(v2.meta, { count: 2 });
+  assert.equal(v2.data[0].length, 24, 'v2: 12 floats per instance');
+  assert.equal(v2.data[0][12 + 7], 1, 'row-major 3x4: translation y of instance 1 at row 1, column 3');
+
+  // compressed textures: the WebGL extension names KTX2Loader.detectSupport asks for
+  const has = (x, n) => x.extensions.has(n);
+  for (const n of ['WEBGL_compressed_texture_astc', 'WEBGL_compressed_texture_etc', 'WEBGL_compressed_texture_etc1', 'WEBGL_compressed_texture_s3tc', 'EXT_texture_compression_bptc', 'EXT_texture_compression_rgtc']) assert.ok(has(r, n), n);
+  assert.deepEqual(r.extensions.get('WEBGL_compressed_texture_astc').getSupportedProfiles(), ['ldr']);
+  assert.ok(!has(r, 'WEBGL_compressed_texture_pvrtc') && r.extensions.get('WEBGL_compressed_texture_pvrtc') === null && !has(r, 'EXT_color_buffer_float'), 'nothing else is claimed');
+  assert.ok(!has(r2, 'WEBGL_compressed_texture_astc'), 'v2 has no compressed upload');
+  const bcOnly = new FastRenderer({ host: makeHost(), programs: 'three', compressedTextures: ['bc'] });
+  assert.ok(has(bcOnly, 'WEBGL_compressed_texture_s3tc') && !has(bcOnly, 'WEBGL_compressed_texture_astc'), 'opts.compressedTextures narrows it');
+  const hp = makeHost(); hp.params = { compressedTextures: [] };
+  assert.ok(!has(new FastRenderer({ host: hp, programs: 'three' }), 'WEBGL_compressed_texture_astc'), 'host.params.compressedTextures: [] -> none');
+  // what KTX2Loader would then hand over: an ASTC CompressedTexture goes up as it is
+  const astc = new THREE.CompressedTexture([{ data: new Uint8Array(16), width: 4, height: 4 }], 4, 4, THREE.RGBA_ASTC_4x4_Format);
+  astc.needsUpdate = true;
+  const id = r._texture(astc);
+  const up = h.uploads.find((x) => x.kind === KIND.TEXTURE && x.id === id);
+  assert.ok(id > 0 && up && up.meta.compressed === true && up.meta.format === THREE.RGBA_ASTC_4x4_Format && up.data[0].length === 16, 'ASTC blocks uploaded unchanged');
+  console.log(`[three r${REV}] instance matrices: three's own 4x4 array (no copy); compressed texture formats advertised (ASTC, ETC2, BC)`);
+}
