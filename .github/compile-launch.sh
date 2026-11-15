@@ -22,6 +22,7 @@ run() {  # <label> <env assignments...>
   env FASTRENDER_PIPELINE_CACHE="$pc" FASTRENDER_SHADER_CACHE="$sc" "$@" "$bin" bench "${ARGS[@]}" > "$log" 2>&1 || rc=$?
   node .github/compile-launch.mjs "$label" "$log" $(( $(now) - t0 )) "$rc" | tee -a "$out"
 }
+echo "os metal caches: $(find "$(getconf DARWIN_USER_CACHE_DIR)" -type d -name 'com.apple.metal*' 2>/dev/null | sed "s|$(getconf DARWIN_USER_CACHE_DIR)||" | tr '\n' ' ' | cut -c1-250)" | tee -a "$out"
 rm -rf "$pc" "$sc"; clear_os_cache
 run "1 before: blocking 1 worker, cold" FASTRENDER_COMPILE=blocking FASTRENDER_COMPILE_THREADS=1 FASTRENDER_PIPELINE_CACHE=off
 rm -rf "$pc" "$sc"; clear_os_cache

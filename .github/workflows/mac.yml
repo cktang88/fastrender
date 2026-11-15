@@ -339,7 +339,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         run: |
-          bash .github/compile-launch.sh city --three js/dist/three-city.js --scale 1 --upscale bilinear --size 1280x800 --frames 120 --warmup 0
+          bash .github/compile-launch.sh city --three js/dist/three-city.js --scale 1 --upscale bilinear --size 1280x800 --frames 120 --warmup 0 --seconds 6
           bash .github/annotate.sh notice "compile launch: three-city (ms since renderer init)" compile-launch-city.txt 30
           if [ -f wo-skipped ] || [ ! -f js/dist/world-objects.js ]; then echo "game not fetched: skipped"; exit 0; fi
           export FASTRENDER_ASSETS="$PWD/../3d-world-objects/public"
