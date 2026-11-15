@@ -234,6 +234,8 @@ jobs:
             bash .github/annotate.sh notice "world-objects without assets (exit $rc2)" wo-noassets.txt 25
             rc3=0; FASTRENDER_V3_MAX_DRAWS=1 FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 > wo-maxdraws.txt 2>&1 || rc3=$?
             bash .github/annotate.sh notice "world-objects 1 draw (exit $rc3)" wo-maxdraws.txt 25
+            FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" lldb --batch -o run -k "thread backtrace 25" -k quit -- ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 > wo-lldb.txt 2>&1 || true
+            grep -A40 "stop reason\|frame #0" wo-lldb.txt | head -60 > wo-bt.txt; bash .github/annotate.sh notice "world-objects crash backtrace" wo-bt.txt 60
           fi
           node js/golden/diff.mjs js/golden/world-objects-ref.png golden-native-world-objects.png golden-diff-world-objects.png | tee world-objects-golden.json
           echo "::notice title=world-objects golden (MAE vs browser r170)::$(cat world-objects-golden.json)"

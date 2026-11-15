@@ -186,7 +186,9 @@ export class FastRenderer {
       for (const name in a) {
         if (name === 'position' || name === 'normal' || name === 'uv' || name === 'color') continue;
         const at = a[name];
-        if (!at || !at.count || at.itemSize > 4) { this._unsupported(`attribute ${name}`); continue; }
+        // per-instance attributes (InstancedBufferAttribute, e.g. a game's per-window size) need a per-instance vertex
+        // step natively: skipped (counted) so the geometry upload doesn't fail on its length
+        if (!at || !at.count || at.itemSize > 4 || at.isInstancedBufferAttribute) { this._unsupported(at && at.isInstancedBufferAttribute ? `instanced attribute ${name}` : `attribute ${name}`); continue; }
         (extra || (extra = [])).push(name);
       }
     }
@@ -534,7 +536,7 @@ function geometryCurrent(rec, g, v3, store = false) {
     for (const name in a) {
       if (name === 'position' || name === 'normal' || name === 'uv' || name === 'color') continue;
       const at = a[name];
-      if (!at || !at.count || at.itemSize > 4) continue;
+      if (!at || !at.count || at.itemSize > 4 || at.isInstancedBufferAttribute) continue;
       if (store) { x[k] = name; x[k + 1] = at; x[k + 2] = at.version; x[k + 3] = at.itemSize; }
       else if (x[k] !== name || x[k + 1] !== at || x[k + 2] !== at.version || x[k + 3] !== at.itemSize) return false;
       k += 4;
