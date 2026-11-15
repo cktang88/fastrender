@@ -212,6 +212,7 @@ function decode(buf) {
   let fr = decode(h.cmd);
   const mats = h.uploads.filter((x) => x.kind === KIND.MATERIAL);
   assert.equal(mats.length, 3, 'one material, three blocks: receiveShadow on/off and the instanced program');
+  assert.ok(mats.every((m) => m.meta.vertexCustom === false), "a built-in material: three's own vertex stage (the native side may cull its instances one by one)");
   assert.ok(mats.every((m) => typeof m.meta.program === 'number' && h.programs.has(h.programIds.get(m.meta.program))), 'material uploads carry the id of a program the host compiled');
   assert.equal(h.programs.size, 2, 'two programs: plain and instanced');
   assert.equal(fr.blocks.size, 3, 'a block per material instance in use');
@@ -818,5 +819,22 @@ else {
   r.render(scene, camera);
   const metas = h.uploads.filter((x) => x.kind === KIND.INSTANCES).map((x) => x.meta.cull);
   assert.deepEqual(metas, [undefined, 0, 2.5, undefined], 'true -> 0 (the geometry sphere), a number -> that radius, otherwise absent');
-  console.log(`[three r${REV}] userData.frInstanceCull: sent with the instance upload (true -> 0, radius -> radius)`);
+  // ...and the material says whether its vertex stage is three's own: only then does the native side cull the
+  // instances of a mesh without the hint one by one (a stage that displaces is three's whole-mesh test's business)
+  const h2 = makeHost();
+  const r2 = new FastRenderer({ host: h2, programs: 'three', commandWords: 1 << 20 });
+  r2.setSize(SIZE.width, SIZE.height);
+  const scene2 = new THREE.Scene();
+  const sway = new THREE.MeshLambertMaterial({ name: 'sway' });
+  sway.onBeforeCompile = (sh) => { sh.vertexShader = sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.x += sin(position.y);'); };
+  class Wobble extends THREE.MeshBasicMaterial { onBeforeCompile(sh) { sh.vertexShader = sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y *= 1.5;'); } }
+  const disp = new THREE.MeshStandardMaterial({ name: 'disp', displacementMap: new THREE.DataTexture(new Uint8Array(4).fill(128), 1, 1) });
+  disp.displacementMap.needsUpdate = true;
+  const own = new THREE.ShaderMaterial({ name: 'own', vertexShader: 'void main() { gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position * 2.0, 1.0); }', fragmentShader: 'void main() { gl_FragColor = vec4(1.0); }' });
+  const mats2 = [new THREE.MeshStandardMaterial({ name: 'plain' }), sway, Object.assign(new Wobble(), { name: 'wobble' }), disp, own];
+  for (const m of mats2) scene2.add(new THREE.InstancedMesh(new THREE.BoxGeometry(), m, 4));
+  r2.render(scene2, camera);
+  const custom = Object.fromEntries(h2.uploads.filter((x) => x.kind === KIND.MATERIAL).map((x) => [x.meta.name, x.meta.vertexCustom]));
+  assert.deepEqual(custom, { plain: false, sway: true, wobble: true, disp: true, own: true }, 'vertexCustom: onBeforeCompile (own or in the class), displacementMap, ShaderMaterial');
+  console.log(`[three r${REV}] userData.frInstanceCull: sent with the instance upload (true -> 0, radius -> radius); MATERIAL meta vertexCustom for onBeforeCompile / displacementMap / ShaderMaterial`);
 }

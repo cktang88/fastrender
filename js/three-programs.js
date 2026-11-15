@@ -1396,6 +1396,24 @@ export function writeShadowDraws(fr, w, draws) {
   return w;
 }
 
+/**
+ * MATERIAL meta `vertexCustom`: the vertex stage may put vertices somewhere else than three's built-in transform
+ * of the geometry does: a ShaderMaterial / RawShaderMaterial, a material with its own onBeforeCompile (on the object
+ * or in its class), a displacement map. The native side splits an InstancedMesh into the instances in view by itself
+ * only when this is false (instanceMatrix x the geometry's bounds are then where every instance is); three's own
+ * whole-mesh frustum test is all such a material gets, unless the game vouches for the bounds
+ * (`mesh.userData.frInstanceCull`).
+ */
+export function vertexCustom(m) {
+  if (m.isShaderMaterial === true || (m.displacementMap !== undefined && m.displacementMap !== null)) return true;
+  // three's no-op onBeforeCompile lives on Material.prototype (the one that also has setValues); anything nearer is
+  // the game's. By shape, not by identity: the game's three may be another copy of the module than ours
+  for (let p = m; p !== null && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
+    if (Object.prototype.hasOwnProperty.call(p, 'onBeforeCompile')) return !Object.prototype.hasOwnProperty.call(p, 'setValues');
+  }
+  return false;
+}
+
 // ================================================================== texture kinds FastRenderer uploads for three's programs
 /** TEXTURE meta `dim`: 0 2D, 2 2D array (DataArrayTexture: morph targets in r187, CompressedArrayTexture), 3 3D */
 export function textureDim(t) {

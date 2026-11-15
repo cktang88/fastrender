@@ -810,15 +810,19 @@ impl ThreeScene {
             // An InstancedMesh whose instances are known to stay inside instanceMatrix x the geometry's bounds: only
             // the instances that can be on screen are drawn, as runs of consecutive instances (base instance + count;
             // the buffers stay as they are). Off-screen instances cost vertex shading and tiling of every triangle
-            // otherwise. Known = three would frustum-cull the mesh as a whole on those bounds (frustumCulled) and the
-            // geometry has no per-instance attribute a vertex stage could place the instance with; or the game says
-            // so (`userData.frInstanceCull`, `Inst::hint`), optionally with its own radius.
+            // otherwise. Known = three would frustum-cull the mesh as a whole on those bounds (frustumCulled), the
+            // geometry has no per-instance attribute a vertex stage could place the instance with and the vertex stage
+            // is three's own (no ShaderMaterial / onBeforeCompile / displacement map: `vertex_custom`); or the game
+            // says so (`userData.frInstanceCull`, `Inst::hint`), optionally with its own radius
+            // (`bindlist::instance_split_allowed`).
             runs.clear();
             let mut split = false;
-            let reads_instance_id = self.mats3.get(&d.material).and_then(|m| self.progs.progs.get(&m.meta.program)).is_some_and(|p| p.instance_id);
-            if d.flags & (flag::INSTANCED | flag::BATCH) == flag::INSTANCED && d.instance_count >= INSTANCE_CULL_MIN && !reads_instance_id && self.dbg & 2048 == 0 {
-                let (plain, hints) = (d.flags & flag::NO_CULL == 0 && g.inst_cap.is_none(), self.dbg & 4096 == 0);
-                if let Some(inst) = self.insts.get_mut(&d.instances).filter(|inst| plain || (hints && inst.hint.is_some())) {
+            if d.flags & (flag::INSTANCED | flag::BATCH) == flag::INSTANCED && d.instance_count >= INSTANCE_CULL_MIN && self.dbg & 2048 == 0 {
+                let mat = self.mats3.get(&d.material);
+                let reads_instance_id = mat.and_then(|m| self.progs.progs.get(&m.meta.program)).is_some_and(|p| p.instance_id);
+                let vertex_custom = mat.is_some_and(|m| m.meta.vertex_custom);
+                let (frustum_culled, inst_attrs, hints) = (d.flags & flag::NO_CULL == 0, g.inst_cap.is_some(), self.dbg & 4096 == 0);
+                if let Some(inst) = self.insts.get_mut(&d.instances).filter(|inst| bindlist::instance_split_allowed(reads_instance_id, hints && inst.hint.is_some(), frustum_culled, inst_attrs, vertex_custom)) {
                     // the game's radius replaces the geometry's
                     let s = match inst.hint {
                         Some(radius) if radius > 0.0 => [s[0], s[1], s[2], radius],

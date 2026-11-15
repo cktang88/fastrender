@@ -349,8 +349,10 @@ if (mstat) {
 }
 // --mesh-census: who the screen pass's triangles belong to. One more frame with FastRenderer._draw recorded; per
 // (material name, mesh / ancestor name): draws, instances, triangles sent, triangles of the instances in view (the
-// native side draws only those where it may: frustumCulled without per-instance attributes, or userData.frInstanceCull;
+// native side draws only those where it may: frustumCulled without per-instance attributes and with three's own vertex
+// stage (no ShaderMaterial, onBeforeCompile, displacement map), or userData.frInstanceCull;
 // src/bindlist.rs), by distance from the camera (m). A node estimate: no GPU, no native culling runs here.
+const vertexCustom = (m) => m.isShaderMaterial === true || !!m.displacementMap || Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile'); // (three-programs.js vertexCustom)
 async function meshCensus(top) {
   const BANDS = [12, 40, 100, 200, Infinity];
   const rows = new Map();
@@ -381,7 +383,7 @@ async function meshCensus(top) {
     r.draws++; r.trisPer.add(Math.round(tris)); r.items.push([o, g, m, tris]);
     if (o.isInstancedMesh) {
       const hint = o.userData.frInstanceCull;
-      const cullable = hint !== undefined || (o.frustumCulled !== false && !Object.values(g.attributes).some((a) => a.isInstancedBufferAttribute));
+      const cullable = hint !== undefined || (o.frustumCulled !== false && !vertexCustom(m) && !Object.values(g.attributes).some((a) => a.isInstancedBufferAttribute));
       const a = o.instanceMatrix.array, n = o.count;
       r.instances += n; r.sent += tris * n; if (cullable) r.cullable += tris * n;
       for (let i = 0, k = 0; i < n; i++, k += 16) {

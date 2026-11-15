@@ -815,6 +815,20 @@ impl PassCounts {
     }
 }
 
+/// May an InstancedMesh draw be split into the runs of instances in view (`instance_runs`)? Only where the bounds of
+/// an instance are known to be instanceMatrix x the geometry's sphere (or the game's radius):
+/// - never when the vertex stage reads the instance index (`reads_instance_id`: it may place the instance with what
+///   it looks up);
+/// - `hint`: the game says so (`userData.frInstanceCull`);
+/// - otherwise by ourselves only when three would frustum-cull the mesh as a whole on those bounds
+///   (`frustum_culled`), the geometry has no per-instance attribute a vertex stage could place the instance with
+///   (`instance_attributes`), and the vertex stage is three's own (`vertex_custom` false: no ShaderMaterial, no
+///   onBeforeCompile, no displacement map). three's whole-mesh test tolerates a stage that moves vertices a little
+///   (wind sway inside the mesh's bounds); a per-instance test with the instance's own sphere does not.
+pub fn instance_split_allowed(reads_instance_id: bool, hint: bool, frustum_culled: bool, instance_attributes: bool, vertex_custom: bool) -> bool {
+    !reads_instance_id && (hint || (frustum_culled && !instance_attributes && !vertex_custom))
+}
+
 /// Does a main-pass draw whose pipeline is still compiling wait for it (true) or is it skipped this frame (false)?
 /// Skipping is right for what appears for the first time (a level streaming in: it shows up a few frames late, no
 /// frame is held). It is wrong when the screen had the draw and would lose it, or would show nothing at all:
@@ -843,6 +857,18 @@ pub fn carried_pipes<K: Copy + PartialEq>(ready: impl Iterator<Item = K>, before
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instances_are_culled_one_by_one_only_where_their_bounds_are_known() {
+        // (reads gl_InstanceID, the game's hint, frustumCulled, per-instance attributes, custom vertex stage)
+        assert!(instance_split_allowed(false, false, true, false, false), "a built-in material on a frustum-culled mesh");
+        assert!(!instance_split_allowed(false, false, true, false, true), "onBeforeCompile / ShaderMaterial / displacementMap: the stage may displace");
+        assert!(instance_split_allowed(false, true, true, false, true), "... unless the game vouches for the bounds");
+        assert!(!instance_split_allowed(false, false, false, false, false), "frustumCulled = false");
+        assert!(instance_split_allowed(false, true, false, true, false), "the hint also covers per-instance attributes and frustumCulled = false");
+        assert!(!instance_split_allowed(false, false, true, true, false), "a per-instance attribute may place the instance");
+        assert!(!instance_split_allowed(true, true, true, false, false), "a stage that reads the instance index: never");
+    }
 
     #[test]
     fn a_replaced_pipeline_is_waited_for_a_new_one_is_not() {

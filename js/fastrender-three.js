@@ -20,7 +20,7 @@
 // per frame, the uniform values three's own code computes, packed per material instance
 // (js/three-programs.js, docs/PROTOCOL.md).
 
-import { ThreePrograms, TEX, shadowDraw, writeShadows, writeShadowDraws, textureDim, uploadCompressedTexture } from './three-programs.js';
+import { ThreePrograms, TEX, shadowDraw, writeShadows, writeShadowDraws, textureDim, uploadCompressedTexture, vertexCustom } from './three-programs.js';
 import { Color } from 'three/src/math/Color.js';
 import { Frustum } from 'three/src/math/Frustum.js';
 import { Matrix4 } from 'three/src/math/Matrix4.js';
@@ -386,6 +386,9 @@ export class FastRenderer {
           blendSrcAlpha: m.blendSrcAlpha ?? null, blendDstAlpha: m.blendDstAlpha ?? null, blendEquationAlpha: m.blendEquationAlpha ?? null,
           premultipliedAlpha: m.premultipliedAlpha, depthTest: m.depthTest, depthWrite: m.depthWrite, depthFunc: m.depthFunc, colorWrite: m.colorWrite,
           alphaToCoverage: m.alphaToCoverage, polygonOffset: m.polygonOffset ? [m.polygonOffsetFactor, m.polygonOffsetUnits] : null, wireframe: m.wireframe,
+          // the vertex stage may displace (its own shader, onBeforeCompile, a displacement map): no automatic
+          // per-instance culling on the native side
+          vertexCustom: vertexCustom(m),
         });
       }
     }

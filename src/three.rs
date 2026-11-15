@@ -707,6 +707,11 @@ pub struct ProgramMaterialMeta {
     pub polygon_offset: Option<[f32; 2]>,
     #[serde(default)]
     pub wireframe: bool,
+    /// the vertex stage may place vertices elsewhere than three's built-in transform of the geometry does (a
+    /// ShaderMaterial, a material's own onBeforeCompile, a displacement map): an InstancedMesh drawn with it is not
+    /// split into the instances in view unless the game vouches for the bounds (`InstancesMeta::cull`)
+    #[serde(default)]
+    pub vertex_custom: bool,
 }
 
 fn src_alpha() -> u32 { 204 }

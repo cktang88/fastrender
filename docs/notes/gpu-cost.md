@@ -111,8 +111,11 @@ Items 1-3 keep the picture; item 4 moves far geometry by about a pixel or less (
    instances apart merge; at most 64 runs per draw). The game lays instances out block by block, so few runs cover
    them.
    The renderer does this by itself only where it can know the bounds: the mesh is `frustumCulled` (three's own
-   whole-mesh test already relies on instanceMatrix x the geometry's bounds) and the geometry has no per-instance
-   attribute a vertex stage could place the instance with. In this game that is 0.29 M triangles (-> 0.12 M): its
+   whole-mesh test already relies on instanceMatrix x the geometry's bounds), the geometry has no per-instance
+   attribute a vertex stage could place the instance with, and the vertex stage is three's own (MATERIAL meta
+   `vertexCustom` false: no ShaderMaterial, no `onBeforeCompile`, no displacement map; three's whole-mesh test
+   tolerates a stage that sways vertices inside the mesh's bounds, a test per instance does not; added after review,
+   `bindlist::instance_split_allowed`). In this game that is 0.29 M triangles (-> 0.12 M): its
    two big groups hide their bounds. The fleet is `frustumCulled = false` (1.5 M triangles), and the window parts
    are placed by the vertex stage at `aAnchor * aSize + position` (1.6 M). So there is a hint the game gives:
    `mesh.userData.frInstanceCull = true` (instances stay inside instanceMatrix x the geometry's sphere) or
@@ -121,8 +124,9 @@ Items 1-3 keep the picture; item 4 moves far geometry by about a pixel or less (
    sets it for the fleet (`true`) and the window parts (geometry radius + the largest opening's diagonal, at most
    4.5 m). With the patch: 3.54 M instanced triangles are tested, 1.14 M drawn in 833 runs (+575 draws), frame
    5.07 -> 2.66 M triangles (node estimate). Without the patch: 5.07 -> 4.90 M.
-   Always drawn whole: BatchedMesh entries, programs that read `gl_InstanceID` (SPIRV-Cross counts it from the
-   draw's first instance), shadow passes, the far crowd (`frustumCulled = false`, no hint: its vertex stage animates
+   Always drawn whole: BatchedMesh entries, programs that read `gl_InstanceID` (the index itself would
+   survive a base instance: Metal's `[[instance_id]]` counts from it and SPIRV-Cross does not subtract it; but a stage
+   that looks things up per instance may place the instance with them), shadow passes, the far crowd (`frustumCulled = false`, no hint: its vertex stage animates
    from a texture). `FASTRENDER_V3_DEBUG=2048` turns all of it off, `4096` only the hinted part.
 3. **Discarding draws last, nearest first** (`bindlist::discard_key`, `Prog::discard`). Apple's hidden-surface
    removal shades one fragment per pixel for plain opaque geometry in any order, but has to shade what is under a
