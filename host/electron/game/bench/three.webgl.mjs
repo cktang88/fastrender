@@ -2,11 +2,13 @@
 // benchmark's knobs, applied in the constructor so an unchanged game gets them too:
 //   - antialias: cfg.aa (the game asks for MSAA 4x; fastrender has no MSAA, so the like-for-like runs turn it off)
 //   - pixel ratio: cfg.dpr, so the drawing buffer is exactly the benchmark's pixel size on any display
-//   - cfg.hideDark (variant `webgl-trim`): dark point / spot lights are out of the frame for each render() call
-//     (bench/dark-lights.mjs). Off for the stock variant: the same bundle, the hook not installed.
+//   - cfg.opt (variants `webgl-trim`, `webgl-opt`, `webgl-opt-inst`): the generic, exact frame-time methods a stock
+//     three renderer can use (js/stock-three-opt.js: dark lights out of each render(), discarding draws last, only
+//     the instances in view). Not set for the stock variant: the same bundle, no hook installed.
 export * from 'three/src/Three.js';
 import { WebGLRenderer as Base } from 'three/src/Three.js';
-import { hideDarkLights } from './dark-lights.mjs';
+import { installStockOpt } from '../../../../js/stock-three-opt.js';
+import { realNow } from './host.mjs';
 
 const G = globalThis;
 
@@ -16,7 +18,8 @@ export class WebGLRenderer extends Base {
     super({ ...p, antialias: c.aa === undefined ? p.antialias : !!c.aa, powerPreference: 'high-performance' });
     const set = this.setPixelRatio.bind(this); // an instance method of WebGLRenderer
     if (c.dpr) { set(c.dpr); this.setPixelRatio = () => set(c.dpr); }
-    if (c.hideDark) hideDarkLights(this);
+    // (before the game gets the renderer: its own wrappers of render / shadowMap.render then go around these)
+    if (c.opt) G.__benchOpt = installStockOpt(this, { ...c.opt, now: realNow });
     G.__benchRenderer = this;
     this.domElement.addEventListener('webglcontextlost', () => { if (G.__benchLost) G.__benchLost('WebGL context lost'); });
   }

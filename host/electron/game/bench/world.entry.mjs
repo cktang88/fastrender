@@ -8,7 +8,7 @@ import '../../../../js/examples/world-objects.drive.mjs';
 import { pinView } from '../../../../js/examples/world-objects.view.mjs';
 import { benchPrepare, benchBackend, Material } from 'three';
 import { bench, fatal } from './harness.mjs';
-import { isDarkLight } from './dark-lights.mjs';
+import { isDarkLight, instanceCullKind } from '../../../../js/stock-three-opt.js';
 
 const G = globalThis;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -19,7 +19,7 @@ function census(scene) {
   const mats = new Map();
   // point_spot / dark: the visible point and spot lights, and those of them with colour x intensity 0 (what
   // FastRenderer's trimLights and the *-trim variants leave out); dark_with_children: why the hook uses layers
-  const c = { objects: 0, meshes: 0, visible_meshes: 0, instanced: 0, skinned: 0, batched: 0, sprites: 0, lights: 0, lights_point_spot: 0, lights_dark: 0, lights_dark_with_children: 0, lights_shadow: 0 };
+  const c = { objects: 0, meshes: 0, visible_meshes: 0, instanced: 0, skinned: 0, batched: 0, sprites: 0, lights: 0, lights_point_spot: 0, lights_dark: 0, lights_dark_with_children: 0, lights_shadow: 0, instanced_visible: 0, instances_visible_meshes: 0, instanced_cull_rule: 0, instanced_cull_hint: 0 };
   const hidden = (o) => { for (let p = o; p; p = p.parent) if (!p.visible) return true; return false; };
   scene.traverse((o) => {
     c.objects++;
@@ -31,6 +31,8 @@ function census(scene) {
     const vis = !hidden(o);
     if (vis) c.visible_meshes++;
     if (o.isInstancedMesh) c.instanced++;
+    // InstancedMeshes that js/stock-three-opt.js (and, with the program's facts, the native side) may draw in part
+    if (o.isInstancedMesh && vis) { c.instanced_visible++; c.instances_visible_meshes += o.count; const k = instanceCullKind(o); if (k === 1) c.instanced_cull_rule++; else if (k === 2) c.instanced_cull_hint++; }
     if (o.isSkinnedMesh) c.skinned++;
     if (o.isBatchedMesh) c.batched++;
     for (const m of Array.isArray(o.material) ? o.material : [o.material]) {

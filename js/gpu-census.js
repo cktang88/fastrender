@@ -13,6 +13,41 @@ const DRAW_WORDS = 20; // (fastrender-three.js DRAWS record)
 const F_CAST = 1, F_RECEIVE = 2, F_INSTANCED = 32; // (fastrender-three.js F)
 
 /**
+ * A preprocessor expression of numbers and operators (identifiers already replaced), without eval: a page with a
+ * Content-Security-Policy (the Electron hosts) has no `Function`. Throws on what it cannot parse.
+ */
+export function evalInt(src) {
+  const t = src.match(/\d+(?:\.\d+)?|\|\||&&|==|!=|<=|>=|<<|>>|[()!<>+\-*/%&|^~]/g) || [];
+  if (t.join('') !== src.replace(/\s+/g, '')) throw new Error('not an expression');
+  let i = 0;
+  const bin = (next, ops) => () => { let v = next(); while (i < t.length && t[i] in ops) { const op = ops[t[i++]]; v = op(v, next()); } return v; };
+  const B = (f) => (a, b) => (f(a, b) ? 1 : 0);
+  const unary = () => {
+    const k = t[i++];
+    if (k === '(') { const v = or(); if (t[i++] !== ')') throw new Error('missing )'); return v; }
+    if (k === '!') return unary() ? 0 : 1;
+    if (k === '-') return -unary();
+    if (k === '+') return unary();
+    if (k === '~') return ~unary();
+    if (k === undefined || !/^\d/.test(k)) throw new Error('unexpected token');
+    return Number(k);
+  };
+  const mul = bin(unary, { '*': (a, b) => a * b, '/': (a, b) => Math.trunc(a / b), '%': (a, b) => a % b });
+  const add = bin(mul, { '+': (a, b) => a + b, '-': (a, b) => a - b });
+  const shift = bin(add, { '<<': (a, b) => a << b, '>>': (a, b) => a >> b });
+  const rel = bin(shift, { '<': B((a, b) => a < b), '>': B((a, b) => a > b), '<=': B((a, b) => a <= b), '>=': B((a, b) => a >= b) });
+  const eq = bin(rel, { '==': B((a, b) => a === b), '!=': B((a, b) => a !== b) });
+  const band = bin(eq, { '&': (a, b) => a & b });
+  const xor = bin(band, { '^': (a, b) => a ^ b });
+  const bor = bin(xor, { '|': (a, b) => a | b });
+  const and = bin(bor, { '&&': B((a, b) => a && b) });
+  const or = bin(and, { '||': B((a, b) => a || b) });
+  const v = or();
+  if (i !== t.length) throw new Error('trailing tokens');
+  return v;
+}
+
+/**
  * The lines of a GLSL source that survive its preprocessor conditionals (object-like #defines, #if / #ifdef / #elif /
  * #else / #endif; an expression this cannot evaluate counts as true). three's sources arrive with includes resolved,
  * light counts substituted and light loops unrolled, so what is left is what the fragment really executes.
@@ -23,7 +58,7 @@ export function activeGlsl(src) {
     let e = expr.replace(/\/\/.*$/, '').replace(/defined\s*\(\s*(\w+)\s*\)|defined\s+(\w+)/g, (_, a, b) => (defs.has(a || b) ? '1' : '0'));
     for (let k = 0; k < 8 && /[A-Za-z_]/.test(e); k++) e = e.replace(/[A-Za-z_]\w*/g, (n) => (defs.has(n) ? defs.get(n) || '1' : '0'));
     if (!/^[\d\s()!&|<>=+\-*/%.]+$/.test(e)) return true;
-    try { return !!Function(`"use strict"; return (${e});`)(); } catch { return true; }
+    try { return !!evalInt(e); } catch { return true; }
   };
   const out = [];
   const stack = []; // { taken: some branch of this #if was emitted, outer: the enclosing state }

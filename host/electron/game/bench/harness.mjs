@@ -254,15 +254,16 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
   log(`warmup ${cfg.warmup} s`);
   const pace = pacer(renderer);
   const progs = programWatch(renderer);
-  const dark = G.__benchDark && G.__benchDark.on ? G.__benchDark : null; // variants *-trim (bench/dark-lights.mjs)
+  const so = G.__benchOpt || null; // the stock-renderer hooks' live stats (js/stock-three-opt.js), variants webgl-*
+  const snap = () => JSON.parse(JSON.stringify(so));
   const W0 = await run(cfg.warmup, frame, renderer, acc, timer, pace, progs);
   log(`warmup drained in ${(await drain(renderer)).toFixed(0)} ms`);
   timer.samples.length = 0;
   const s0 = native ? native.stats() : null;
-  const d0 = dark ? { ...dark } : null;
+  const d0 = so ? snap() : null;
   await ack('measure-start', {});
   const F = await run(cfg.measure, frame, renderer, acc, timer, pace, progs);
-  const d1 = dark ? { ...dark } : null;
+  const d1 = so ? snap() : null;
   const drainMs = await drain(renderer);
   F.seconds += drainMs / 1000;
   await ack('measure-end', {});
@@ -288,9 +289,20 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
   };
   // three's WebGL programs: compiled inside the measured window (a hitch each time: no lightHold), and before it
   if (progs.on) r.webgl_programs = { in_use: progs.count(), created_total: progs.created(), compiled_in_window: F.progNew, frames_that_compiled: F.progFrames, list_length_changes: F.progLen, compiled_in_warmup: W0.progNew };
-  if (dark) {
-    const calls = Math.max(1, d1.calls - d0.calls);
-    r.dark_lights = { hidden_per_render: q2((d1.hidden - d0.hidden) / calls), hidden_last: d1.last, hidden_max: d1.max, renders: d1.calls - d0.calls, find_ms_per_frame: q2((d1.ms - d0.ms) / Math.max(1, n)) };
+  if (so) {
+    // per measured frame (n), from the hooks' counters at the start and the end of the window
+    const renders = Math.max(1, d1.renders - d0.renders), per = (k0, k1) => q2((k1 - k0) / Math.max(1, n));
+    r.stock_opt = { on: d1.on, renders_per_frame: q2((d1.renders - d0.renders) / Math.max(1, n)), walk_ms_per_frame: per(d0.walk_ms, d1.walk_ms) };
+    if (d1.on.dark) r.dark_lights = { hidden_per_render: q2((d1.dark.hidden - d0.dark.hidden) / renders), hidden_last: d1.dark.last, hidden_max: d1.dark.max, find_ms_per_frame: r.stock_opt.walk_ms_per_frame };
+    if (d1.on.discard) r.discard_sort = { discarding_materials: d1.discard.materials, three_sort_objects: d1.discard.sort_objects, overridden_by_the_game: d1.discard.overridden, compares_per_frame: Math.round((d1.discard.compares - d0.discard.compares) / Math.max(1, n)) };
+    if (d1.on.instances && d1.instances) {
+      const a = d0.instances, b = d1.instances, fr = Math.max(1, b.frames - a.frames);
+      r.instance_cull = {
+        ms_per_frame: per(a.ms, b.ms), meshes_looked_at: Math.round((b.meshes - a.meshes) / fr), eligible: Math.round((b.eligible - a.eligible) / fr), by_hint: Math.round((b.hinted - a.hinted) / fr),
+        instances_tested: Math.round((b.tested - a.tested) / fr), instances_drawn: Math.round((b.drawn - a.drawn) / fr), meshes_drawn_in_part: Math.round((b.swapped - a.swapped) / fr),
+        cache_hits_per_frame: q2((b.cache_hits - a.cache_hits) / fr), uploaded_kb_per_frame: q2(((b.uploaded_floats - a.uploaded_floats) * 4) / 1024 / fr), sphere_rebuilds_per_frame: q2((b.spheres_rebuilt - a.spheres_rebuilt) / fr),
+      };
+    }
   }
   if (native) {
     const ir = (renderer.info && renderer.info.render) || {};

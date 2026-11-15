@@ -12,12 +12,14 @@
 #     --variants "A B"   of: webgl webgpu fastrender (default: all three), and the attribution ladder's rows
 #                        (docs/research/attribution.md), each its base's bundle with switches:
 #                          webgl-trim           WebGLRenderer, dark point / spot lights out of each render()
+#                          webgl-opt            ... + discarding opaque draws last (every free generic method)
+#                          webgl-opt-inst       ... + only the instances in view (compacted per frame: JS + upload)
 #                          fastrender-trimonly  fastrender without per-instance culling and discard ordering
 #                          fastrender-bare      ... and without trimLights (every light shaded, as WebGLRenderer)
-#                          webgpu-trim          WebGPURenderer + the same light hook (not part of the ladder)
+#                          webgpu-trim          WebGPURenderer + the light hook (not part of the ladder)
 #                        the ladder, real game only, about 25 minutes:
 #                          --scenes world --no-vsync-pass
-#                          --variants "webgl webgl-trim fastrender-bare fastrender-trimonly fastrender"
+#                          --variants "webgl webgl-opt webgl-opt-inst fastrender-bare fastrender"
 #     --warmup S         default 10        --measure S   default 20
 #     --quick            3 s warmup, 8 s measure, 1280x800 only
 #     --ci               what the CI job runs: quick timings at both sizes, MSAA / MetalFX rows at the first size
@@ -51,7 +53,7 @@ while [ $# -gt 0 ]; do
     --no-build) build=0; shift;;
     --power) power=1; shift;;
     --note) note="$2"; shift 2;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0;;
     *) echo "unknown option $1"; exit 2;;
   esac
 done

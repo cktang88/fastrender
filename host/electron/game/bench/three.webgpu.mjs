@@ -17,7 +17,8 @@ export { UniformsUtils } from 'three/src/renderers/shaders/UniformsUtils.js';
 export { ShaderChunk } from 'three/src/renderers/shaders/ShaderChunk.js';
 export { WebGLCubeRenderTarget } from 'three/src/renderers/WebGLCubeRenderTarget.js';
 import { WebGPURenderer } from 'three/src/Three.WebGPU.js';
-import { hideDarkLights } from './dark-lights.mjs';
+import { installStockOpt } from '../../../../js/stock-three-opt.js';
+import { realNow } from './host.mjs';
 
 const G = globalThis;
 const compat = (G.__benchCompat ||= {});
@@ -32,7 +33,8 @@ async function create() {
   if (c.dpr) { set(c.dpr); r.setPixelRatio = () => set(c.dpr); }
   const dev = r.backend && r.backend.device;
   if (dev && dev.lost) dev.lost.then((i) => { if (G.__benchLost) G.__benchLost(`WebGPU device lost (${i.reason || 'unknown'}): ${String(i.message).replace(/\s+/g, ' ').slice(0, 300)}`); });
-  if (c.hideDark) hideDarkLights(r); // variant `webgpu-trim` (bench/dark-lights.mjs)
+  // variant `webgpu-trim`: the dark-light hook only (js/stock-three-opt.js); not comparable with the WebGL rows
+  if (c.opt) G.__benchOpt = installStockOpt(r, { dark: !!c.opt.dark, now: realNow });
   r.info.autoReset = false; // the harness resets once per display frame (a game on its own rAF never would)
   G.__benchRenderer = r;
   return r;

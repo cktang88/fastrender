@@ -5,7 +5,12 @@
 //
 //   node js/test/world-objects.node.mjs <game dir> [--three three|three-r170] [--frames 120] [--search '?mode=world...']
 //        [--mesh-census 30] [--ablate nofarlod] [--json out.json] [--view x,y,z,yaw,pitch] [--dump-programs dir] [--profile] [--matrix-stats] [--ab property]
-//        [--matrix-check N] [--walk vx,vz] [--light-hold]
+//        [--matrix-check N] [--walk vx,vz] [--light-hold] [--stock-opt]
+// --stock-opt      what the instance part of js/stock-three-opt.js (per-instance frustum culling for a STOCK
+//                  WebGLRenderer, by compacting the instances in view into a second attribute) would cost in JS per
+//                  frame on this game, and what it would leave to draw: timed after each frame on the frame's own
+//                  scene and camera, once with its cache (a result is kept while camera, mesh and matrices stand
+//                  still) and once without. With --walk the camera moves, which is the cost in play.
 //
 // --profile        V8's sampling profiler over the measured frames, aggregated in process (no file): top functions by
 //                  self time and the inclusive time of the renderer's stages, in ms per frame
@@ -73,6 +78,8 @@ for (const base of [process.env.FR_CANVAS, resolve(here, '..')].filter(Boolean))
 console.log(`canvas 2D: ${napi ? '@napi-rs/canvas' : 'none (inert canvases)'}`);
 
 const hrNow = () => Number(process.hrtime.bigint()) / 1e6;
+const { instanceCuller, INSTANCE_CULL_MIN } = await import('../stock-three-opt.js');
+const stockOpt = args.includes('--stock-opt') ? { cached: instanceCuller({ cache: true, now: hrNow }), plain: instanceCuller({ cache: false, now: hrNow }), walk: [], tris: { sent: 0, drawn: 0, frames: 0 } } : null;
 // CPU time of this process (user + system, ms): on a machine busy with other work the wall clock counts the time this
 // process waits for a core, the CPU time does not
 const cpuNow = () => { const c = process.cpuUsage(); return (c.user + c.system) / 1000; };
@@ -255,6 +262,20 @@ for (let i = 0; i < frames; i++) {
   instances = Math.max(instances, renderer._used ? renderer._used.length : 0);
   maxDraws = Math.max(maxDraws, renderer.info.render.calls);
   if (mstat) matrixFrame();
+  if (stockOpt) {
+    // the frame's own scene and camera, matrices as render() left them; nothing stays swapped
+    const t0 = hrNow(), list = [];
+    const visit = (o) => { if (o.visible === false) return; if (o.isInstancedMesh === true && o.count >= INSTANCE_CULL_MIN) list.push(o); for (const c of o.children) visit(c); };
+    visit(W().scene);
+    stockOpt.walk.push(hrNow() - t0);
+    const tri = (m) => { const g = m.geometry; return (g.index ? g.index.count : g.attributes.position.count) / 3; };
+    for (const c of [stockOpt.cached, stockOpt.plain]) {
+      const sent = c === stockOpt.plain ? list.map((m) => m.count) : null;
+      c.prepare(list, W().camera);
+      if (sent) { stockOpt.tris.frames++; list.forEach((m, k) => { stockOpt.tris.sent += sent[k] * tri(m); stockOpt.tris.drawn += m.count * tri(m); }); }
+      c.restore();
+    }
+  }
   if (matrixCheckN && i % matrixCheckN === 0) matrixCheck();
   await tick();
 }
@@ -446,6 +467,16 @@ const result = {
   host: hstats, world: globalThis.__worldStats, errors,
   camera: W().camera.position.toArray().map((v) => +v.toFixed(2)), player: { pos: W().player.pos.toArray().map((v) => +v.toFixed(2)), yaw: +W().player.yaw.toFixed(3), pitch: +W().player.pitch.toFixed(3) },
 };
+if (stockOpt) {
+  const row = (c) => { const s = c.stats, f = Math.max(1, s.frames); return { ms_per_frame: +(s.ms / f).toFixed(3), instanced_meshes: Math.round(s.meshes / f), eligible: Math.round(s.eligible / f), by_hint: Math.round(s.hinted / f), instances_tested: Math.round(s.tested / f), instances_drawn: Math.round(s.drawn / f), meshes_drawn_in_part: Math.round(s.swapped / f), cache_hits: +(s.cache_hits / f).toFixed(1), uploaded_kb: +((s.uploaded_floats * 4) / 1024 / f).toFixed(1), sphere_rebuilds: +(s.spheres_rebuilt / f).toFixed(1) }; };
+  const t = stockOpt.tris, f = Math.max(1, t.frames);
+  result.stockOptInstances = {
+    note: 'per frame; JS only (the upload of the compacted instances is extra, in the GL driver). Triangles: of the instanced meshes with >= 8 instances, as three draws them vs with the instances in view',
+    find_instanced_meshes_ms: +(stockOpt.walk.reduce((a, b) => a + b, 0) / Math.max(1, stockOpt.walk.length)).toFixed(3),
+    with_cache: row(stockOpt.cached), every_frame: row(stockOpt.plain),
+    instanced_triangles_sent: Math.round(t.sent / f), instanced_triangles_with_culling: Math.round(t.drawn / f),
+  };
+}
 console.log(JSON.stringify(result, null, 2));
 if (debugMaterial) console.log(JSON.stringify(renderer.debugMaterials(debugMaterial), null, 1));
 if (meshCensusN) console.log(await meshCensus(meshCensusN));

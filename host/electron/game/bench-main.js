@@ -31,16 +31,23 @@ const opt = (k, d) => { const i = argv.indexOf(`--${k}`); return i >= 0 && argv[
 // A variant is a base (which bundle, which window, which GPU path) plus switches: the attribution ladder's rows run
 // the SAME bundle as their base, so the switch is the only difference (docs/research/attribution.md).
 //   webgl-trim / webgpu-trim   the stock renderer; dark point / spot lights are out of the frame for each render()
-//                              (game/bench/dark-lights.mjs): FastRenderer's trimLights, done from outside
+//                              (js/stock-three-opt.js): FastRenderer's trimLights, done from outside
+//   webgl-opt                  ... + discarding opaque draws last, nearest first (renderer.setOpaqueSort): every
+//                              generic method that costs WebGL nothing per frame
+//   webgl-opt-inst             ... + InstancedMeshes drawn with only their instances in view (compacted into a second
+//                              attribute per frame: JS and upload cost, so it is its own row)
+//   (--opt dark,discard,instances[,nocache] on any webgl variant: the switches one by one)
 //   fastrender-trimonly        fastrender without what only its native side does: instanced draws are not split by
 //                              the frustum (FASTRENDER_V3_DEBUG bit 2048), discarding draws stay in state order (512)
 //   fastrender-bare            ... and with trimLights off: every visible light in the light state, as WebGLRenderer
 const NATIVE_TRICKS_OFF = 2048 | 512; // src/mac_three.rs `dbg` (a decimal number in the environment)
 const VARIANTS = {
   webgl: { base: 'webgl' },
-  'webgl-trim': { base: 'webgl', hideDark: true },
+  'webgl-trim': { base: 'webgl', opt: { dark: true } },
+  'webgl-opt': { base: 'webgl', opt: { dark: true, discard: true } },
+  'webgl-opt-inst': { base: 'webgl', opt: { dark: true, discard: true, instances: true } },
   webgpu: { base: 'webgpu' },
-  'webgpu-trim': { base: 'webgpu', hideDark: true },
+  'webgpu-trim': { base: 'webgpu', opt: { dark: true } },
   fastrender: { base: 'fastrender' },
   'fastrender-trimonly': { base: 'fastrender', v3debug: NATIVE_TRICKS_OFF },
   'fastrender-bare': { base: 'fastrender', v3debug: NATIVE_TRICKS_OFF, params: { trimLights: 0 } },
@@ -223,8 +230,12 @@ app.whenReady().then(() => {
   protocol.handle('app', serve);
   session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }, (d, cb) => { results.requests.remote++; cb({ cancel: true }); });
   session.defaultSession.setPermissionRequestHandler((wc, perm, cb) => cb(false));
-  const cfg = { variant, name: variantName, hideDark: !!V.hideDark, scene, px: `${PW}x${PH}`, dpr: dsf, aa, vsync, warmup, measure, bootTimeout: Math.max(60, timeoutS - warmup - measure - 60), pace: opt('pace', 'gpu'), params: { ...(V.params || {}), ...JSON.parse(opt('params', '{}')) } };
-  results.switches = { hide_dark_lights: cfg.hideDark, params: cfg.params, FASTRENDER_V3_DEBUG: fr ? process.env.FASTRENDER_V3_DEBUG || '' : undefined };
+  // --opt a,b: the stock-renderer hooks by name (dark, discard, instances; nocache: instances recomputed every frame)
+  const optArg = opt('opt', '');
+  const sopt = optArg ? Object.fromEntries(optArg.split(',').filter(Boolean).map((k) => (k === 'nocache' ? ['cache', false] : [k, true]))) : V.opt || null;
+  if (sopt && variant === 'fastrender') return finish(2, '--opt is for the stock renderers');
+  const cfg = { variant, name: variantName, opt: sopt, scene, px: `${PW}x${PH}`, dpr: dsf, aa, vsync, warmup, measure, bootTimeout: Math.max(60, timeoutS - warmup - measure - 60), pace: opt('pace', 'gpu'), params: { ...(V.params || {}), ...JSON.parse(opt('params', '{}')) } };
+  results.switches = { stock_opt: sopt, params: cfg.params, FASTRENDER_V3_DEBUG: fr ? process.env.FASTRENDER_V3_DEBUG || '' : undefined };
   log(`variant ${variantName} = ${variant} + ${JSON.stringify(results.switches)}`);
   win = new BrowserWindow({
     // the window keeps its size on a smaller screen (CI: 1024x768)
