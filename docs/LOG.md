@@ -3,6 +3,42 @@
 Short entries, newest first: what was tested, how, what came out.
 
 
+## 2026-11-15: real game, static subtrees in the game (patches/0005): render() JS 13-14 -> 7.3-8.8 ms in node, exact; Air not run
+
+Details: docs/notes/three-programs.md ("Static transforms").
+
+- **Why**: on the Air the frame is ~13.7 ms GPU and ~13 ms JS; `Object3D.updateMatrixWorld` is 46 % of `render()`
+  and 90 % of the 24,000 objects never move. The renderer's `staticSubtrees` gets 27 % with up to N - 1 frames of
+  delay; the exact version has to be the game's.
+- **What** (`patches/3d-world-objects-0005-static-subtrees.patch`, the game's `src/static.ts`): `NycLevel.place()`
+  freezes every direct child of a placed block's group (not the steam puffs): ~1,500 subtrees, 14,400 objects
+  (parked cars 9,300, sidewalk models 2,700, merged meshes, lamp markers, showcase holders). A frozen root's own
+  `updateMatrixWorld` returns unless something changed; the block's group tells its frozen children to recompute
+  only when its world matrix really came out different.
+- **`matrixWorldAutoUpdate = false` on the roots would not have done it**: r187 still visits every child, it only
+  skips that one multiply. `matrixAutoUpdate` is left alone (no walk, so no gain; `updateWorldMatrix`,
+  `getWorldPosition`, `clone` stay as they are).
+- **What changes a frozen subtree, and who notices**: children added below it (models, a car's near LOD and roof
+  sign, 0004's LOD twins, `detail.ts` originals, showcase objects): `Object3D.add` is wrapped. Its own position /
+  quaternion / scale and any ancestor's move (`windowview.ts`): compared per frame. A transform written by hand
+  below a frozen object: needs `touch(o)`; none in the game's block code (grep of every position / rotation / scale /
+  quaternion / matrix write; doors and drawers are in interiors and shops, separate levels, not frozen). Net under
+  that: 256 frozen objects re-composed per frame, a stale subtree recomputed within ~1 s, warned once, thawed the
+  third time.
+- **Node (V8, this VM, spawn view)**: `scene.updateMatrixWorld` 4.2-4.6 -> 0.75-1.0 ms; `render()` median, separate
+  processes interleaved: 12.9 / 13.9 / 13.8 -> 7.3 / 8.0 / 8.8 ms; in one run switched every 10 frames
+  (`--ab game:__staticFreeze.on`): 14.8 -> 8.3 ms, game frame 18.2 -> 11.9 ms. Same draws, triangles, objects.
+- **Exact**: new `--matrix-check` (every matrix against three's plain walk, recomputed on the side): 0 differences
+  in 1.1-2.8 M visible checks per run at the spawn and on walks (`--walk`) of 480-620 m through streaming blocks, at
+  night, with `seamless=1`, `quality=high`; 0 inside frozen subtrees (hidden included); the audit healed nothing.
+- **Switch**: `--ablate nostatic` / `FASTRENDER_ABLATE=nostatic`, row `nostatic` in `scripts/gpu-ablate.sh` (same
+  picture and GPU ms; compare the JS ms of the "three frame cost" line with `none`).
+- **Verified**: game `tsc` (no new errors), `npm run qa` 268 passed (new `tests/static.test.ts`), `git am` on a fresh
+  copy by `world-game.sh` after 0001-0004. **Not verified**: any ms on the Air or in JavaScriptCore; rain / snow
+  (the node harness does not get through them, patch or not); the golden (matrices are equal, so no change expected).
+- **Left**: ~0.17 ms is the per-frame look at the 1,500 frozen roots; the 2,100 objects of moving cars still
+  compose their static parts every frame.
+
 ## 2026-11-15: real game, far LODs in the game (patches/0004): triangles in view 2.25 -> 1.75 M (node); not timed, golden pending CI
 
 Details: docs/notes/gpu-cost.md ("Triangles by owner", item 4).

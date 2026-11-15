@@ -1,6 +1,6 @@
-From 91bfee11a10a0546be7a2e5594c2cc892dc2dd04 Mon Sep 17 00:00:00 2001
+From 02e01be3ad4015bbc6ed42e8ce05caf6bec8c432 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Sun, 15 Nov 2026 17:49:43 +0000
+Date: Sun, 15 Nov 2026 17:51:22 +0000
 Subject: [PATCH] Static subtrees: a placed block's parts leave three's
  per-frame matrix walk
 
@@ -26,9 +26,9 @@ while walking 600 m through streaming blocks. tests/static.test.ts.
 ---
  scripts/qa.mjs       |   1 +
  src/nyc.ts           |  13 +++
- src/static.ts        | 200 +++++++++++++++++++++++++++++++++++++++++++
+ src/static.ts        | 201 +++++++++++++++++++++++++++++++++++++++++++
  tests/static.test.ts | 170 ++++++++++++++++++++++++++++++++++++
- 4 files changed, 384 insertions(+)
+ 4 files changed, 385 insertions(+)
  create mode 100644 src/static.ts
  create mode 100644 tests/static.test.ts
 
@@ -105,10 +105,10 @@ index 4d25ee0..9487a26 100644
    // ------------------------------------------------------------ one block
 diff --git a/src/static.ts b/src/static.ts
 new file mode 100644
-index 0000000..3f80330
+index 0000000..32724d4
 --- /dev/null
 +++ b/src/static.ts
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,201 @@
 +/**
 + * Static subtrees: parts of the world that do not move are left out of three's per-frame matrix walk.
 + *
@@ -185,11 +185,12 @@ index 0000000..3f80330
 +  hooked = true;
 +  const proto = THREE.Object3D.prototype;
 +  const add = proto.add;
-+  proto.add = function (this: THREE.Object3D, ...objects: THREE.Object3D[]) {
-+    add.apply(this, objects);
++  proto.add = function (this: THREE.Object3D) {
++    // (no rest parameter: this runs for every add of the level builders)
++    add.apply(this, arguments as unknown as THREE.Object3D[]);
 +    touch(this);
-+    for (const o of objects) {
-+      const st = o && recOf(o);
++    for (let i = 0; i < arguments.length; i++) {
++      const st = arguments[i] && recOf(arguments[i]);
 +      if (st) st.dirty = true; // a frozen object moved to another parent
 +    }
 +    return this;

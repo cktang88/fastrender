@@ -187,6 +187,59 @@ game names with `renderer.transformsChanged(object)`. Real game, `world-objects.
 frames, switched every 200): `render()` 16.0 -> 11.7 ms with N = 8, 12.7 -> 9.1 ms with N = 4 (-27 %, -28 %); 430
 subtrees settled, 383 of them skipped per frame. The game-side switches above get the same without any delay.
 
+**What the real game does now: `patches/3d-world-objects-0005-static-subtrees.patch`** (exact, no delay; the game's
+`src/static.ts`). Of the game's 21,600 static objects 14,400 are inside the placed blocks: parked cars with their
+15-25 parts each (9,300 objects), sidewalk models (2,700), merged building meshes, lamp markers, showcase holders. The
+rest are far people the game already freezes. `NycLevel.place()` freezes each direct child of a block's group (~1,500
+subtrees for 25 blocks; not the steam puffs, which move):
+
+- `freeze(o)`: `o.updateMatrixWorld` becomes a function that returns unless something changed, so three does not
+  descend. `matrixAutoUpdate` is **left as it was**: nothing walks the subtree any more, so it buys nothing, and
+  `updateWorldMatrix()` / `getWorldPosition()` / `clone()` keep working as ever.
+- **`matrixWorldAutoUpdate = false` does not do this.** In r187 `updateMatrixWorld` only skips that object's own
+  multiply and still visits every child; an own `updateMatrixWorld` on the subtree root is the only switch three
+  honours (FastRenderer's `staticSubtrees` walk calls it too).
+- `staticContainer(block)`: three passes `force = true` to every child of a group with `matrixAutoUpdate`, every
+  frame. The block's group instead compares its world matrix before and after and recomputes its frozen children
+  only when it differs; its other children get three's call.
+- Kept exact without a call from the game: a child added anywhere below a frozen object (`Object3D.add` is wrapped
+  and marks the frozen subtree above: models that stream in, a car's near LOD and roof sign, the far-LOD twins of
+  patch 0004, originals swapped in by `detail.ts`, showcase objects), the frozen object's own position / quaternion /
+  scale (10 numbers compared per frame), a move of any ancestor (`windowview.ts` shifts the level by 10 km for a
+  capture), three's explicit `o.updateMatrixWorld(true)`. Visibility, materials, geometry and instance matrices
+  (occlusion, block detail, LOD switches, the fleet's instances) are not scene-graph matrices.
+- Needs `touch(o)`: a position / rotation / scale written by hand on an object *below* a frozen one. No code path of
+  the game does that to a placed block (doors and drawers that move are in interiors and shops, which are separate
+  levels and not frozen). As a net, `StaticAudit` re-composes 256 frozen objects per frame (each about once a
+  second): a stale subtree is recomputed, counted (`STATIC.healed`), named once on the console, and thawed for good
+  the third time.
+- Switch: `STATIC.on` (`globalThis.__staticFreeze`, `?static=0`), at once in both directions. Harness: `--ab
+  game:__staticFreeze.on`, `--ablate nostatic`; `scripts/gpu-ablate.sh` row `nostatic` (compare the bench's JS ms).
+
+Measured in node (V8, this VM; spawn view; `js/test/world-objects.node.mjs`):
+
+| | before (0001-0004) | with 0005 |
+|---|---:|---:|
+| `scene.updateMatrixWorld()` alone (best of 5 x 10 calls) | 4.2-4.6 ms | 0.75-1.0 ms |
+| `render()` median, separate processes interleaved, 600 frames (3 pairs, quiet machine) | 12.9 / 13.9 / 13.8 ms | 7.3 / 8.0 / 8.8 ms |
+| the same, busier machine | 13.3 / 15.2 / 16.3 ms | 8.5 / 10.0 / 9.9 ms |
+| `render()` median, one run, switched every 10 frames (`--ab game:__staticFreeze.on`, 1200 frames) | 14.8 ms | 8.3 ms |
+| whole game frame, same run | 18.2 ms | 11.9 ms |
+
+`render()` loses more than the isolated walk costs: in a frame the walk runs after the game's update, with its 24,000
+objects out of the cache. Draws, triangles and object counts are identical. Of the 0.75 ms left, ~0.17 ms is the
+per-frame look at the 1,500 frozen roots (the price of not needing `touch()` for them) and the rest is what moves
+(traffic, near people).
+
+**Exactness, measured** (`--matrix-check N`: after every N-th frame, every object's `matrixWorld` against parent x
+compose(position, quaternion, scale) recomputed on the side): 0 of 1.29 M visible-object checks differ over 300
+frames at the spawn while models, near LODs and LOD twins stream in (1,922 recomputations); 0 of 1.1-2.8 M per run
+while walking (`--walk`) 480-620 m north and 500 m diagonally (blocks stream in and out, 3,300-4,500 subtrees
+frozen), at night, with `seamless=1` (walks into a shop), with `quality=high`; 0 of 4.5-7.4 M checks inside frozen
+subtrees, hidden ones included; `STATIC.healed` stays 0. Not exercised in node: rain / snow (the harness does not get
+through them, with or without the patch), entering an object (`macro.ts`), window-view captures (covered by the
+game's test instead).
+
 **What does not work** (measured, not shipped): a walk of our own that remembers each object's
 position / quaternion / scale and skips compose + multiply when they are unchanged (`js/test/transforms.bench.mjs`
 "cached walk") is exact under a small contract, but finding out that an object did not move means reading ten numbers
