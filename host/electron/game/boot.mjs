@@ -50,7 +50,7 @@ else G.requestAnimationFrame = (cb) => realRaf((t) => { try { cb(t); } finally {
  * not rendered yet (one frame may wait in the queue: the render thread, with vsync on, and the page's rAF tick at the
  * same rate but not in phase). A skipped tick costs nothing (the game's callback is not run, so its clock simply sees
  * a longer frame). The wait is capped at 250 ms: a render thread that stopped (renderer failed to start) must not
- * freeze the game's UI. Also: the fps overlay (`--fps`, F3 toggles) and window.__frPlay.report() (CI smoke).
+ * freeze the game's UI. Also: the fps overlay (`--fps`; the ` key or F3 toggles) and window.__frPlay.report() (CI smoke).
  */
 function startPlay() {
   G.__frPlayCfg = { dpr: play.dpr, aa: play.aa };
@@ -132,7 +132,8 @@ function startPlay() {
       : `WebGL  ${now.fps.toFixed(0)} fps  JS+GL calls ${now.js_ms.toFixed(1)} ms  GPU n/a\n${now.draws} draws  ${now.size} px`;
   };
   setInterval(sample, 500);
-  addEventListener('keydown', (e) => { if (e.code === 'F3') { shown = !shown; sample(); e.preventDefault(); } });
+  // ` (not a key of the game) or F3 (fn-F3 on a MacBook)
+  addEventListener('keydown', (e) => { if (e.code === 'Backquote' || e.code === 'F3') { shown = !shown; sample(); e.preventDefault(); } });
   document.addEventListener('pointerlockchange', () => { lock.changes++; log(`pointer lock ${document.pointerLockElement ? 'on' : 'off'}`); });
   document.addEventListener('pointerlockerror', () => { lock.errors++; log('pointer lock error (click the view; the window must be focused)'); });
   G.__frPlay = {
@@ -150,7 +151,7 @@ function startPlay() {
       };
     },
   };
-  log(`play mode: ${fr ? 'fastrender' : 'stock WebGLRenderer'}, pixel ratio ${play.dpr || devicePixelRatio}${play.fps ? ', fps overlay on (F3)' : ' (F3: fps overlay)'}`);
+  log(`play mode: ${fr ? 'fastrender' : 'stock WebGLRenderer'}, pixel ratio ${play.dpr || devicePixelRatio}${play.fps ? ', fps overlay on (` toggles)' : ' (` key: fps overlay)'}`);
 }
 
 // fetch accounting (the golden waits for in-flight requests before its last frames)

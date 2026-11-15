@@ -5,7 +5,7 @@
 #
 #   host/electron/scripts/play-world.sh [options]
 #     --webgl            the same game copy on stock three WebGLRenderer, same window (to feel the difference)
-#     --fps              frame-rate overlay: fps, JS ms, GPU ms, draws, pixels (F3 toggles it either way)
+#     --fps              frame-rate overlay: fps, JS ms, GPU ms, draws, pixels (the ` key toggles it either way)
 #     --search '?...'    the game's own URL parameters (default '?mode=world&quality=low&seamless=0&nodyn'), e.g.
 #                        '?mode=world&quality=low&seamless=0&nodyn&tod=night&weather=rain'
 #     --renderer '{..}'  fastrender options over the defaults {"scale":1,"upscale":"bilinear","vsync":1}, e.g.
@@ -18,7 +18,8 @@
 #     --online           let the game reach its CDNs (objects streamed from Hugging Face; refused by default, as in
 #                        the golden and the benchmark; not tested on fastrender)
 #     --game-mode        mark the dev Electron as a game (macOS Game Mode in full screen; scripts/game-mode.mjs)
-#     --frame off        frameless window
+#     --frame normal|off the standard title bar (see-through on fastrender's transparent window) / no frame at all
+#                        (default: hidden title bar, the game fills the window, the top 24 points drag it)
 #     --world DIR        a 3d-world-objects checkout with patches/ applied (default: fetched + patched into
 #                        host/electron/.bench/3d-world-objects, the copy bench-3way.sh uses)
 #     --no-build         skip npm ci / the addon / the bundle (reuse the previous run's)
@@ -26,7 +27,7 @@
 #
 # In the game: click the view to capture the mouse (Esc releases it and pauses), WASD / arrows move, Shift runs,
 # Space jumps, E enters / shrinks in, Q backs out, hold Z to zoom, T time of day, Y weather, M map, C credits.
-# Window: ctrl-cmd-F or F11 full screen, F3 fps overlay, cmd-Q quit.
+# Window: ctrl-cmd-F (or the green button, or fn-F11) full screen, ` fps overlay, cmd-Q quit.
 #
 # Needs: macOS on Apple Silicon, Xcode command line tools, Rust (cargo), Node 20+, git. First run: a few minutes
 # (the addon's release build); later runs: seconds.
@@ -103,6 +104,6 @@ if [ "$game_mode" = 1 ]; then node scripts/game-mode.mjs || true; fi
 
 say "play ($variant)"
 echo "click the view to capture the mouse (Esc releases it) - WASD move, Shift run, Space jump, E enter, Q back,"
-echo "Z zoom, T time of day, Y weather, M map - ctrl-cmd-F full screen, F3 fps overlay, cmd-Q quit"
+echo "Z zoom, T time of day, Y weather, M map - ctrl-cmd-F full screen, \` fps overlay, cmd-Q quit"
 # shellcheck disable=SC2086
 exec $electron game/main.js --play --variant "$variant" --html "$world/index.html" --assets "$world/public" ${pass[@]+"${pass[@]}"}

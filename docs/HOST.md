@@ -175,7 +175,7 @@ What `--play` changes against the golden run:
 | | golden run | play |
 |---|---|---|
 | Clock, `Math.random`, `requestAnimationFrame` | virtual, seeded, stepped (`world-objects.drive.mjs`) | real (`game/dist/play-<variant>.js` has no driver) |
-| Window | frameless, fixed 1280x800, always on top | title bar, resizable, full screen (`ctrl-cmd-F`, `F11`); default size = the screen's work area |
+| Window | frameless, fixed 1280x800, always on top | traffic lights over the game (`titleBarStyle: 'hidden'`; the top 24 points drag it), resizable, full screen (`ctrl-cmd-F`, `fn-F11`); default size = the screen's work area |
 | Permissions | all denied | pointer lock and fullscreen granted; the window takes the focus |
 | Renderer options | `{"scale":1,"upscale":"bilinear"}` | the same plus `"vsync":1`; `--renderer '{...}'` is merged over them |
 | URL parameters | `?mode=world&quality=low&weather=clear&tod=noon&seamless=0` | `?mode=world&quality=low&seamless=0&nodyn` (the game's own time of day and weather); `--search` replaces them |
@@ -194,12 +194,15 @@ What `--play` changes against the golden run:
   game's pixel ratio only sizes its own render targets. Play mode pins it to the display's on both renderers
   (`game/play/three.*.mjs`), so `--webgl` shades the pixels fastrender shades. `--dpr game` leaves the game's own
   choice (1 at `quality=low`), and `--renderer '{"scale":0.5}'` gives fastrender the same pixel count as that.
-- **Overlay** (`--fps`, `F3` toggles): frames per second the game produced, JS ms per frame (the game's callback plus
+- **Window frame.** Electron shows neither the title nor the buttons of a transparent window with the normal title
+  bar, which would leave a see-through strip above the Metal view. So the title bar is hidden and the content view
+  fills the window (`--frame normal` and `--frame off` are the alternatives).
+- **Overlay** (`--fps`; the `` ` `` key or `fn-F3` toggles): frames per second the game produced, JS ms per frame (the game's callback plus
   the flush), and for fastrender GPU ms, draws, drawable size, frames shown, skipped and waited ticks.
 - **Network.** Remote requests are refused, as in the golden and the benchmark. `--online` lets the game stream its
   objects from Hugging Face; that content has never been through fastrender.
 - **CI.** `--play-seconds N` runs unattended: waits for the world, resizes the window, clicks, holds `W`, runs N
-  seconds and prints PASS / FAIL lines. Job `play-smoke` in `.github/workflows/mac.yml` runs it for both variants when
+  seconds, goes full screen and back, and prints PASS / FAIL lines (plus a `screencapture` of the screen). Job `play-smoke` in `.github/workflows/mac.yml` runs it for both variants when
   the head commit's message mentions `play-smoke`. It never fails the workflow.
 
 Not covered: `contentsScale` is read once when the view is created, so a window dragged to a display with another

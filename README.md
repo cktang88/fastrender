@@ -163,8 +163,8 @@ Click the view to capture the mouse; `Esc` releases it and pauses.
 | hold `Z` | zoom (standing still) |
 | `T`, `Y` (`Shift` = back) | time of day, weather |
 | `M`, `C` | map, credits |
-| `F3` | fps overlay on / off |
-| `ctrl-cmd-F` or `F11`, `cmd-Q` | full screen, quit |
+| `` ` `` | fps overlay on / off |
+| `ctrl-cmd-F` (or the green button), `cmd-Q` | full screen, quit |
 
 Defaults: vsync on (capped at the display's rate), render scale 1, the game's `quality=low`, no network (as in the
 benchmark). Some options:

@@ -16,13 +16,16 @@
 // PLAY MODE (scripts/play-world.sh is the one command; docs/HOST.md "Play mode"):
 //   electron game/main.js --play --html <game>/index.html --assets <game>/public [--variant fastrender|webgl] [--fps]
 //     [--search '?mode=world&quality=low...'] [--renderer '{"scale":0.5,"upscale":"metalfx"}'] [--size 1280x800]
-//     [--dpr game|N] [--no-aa] [--online] [--frame off] [--play-seconds N [--out DIR --tag NAME --timeout S]]
+//     [--dpr game|N] [--no-aa] [--online] [--frame hidden|normal|off] [--play-seconds N [--out DIR --tag NAME --timeout S]]
 // The game itself, interactive: the real clock, Math.random and requestAnimationFrame (bundle: game/dist/play-<variant>.js,
 // scripts/bundle-game.mjs --play), no capture, no timeout. An ordinary resizable window (default: the screen's work
 // area; --size = content size in points), the drawable follows it; View > Toggle Full Screen (ctrl-cmd-F, F11).
+// --frame hidden (default): the title bar is hidden and the game fills the window under the traffic lights (Electron
+// shows neither title nor buttons on a transparent window with the normal title bar: `normal` leaves a see-through
+// strip there); the top 24 points drag the window. `off`: frameless.
 // Pointer lock and fullscreen requests are granted (the golden run denies every permission) and the window takes the
 // focus. fastrender: vsync on, render scale 1 (--renderer overrides). --variant webgl: the same game copy on stock
-// three WebGLRenderer in an opaque window, no addon. --fps: frame-rate overlay (F3 toggles). Remote requests stay
+// three WebGLRenderer in an opaque window, no addon. --fps: frame-rate overlay (` or F3 toggles). Remote requests stay
 // refused, as in the golden and the benchmark, unless --online (the game then streams objects from its CDNs; not
 // tested on fastrender). --play-seconds N (CI): wait for the world, resize the window, click (pointer lock), hold W,
 // run N seconds, print PASS/FAIL lines, write <out>/<tag>.json, exit.
@@ -38,6 +41,7 @@ const play = argv.includes('--play');
 const variant = play ? opt('variant', 'fastrender') : 'fastrender';
 const fr = variant !== 'webgl'; // the addon + the Metal view below transparent web contents
 const playSeconds = play ? Number(opt('play-seconds', '0')) : 0;
+const frameStyle = opt('frame', 'hidden'); // play: hidden | normal | off
 if (play && !['fastrender', 'webgl'].includes(variant)) { console.error('game: --variant fastrender|webgl'); process.exit(2); }
 const bundle = path.resolve(opt('bundle', path.join(__dirname, 'dist', play ? `play-${variant}.js` : `${kind === 'city' ? 'three-city' : 'world-objects'}.js`)));
 const htmlPath = opt('html', '');
@@ -94,7 +98,8 @@ function page() {
   // play: FastRenderer never sizes its <canvas> (native owns the pixels), and the game's click-to-capture-the-mouse
   // listener is on that canvas: it covers the window
   const frCss = fr ? '<link rel="stylesheet" href="/__fr/fr.css">' : '<style>html,body{margin:0;overflow:hidden;background:#000}</style>';
-  const playCss = play ? '<style>#app canvas{display:block;width:100vw!important;height:100vh!important}</style>' : '';
+  const drag = play && frameStyle === 'hidden' ? '<div style="position:fixed;top:0;left:0;right:0;height:24px;z-index:2147483646;-webkit-app-region:drag"></div>' : '';
+  const playCss = play ? `<style>#app canvas{display:block;width:100vw!important;height:100vh!important}</style>${drag}` : '';
   const inject = `${css}${frCss}${playCss}<script src="/__fr/boot.js"></script><script src="/__fr/game.js"></script>`;
   if (htmlPath) {
     const html = fs.readFileSync(htmlPath, 'utf8');
@@ -177,6 +182,10 @@ async function smoke() {
   await sleep(3000);
   const a = (results.before_resize = await rep());
   check('world started on the real clock', a.frames > 0, `${results.boot_s} s; ${JSON.stringify(a)}`);
+  // what the window looks like (title bar, traffic lights, the DOM over the Metal view): for a human, in the artifact
+  results.window = { frame: frameStyle, bounds: win.getBounds(), content: win.getContentBounds(), display: screen.getPrimaryDisplay().size, scale: screen.getPrimaryDisplay().scaleFactor };
+  log('window', JSON.stringify(results.window));
+  if (process.platform === 'darwin') { fs.mkdirSync(outDir, { recursive: true }); await run('screencapture', ['-x', path.join(outDir, `${tag}-screen.png`)]); }
   const [cw, ch] = win.getContentSize();
   win.setContentSize(Math.max(320, cw - 160), Math.max(240, ch - 100));
   const size = (x) => (x.native ? x.native.drawable : x.size);
@@ -194,6 +203,14 @@ async function smoke() {
   win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'W' });
   check('W moves the player', moved > 0.2, `${moved.toFixed(2)} m`);
   await sleep(playSeconds * 1000);
+  // full screen and back (the View menu's action)
+  const f0 = await rep();
+  win.setFullScreen(true);
+  const f1 = await until(rep, (x) => x && win.isFullScreen() && x.inner !== f0.inner && size(x) !== size(f0));
+  check('full screen', win.isFullScreen() && size(f1) !== size(f0), `isFullScreen ${win.isFullScreen()}, window ${f0.inner} -> ${f1.inner} points, drawable ${size(f0)} -> ${size(f1)} px`);
+  win.setFullScreen(false);
+  await until(rep, () => !win.isFullScreen());
+  await sleep(1000);
   const d = (results.end = await rep());
   const alive = d.frames > c.frames && (!d.native || d.native.rendered > c.native.rendered);
   check(`frames for ${playSeconds} s`, alive, JSON.stringify(d));
@@ -214,7 +231,7 @@ app.whenReady().then(() => {
   const sized = W > 0 && H > 0;
   const playWindow = {
     ...(sized ? { width: W, height: H, useContentSize: true, center: true } : { x: area.x, y: area.y, width: area.width, height: area.height }),
-    frame: opt('frame', 'on') !== 'off', show: false, resizable: true, fullscreenable: true, acceptFirstMouse: true,
+    frame: frameStyle !== 'off', ...(frameStyle === 'hidden' ? { titleBarStyle: 'hidden' } : {}), show: false, resizable: true, fullscreenable: true, acceptFirstMouse: true,
     title: `${fr ? 'fastrender (Metal)' : 'three WebGLRenderer'} - 3d-world-objects`,
     ...(fr ? { transparent: true, backgroundColor: '#00000000', hasShadow: false } : { backgroundColor: '#000000' }),
   };
