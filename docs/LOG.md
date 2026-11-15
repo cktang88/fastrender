@@ -4,6 +4,42 @@ Short entries, newest first: what was tested, how, what came out.
 
 
 
+## 2026-11-15: binary archive filled an Air's disk (133 GB); root cause: adding to an archive opened from the file; fixed (a05078d, 6a1de62)
+
+M2 Air (Mac14,2), from the local session that runs the Air benches. **Please read before touching `persist()` in
+src/mac_programs.rs.**
+
+**What happened.** During `scripts/gpu-ablate.sh 1280x800` the disk filled up. In the per-user cache dir,
+`<confstr(_CS_DARWIN_USER_CACHE_DIR)>/dev.fastrender.fastrender/com.apple.gpuarchiver/` held 1943 `gpuarchiver-*`
+folders (133 GB). Every `serializeToURL` leaves one, failed or not, and Metal never removes them (up to ~1.2 GB each
+as the archive grows). Every save failed (`Failed to generate machO ... missing 'vertex' stage in pipeline no. N`, also
+`expecting 'fragment' stage`), so ca59b7b's fallback re-serialised once per new pipeline: ~300 folders per launch, and
+one launch spent 533 s in `persist()`.
+
+**Root cause (not a Metal bug, nor about depth/write masks).** The refused pipelines were ordinary main-pass ones
+(BGRA8, mask 15, Depth32Float). Each one serialised fine on its own and was not a duplicate. Shrinking the failing set
+gave the minimal case: **2 pipelines serialised to a file, the file reopened, 1 new pipeline added that shares the
+fragment library with one of them -> serialise fails**. The same 3 added to a *new* archive serialise fine. In short:
+adding to an `MTLBinaryArchive` opened from a URL breaks once a new pipeline shares a stage function with the file.
+
+**Fix.**
+- a05078d: `serialise()` removes the `gpuarchiver-*` folder each call leaves (it finds the folder from the bundle id
+  via `NSBundle`, so Electron works too).
+- 6a1de62: `Archive.used` keeps every archived pipeline this launch makes (hit or compiled), and `persist()` writes a
+  **new** archive of all of them over the file. It never adds to the loaded file. The `writer` and the halving fallback
+  are gone (-64/+25 lines). Lookups still go to last launch's file.
+
+**Measured (Air, 5 launches in a row with different ablate rows):** no failed saves (before: 1-14 left out per save),
+191/196 pipelines from the archive by the 5th launch (the 5 others are depth-only, kept out on purpose), 0
+`gpuarchiver-*` folders (before: 126 after 3 launches). `cargo test pipeline` passes.
+
+**Limits.** A launch that uses fewer pipelines than the file holds writes a smaller file at its next save (fine for
+the real game, where the manifest prewarms everything). Startup only: no effect on GPU ms.
+
+**Results pushed today:** `bench-results/2026-11-15-gpu-ablate-Mac14,2-at-14f7b17/` (old code, 17 rows) and
+`...-at-a05078d/` (latest + fix, 19 rows; `none` main 7.73 ms, `nostatic` 9.44, `basic` 5.29). The READMEs say which
+code each row ran on.
+
 ## 2026-11-15: first macOS CI run since the morning: all goldens pass on the M-0 seam; trimLights 3.3x on main; warm launch 4x
 
 Run 43749233588 (commit adf7b28: M-0 backend seam, trimLights, instance runs, discard order, WP3 async compile +
