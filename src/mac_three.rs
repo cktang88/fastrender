@@ -193,6 +193,9 @@ pub struct ThreeScene {
     objects_off: usize,
     vis3: Vec<Draw3>,
     shadows: Vec<ShadowRec>,
+    /// FASTRENDER_V3_DEBUG bits (bisecting on CI): 1 shadow slots bind the lit texture, 2 no v3 shadow pass,
+    /// 4 no instanced draws, 8 no transparent draws, 16 neutral textures only, 32 Lambert only, 64 no textures bound
+    dbg: u32,
     /// CPU ms of the last prepare() (cull, sort, FrObjects, pipeline lookups) and encode_main()
     pub prepare_ms: f64,
     pub encode_ms: std::cell::Cell<f64>,
@@ -332,6 +335,7 @@ impl ThreeScene {
             objects_off: 0,
             vis3: Vec::new(),
             shadows: Vec::new(),
+            dbg: std::env::var("FASTRENDER_V3_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             prepare_ms: 0.0,
             encode_ms: std::cell::Cell::new(0.0),
             last_t: 0.0,
@@ -846,7 +850,7 @@ impl ThreeScene {
         if id & 0xFF00_0000 == tex::SHADOW {
             let (kind, index) = ((id >> 16) & 0xFF, id & 0xFFFF);
             // only the first directional shadow map is rendered natively today; the rest are lit
-            let ours = kind == tex::DIRECTIONAL && index == 0 && self.view.shadow_vp.is_some() && t.kind == "2d";
+            let ours = kind == tex::DIRECTIONAL && index == 0 && self.view.shadow_vp.is_some() && t.kind == "2d" && self.dbg & 1 == 0;
             let smp = if t.shadow { &p.compare } else { &p.nearest_clamp };
             let lit = if t.kind == "cube" { n.lit_cube.as_ref() } else { n.lit_2d.as_ref() };
             return match (ours, lit) {
@@ -854,6 +858,9 @@ impl ThreeScene {
                 (false, Some(l)) => (l, smp),
                 (false, None) => (&n.white_2d, &p.linear_clamp),
             };
+        }
+        if self.dbg & 16 != 0 {
+            return (&n.white_2d, &p.linear_clamp);
         }
         if id == tex::DFG_LUT && t.kind == "2d" {
             return (&p.dfg, &p.linear_clamp);
@@ -890,6 +897,12 @@ impl ThreeScene {
         for v in &self.vis3 {
             let d = &self.draws[v.i];
             let mat = &self.mats3[&d.material];
+            if (self.dbg & 4 != 0 && d.flags & flag::INSTANCED != 0)
+                || (self.dbg & 8 != 0 && mat.meta.transparent)
+                || (self.dbg & 32 != 0 && !mat.meta.ty.contains("Lambert"))
+            {
+                continue;
+            }
             let Some(prog) = self.progs.progs.get(&mat.meta.program) else { continue };
             let Some(pipe) = self.progs.pipeline_at(v.pipe) else { continue };
             let g = &self.geos[&d.geometry];
@@ -929,7 +942,7 @@ impl ThreeScene {
                 enc.setVertexBufferOffset_atIndex(v.obj, xlat::OBJECT_BLOCK_BUFFER as usize);
                 enc.setFragmentBufferOffset_atIndex(v.obj, xlat::OBJECT_BLOCK_BUFFER as usize);
                 for (k, t) in prog.layout.textures.iter().enumerate() {
-                    if t.index >= MAX_SAMPLERS {
+                    if t.index >= MAX_SAMPLERS || self.dbg & 64 != 0 {
                         continue; // reported when the program was added
                     }
                     let id = self.uni_tex.get(v.tex + k).copied().unwrap_or(0);
@@ -1015,6 +1028,9 @@ impl ThreeScene {
         for &(i, k) in &self.casters {
             let d = &self.draws[i];
             let g = &self.geos[&d.geometry];
+            if self.view.v3 && self.dbg & 2 != 0 {
+                continue;
+            }
             if self.view.v3 {
                 let Some(m) = self.mats3.get(&d.material) else { continue };
                 let side = m.meta.shadow_side.unwrap_or(match m.meta.side { 0 => 1, 1 => 0, s => s });

@@ -47,6 +47,15 @@ jobs:
           bash .github/annotate.sh notice "three-programs selftest" three-programs-selftest.txt 25
           grep -q "three-programs selftest: PASS" three-programs-selftest.txt
           grep "3 frame: output" three-programs-selftest.txt | grep -v "mean rgba = 0 0 0 0"
+      - name: three-programs bisect (FASTRENDER_V3_DEBUG variants, notices only)
+        if: always()
+        run: |
+          out=""
+          for d in 0 1 2 16 17 4 8 32 63; do
+            FASTRENDER_V3_DEBUG=$d ./target/release/fastrender selftest --three js/dist/three-city.js --upscale bilinear --scale 1 --size 640x400 > bisect-$d.txt 2>&1
+            out="$out dbg=$d: $(grep -c 'GPU error' bisect-$d.txt) GPU errors, $(grep '3 frame: output' bisect-$d.txt | sed 's/.*mean/mean/') ;"
+          done
+          echo "::notice title=three-programs bisect::$out"
       - name: selftest
         run: |
           ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000

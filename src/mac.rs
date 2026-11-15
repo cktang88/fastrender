@@ -771,6 +771,8 @@ pub struct Renderer {
     /// so treat this as a relative cost, and wall-clock throughput as the frame cost)
     gpu_times: Arc<Mutex<Vec<f64>>>,
     last_gpu_end: Arc<Mutex<f64>>,
+    /// command buffers that completed with an error (hang, page fault, ...)
+    gpu_errors: Arc<std::sync::atomic::AtomicUsize>,
     frame: u64,
     shadow_center: Option<Vec3>,
     shadow_vp: Mat4,
@@ -815,6 +817,7 @@ impl Renderer {
             sem: Semaphore::new(in_flight),
             gpu_times: Arc::new(Mutex::new(Vec::new())),
             last_gpu_end: Arc::new(Mutex::new(0.0)),
+            gpu_errors: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             frame: 0,
             shadow_center: None,
             shadow_vp: Mat4::IDENTITY,
@@ -1125,6 +1128,7 @@ impl Renderer {
         let sem = self.sem.clone();
         let times = self.gpu_times.clone();
         let last_end = self.last_gpu_end.clone();
+        let errors = self.gpu_errors.clone();
         let handler = RcBlock::new(move |cb: NonNull<CmdBuf>| {
             let cb = unsafe { cb.as_ref() };
             if cb.status() == MTLCommandBufferStatus::Completed {
@@ -1136,6 +1140,7 @@ impl Renderer {
                 *prev = end;
             } else if let Some(e) = cb.error() {
                 eprintln!("GPU error: {}", e.localizedDescription());
+                errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             sem.signal();
         });
@@ -1385,9 +1390,10 @@ impl Renderer {
             if let Some(st) = s.program_stats() {
                 println!("  {st}");
                 let (compiled, pipelines, problems, draws) = s.program_health();
-                let ok = compiled > 0 && pipelines > 0 && problems == 0 && draws > 0;
+                let gpu_errors = self.gpu_errors.load(std::sync::atomic::Ordering::Relaxed);
+                let ok = compiled > 0 && pipelines > 0 && problems == 0 && draws > 0 && gpu_errors == 0;
                 println!(
-                    "three-programs selftest: {} ({compiled} programs, {pipelines} pipelines, {problems} problems, {draws} draws)",
+                    "three-programs selftest: {} ({compiled} programs, {pipelines} pipelines, {problems} problems, {draws} draws, {gpu_errors} GPU errors)",
                     if ok { "PASS" } else { "FAIL" }
                 );
                 if !ok {
