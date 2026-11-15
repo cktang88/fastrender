@@ -839,6 +839,103 @@ else {
   console.log(`[three r${REV}] SHADOWS ids: a kept shadow map stays its light's while trimLights moves its index (1 -> 0 -> 1)`);
 }
 
+// ------------------------------------------------------------------ 13c. a light-count change waits for its programs (lightHold)
+{
+  const build = (answer, opts) => {
+    const h = makeHost();
+    if (answer) h.prewarmPending = (token) => (token === 0 ? answer(0) : answer(token));
+    const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20, ...opts });
+    r.setSize(SIZE.width, SIZE.height);
+    const scene = new THREE.Scene();
+    const a = new THREE.PointLight(0xffaa66, 3, 20); a.position.set(1, 2, 0);
+    const b = new THREE.PointLight(0x66aaff, 0, 20); b.position.set(-1, 2, 0); // dark: goes on later
+    scene.add(new THREE.DirectionalLight(0xffffff, 2), b, a); // (b before a: while held, the light that was on stays)
+    let grime = null;
+    const patched = new THREE.MeshLambertMaterial({ name: 'patched' });
+    patched.onBeforeCompile = (shader) => { grime = shader.uniforms.uGrime = { value: 0.25 }; shader.fragmentShader = 'uniform float uGrime;\n' + shader.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor.rgb *= uGrime;'); };
+    const mats = [new THREE.MeshStandardMaterial({ name: 'std' }), new THREE.MeshPhongMaterial({ name: 'phong' }), patched, new THREE.MeshBasicMaterial({ name: 'basic' })];
+    const meshes = mats.map((m, i) => { const o = new THREE.Mesh(new THREE.BoxGeometry(), m); o.position.x = i * 2 - 3; scene.add(o); return o; });
+    scene.add(new THREE.InstancedMesh(new THREE.BoxGeometry(), mats[0], 3));
+    const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 3, 8); camera.lookAt(0, 0, 0);
+    const frame = () => { r.render(scene, camera); return r._tp.lights.state.point.length; };
+    const notes = () => h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.meta.prewarm !== undefined);
+    const programOf = (id) => h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.id === id && x.meta.program !== undefined).at(-1).meta.program;
+    const grimeOf = () => {
+      const fr = decode(h.cmd), id = fr.draws.find((d, i) => r._drawObjects[i] === meshes[2]).material;
+      const m = h.programs.get(h.programIds.get(programOf(id))).layout.members.find((x) => x.name === 'uGrime');
+      return fr.blocks.get(id).f32[m.offset / 4];
+    };
+    return { h, r, a, b, frame, notes, programOf, grimeOf, setGrime: (v) => { grime.value = v; } };
+  };
+  // a host that compiles in the background and says when the prewarmed pipelines are ready
+  let ready = false, lastToken = 0;
+  const t = build((token) => { lastToken = Math.max(lastToken, token); return token === 0 ? 0 : ready ? 0 : 3; });
+  assert.equal(t.r._tp.lightHold, true);
+  assert.equal(t.frame(), 1, 'the lit lamp');
+  const programs0 = t.h.programs.size;
+  assert.equal(t.notes().length, 0);
+  // the second lamp goes on: the list keeps one point light while the programs for two are prewarmed, a few per frame
+  t.b.intensity = 2;
+  let frames = 0;
+  while (lastToken === 0 && frames < 400) {
+    assert.equal(t.frame(), 1, 'held: still compiled for one point light');
+    assert.ok(Math.abs(t.r._tp.lights.state.point[0].color.r - t.a.color.r * t.a.intensity) < 1e-6, 'held: the light that was on is the one in the list, not the new one before it');
+    frames++;
+  }
+  assert.ok(frames >= 1 && lastToken > 0, 'the prewarm got through its list and asked the host about its token');
+  assert.equal(t.r.info.render.lightsHeld, 1);
+  const notes = t.notes(), last = notes.at(-1);
+  assert.deepEqual([last.id, last.meta.prewarm, last.meta.token > 0], [0, 0, true], 'the last note carries the token');
+  const progs = notes.filter((n) => n.id !== 0);
+  assert.equal(progs.length, 5, 'a note per uploaded instance: 4 materials + the instanced variant');
+  assert.equal(t.h.programs.size, programs0 + 5, 'their programs for the new counts are translated during the hold');
+  for (const n of progs) {
+    const now = t.h.programs.get(t.h.programIds.get(t.programOf(n.id))), next = t.h.programs.get(t.h.programIds.get(n.meta.prewarm));
+    assert.notEqual(n.meta.prewarm, t.programOf(n.id), 'another program than the one the instance is drawn with');
+    const lit = /= pointLights\[ 0 \]/.test(now.fragment);
+    assert.equal(/= pointLights\[ 1 \]/.test(next.fragment), lit, 'a lit program loops over two point lights');
+    assert.ok(!/= pointLights\[ 1 \]/.test(now.fragment));
+  }
+  // what the material is packed from is still what its onBeforeCompile hook handed out (the hook ran again for the prewarm)
+  t.setGrime(0.6);
+  for (let i = 0; i < 5; i++) assert.equal(t.frame(), 1, 'held while the host is compiling');
+  assert.ok(Math.abs(t.grimeOf() - 0.6) < 1e-6, 'an onBeforeCompile uniform edited during the hold is packed');
+  assert.equal(t.notes().length, notes.length, 'nothing is said twice');
+  // ready: the change goes through, with the prewarmed programs (nothing is translated in that frame)
+  ready = true;
+  const before = t.h.programs.size;
+  assert.equal(t.frame(), 2, 'the host is done: two point lights');
+  assert.equal(t.r.info.render.lightsHeld, 0);
+  assert.equal(t.h.programs.size, before, 'no program is translated when the change goes through');
+  for (const n of progs) assert.equal(t.programOf(n.id), n.meta.prewarm, 'the instance now runs the program that was prewarmed for it');
+  t.setGrime(0.8);
+  t.frame();
+  assert.ok(Math.abs(t.grimeOf() - 0.8) < 1e-6, 'and its uniforms are still the hook\'s');
+  // counts that were on screen before are not put off again
+  ready = false;
+  t.b.intensity = 0;
+  for (let i = 0; i < 125; i++) t.frame();
+  assert.equal(t.frame(), 1, 'back to one (after the trim hold)');
+  t.b.intensity = 2;
+  assert.equal(t.frame(), 2, 'two again: at once, its programs exist');
+  // a host that never gets ready: the change goes through after LIGHT_HOLD_MAX frames
+  const never = build((token) => (token === 0 ? 0 : -1));
+  never.frame();
+  never.b.intensity = 2;
+  let held = 0;
+  while (never.frame() === 1 && held < 1000) held++;
+  assert.ok(held >= 150 && held <= 200, `never ready: held ${held} frames, then through`);
+  // hosts that cannot tell (Electron, the tests' own) or compile synchronously (-2): no hold, as before
+  const sync = build(() => -2), plain = build(null), off = build(() => 0, { lightHold: false });
+  for (const x of [sync, plain, off]) {
+    assert.equal(x.r._tp.lightHold, false);
+    x.frame(); x.b.intensity = 2;
+    assert.equal(x.frame(), 2, 'no hold: the change goes through in the same frame');
+    assert.equal(x.notes().length, 0);
+  }
+  console.log(`[three r${REV}] lightHold: a light-count change is put off ${frames} frames while 5 programs are prewarmed (notes + token), goes through when the host is ready (0 translations in that frame), at once for counts seen before, after ${held} frames when the host never answers`);
+}
+
 // ------------------------------------------------------------------ 14. userData.frInstanceCull travels with the instance upload
 {
   const h = makeHost();
@@ -863,10 +960,13 @@ else {
   const disp = new THREE.MeshStandardMaterial({ name: 'disp', displacementMap: new THREE.DataTexture(new Uint8Array(4).fill(128), 1, 1) });
   disp.displacementMap.needsUpdate = true;
   const own = new THREE.ShaderMaterial({ name: 'own', vertexShader: 'void main() { gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position * 2.0, 1.0); }', fragmentShader: 'void main() { gl_FragColor = vec4(1.0); }' });
-  const mats2 = [new THREE.MeshStandardMaterial({ name: 'plain' }), sway, Object.assign(new Wobble(), { name: 'wobble' }), disp, own];
+  // (a hook that only touches the fragment shader leaves the vertices where three puts them)
+  const tint = new THREE.MeshLambertMaterial({ name: 'tint' });
+  tint.onBeforeCompile = (sh) => { sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor.rgb *= 0.5;'); };
+  const mats2 = [new THREE.MeshStandardMaterial({ name: 'plain' }), sway, Object.assign(new Wobble(), { name: 'wobble' }), disp, own, tint];
   for (const m of mats2) scene2.add(new THREE.InstancedMesh(new THREE.BoxGeometry(), m, 4));
   r2.render(scene2, camera);
   const custom = Object.fromEntries(h2.uploads.filter((x) => x.kind === KIND.MATERIAL).map((x) => [x.meta.name, x.meta.vertexCustom]));
-  assert.deepEqual(custom, { plain: false, sway: true, wobble: true, disp: true, own: true }, 'vertexCustom: onBeforeCompile (own or in the class), displacementMap, ShaderMaterial');
-  console.log(`[three r${REV}] userData.frInstanceCull: sent with the instance upload (true -> 0, radius -> radius); MATERIAL meta vertexCustom for onBeforeCompile / displacementMap / ShaderMaterial`);
+  assert.deepEqual(custom, { plain: false, sway: true, wobble: true, disp: true, own: true, tint: false }, 'vertexCustom: an onBeforeCompile that rewrites the vertex shader (own or in the class), displacementMap, ShaderMaterial');
+  console.log(`[three r${REV}] userData.frInstanceCull: sent with the instance upload (true -> 0, radius -> radius); MATERIAL meta vertexCustom for a vertex-stage onBeforeCompile / displacementMap / ShaderMaterial`);
 }

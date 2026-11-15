@@ -796,9 +796,35 @@ impl<B: PipelineBackend> Compiler<B> {
     }
 }
 
+/// What `host.prewarmPending(token)` answers the JS side (js/three-programs.js `_holdLights`: a change of the light
+/// counts is put off while the pipelines of the programs it brings compile in the background):
+/// -2: not applicable, everything is compiled where it is first needed (blocking mode: nothing is put off);
+/// -1: the notes up to `token` have not been applied yet (they are applied after the frame that wrote them);
+/// otherwise the number of pipelines queued by prewarm notes that are still compiling (0: the change can go through).
+/// `applied`: the last token applied; `token` 0 asks whether the host does this at all.
+pub fn prewarm_answer(blocking: bool, applied: u32, pending: usize, token: u32) -> i32 {
+    if blocking {
+        -2
+    } else if applied < token {
+        -1
+    } else {
+        pending.min(i32::MAX as usize) as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prewarm_answers() {
+        assert_eq!(prewarm_answer(true, 9, 0, 3), -2, "blocking mode: nothing is put off");
+        assert_eq!(prewarm_answer(true, 0, 0, 0), -2);
+        assert!(prewarm_answer(false, 0, 0, 0) >= 0, "the capability probe");
+        assert_eq!(prewarm_answer(false, 2, 0, 3), -1, "token 3 was written this frame: not applied yet");
+        assert_eq!(prewarm_answer(false, 3, 5, 3), 5, "applied, 5 pipelines still compiling");
+        assert_eq!(prewarm_answer(false, 4, 0, 3), 0, "ready: the change goes through");
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]

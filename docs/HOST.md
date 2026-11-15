@@ -112,6 +112,10 @@ renderer process (V8, real DOM / 2D canvas / workers)           main process
   host boundary is `fastrender::host::FrameSource` ("frame words + resource messages + program requests in, Metal
   out"): `jsc::ScriptHost` implements it in-process; Electron's `FeedSource` is filled by the addon's render thread.
   `ThreeScene::with_source` / `Renderer::with_source` take any source (the JavaScriptCore path is unchanged).
+- **Light-count changes.** `host.prewarmPending` (docs/PROTOCOL.md "Prewarm notes") is JavaScriptCore-only so far
+  (`__fr.prewarmPending`, src/jsc.rs): the Electron game process cannot ask the render thread in the main process, so
+  there a light-count change goes through at once and the render thread waits for the pipelines that replace ones on
+  screen. A counter in the shared header next to `frames_skipped` would be enough to add it.
 - **Programs.** `host.program(key, vs, fs, id)` stays synchronous in the renderer process: the addon there links the
   same `fastrender::xlat::host_program` (disk cache `~/Library/Caches/fastrender/shaders`, glslang warmed up on
   attach) and returns the layout; the translated MSL goes to the main process as a PROGRAM message, ordered before any

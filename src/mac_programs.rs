@@ -14,6 +14,9 @@
 //! everything in blocking mode (the golden / bench / selftest harness: the frame sequence is then exactly the
 //! synchronous one).
 //!
+//! What keeps those main-pass waits rare: the JS side puts a change of the light counts off while the programs it
+//! brings compile here in the background (`prewarm` notes, `prewarm_pending`; js/three-programs.js `_holdLights`).
+//!
 //! Binding convention (src/xlat.rs): default uniform block buffer(1), FrObject buffer(2), FrFrame buffer(3), both
 //! stages, FrPass (gl_FragCoord origin) fragment buffer(0); vertex attribute at location L reads vertex buffer 4 + L
 //! (a mat4 attribute's 4 columns share one buffer); texture slots carry per-stage texture / sampler indices (a fixed
@@ -24,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -59,7 +62,7 @@ pub const ATTR_BUFFER0: usize = 4;
 pub const MAX_SAMPLERS: u32 = 16;
 
 /// One vertex input of a program.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgAttr {
     /// interned attribute name (`Programs::name_id`)
     pub name: u32,
@@ -186,6 +189,8 @@ pub struct Programs {
     skipped_at_poll: u64,
     /// pending slots the pass being prepared must not skip (`require`), until `wait_required`
     required: Vec<u32>,
+    /// slots queued by prewarm notes (`prewarm`) that are still compiling: what `prewarm_pending` reports
+    prewarm_slots: Vec<u32>,
     stats: CompileStats,
     last_poll: Option<Instant>,
     last_persist: Instant,
@@ -210,6 +215,16 @@ fn since_start() -> f64 { mark_start().elapsed().as_secs_f64() * 1000.0 }
 /// every program and pipeline is then waited for where it is first needed, so each frame is complete and the
 /// frame sequence is deterministic. `FASTRENDER_COMPILE=async|blocking` overrides it.
 pub fn set_blocking_default(blocking: bool) { BLOCKING_DEFAULT.store(blocking, Ordering::Relaxed) }
+
+/// The prewarm handshake with the JS side (`prewarm_pending`): the last token applied and the pipelines of prewarm
+/// notes still compiling. Written by the render thread (`Programs::prewarm`, `prewarm_token`, `poll`).
+static PREWARM_TOKEN: AtomicU32 = AtomicU32::new(0);
+static PREWARM_PENDING: AtomicUsize = AtomicUsize::new(0);
+
+/// `host.prewarmPending(token)` (src/jsc.rs): see `pipeline_manifest::prewarm_answer`.
+pub fn prewarm_pending(token: u32) -> i32 {
+    pm::prewarm_answer(blocking_mode(), PREWARM_TOKEN.load(Ordering::Relaxed), PREWARM_PENDING.load(Ordering::Relaxed), token)
+}
 
 fn blocking_mode() -> bool {
     match std::env::var("FASTRENDER_COMPILE").as_deref() {
@@ -369,6 +384,7 @@ impl Programs {
             skipped: Cell::new(0),
             skipped_at_poll: 0,
             required: Vec::new(),
+            prewarm_slots: Vec::new(),
             stats: CompileStats { blocking, workers, ..Default::default() },
             last_poll: None,
             last_persist: Instant::now(),
@@ -486,6 +502,7 @@ impl Programs {
     /// and the archive (on a worker) when the queue is idle and there is something new.
     pub fn poll(&mut self) {
         self.drain();
+        self.publish_prewarm();
         let now = Instant::now();
         let q = self.compiler.stats();
         let pending = q.pending_programs + q.pending_pipelines;
@@ -669,11 +686,41 @@ impl Programs {
         keys.len()
     }
 
+    /// A prewarm note from the JS side (MATERIAL `{prewarm}`, docs/PROTOCOL.md): `m.program` is about to take the
+    /// place of the program a material instance is drawn with (a light count will step). Its pipeline for these
+    /// streams and this target is queued now and never waited for here; when the instance is uploaded with that
+    /// program the slot is found, ready if the JS side put the change off until `prewarm_pending` said 0.
+    pub fn prewarm(&mut self, m: &ProgramMaterialMeta, sig: StreamSig, target: Target) {
+        if let Some(i) = self.pipeline_slot(m, sig, target, false) {
+            if self.pending(i) && !self.prewarm_slots.contains(&i) {
+                self.prewarm_slots.push(i);
+            }
+        }
+        self.publish_prewarm();
+    }
+
+    /// Every prewarm note up to `token` has been applied (the JS side asks `prewarm_pending(token)`).
+    pub fn prewarm_token(&mut self, token: u32) {
+        PREWARM_TOKEN.fetch_max(token, Ordering::Relaxed);
+        self.publish_prewarm();
+    }
+
+    fn publish_prewarm(&mut self) {
+        let slots = &self.slots;
+        self.prewarm_slots.retain(|&i| matches!(slots.get(i as usize), Some(Slot::Pending { .. })));
+        PREWARM_PENDING.store(self.prewarm_slots.len(), Ordering::Relaxed);
+    }
+
     /// The pipeline slot for a material instance drawn with `sig` streams: queued for compilation on first use
     /// (ready at once when the manifest prewarmed it), then cached; a failed build is cached too. None: it failed.
     /// The main pass does not wait here (its caller may `require` the slot); a render target or shadow map does (see
     /// the module doc), as does blocking mode.
     pub fn pipeline(&mut self, _dev: &Device, m: &ProgramMaterialMeta, sig: StreamSig, target: Target) -> Option<u32> {
+        let wait = self.blocking || target != Target::Main;
+        self.pipeline_slot(m, sig, target, wait)
+    }
+
+    fn pipeline_slot(&mut self, m: &ProgramMaterialMeta, sig: StreamSig, target: Target, wait: bool) -> Option<u32> {
         let key = match target {
             Target::Main | Target::Rt(_) => PipeKey { prog: m.program, blend: three::blend_of(m), color_write: m.color_write, sig, target },
             // WebGLShadowMap: NoBlending; the colour attachment is not there (Depth) or always written (Rg16)
@@ -703,7 +750,7 @@ impl Programs {
             Status::Pending => {
                 self.slots.push(Slot::Pending { label });
                 self.waiting_pipes.entry(pk).or_default().push(i);
-                if self.blocking || target != Target::Main {
+                if wait {
                     let t = Instant::now();
                     self.compiler.wait_pipeline(&pk);
                     self.stats.waits += 1;

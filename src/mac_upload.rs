@@ -138,6 +138,7 @@ impl ThreeScene {
                         kind::TEXTURE if meta.contains("\"framebuffer\":true") => self.targets.framebuffer_texture(dev, id, &meta),
                         kind::TEXTURE => self.upload_texture(dev, id, &meta, &arrays),
                         kind::RENDER_TARGET => self.targets.upload(dev, id, &meta),
+                        kind::MATERIAL if meta.contains("\"prewarm\":") => self.prewarm_material(id, &meta),
                         kind::MATERIAL if meta.contains("\"program\":") => self.upload_program_material(dev, id, &meta),
                         kind::MATERIAL => self.upload_material(id, &meta),
                         kind::INSTANCES => self.upload_instances(dev, id, &meta, &arrays),
@@ -415,6 +416,37 @@ impl ThreeScene {
         }
         if let Some(old) = self.insts.insert(id, Inst { rows: buffer_with(dev, &rows[..m.count * 12]), cols: buffer_with(dev, &cols), colors, count: m.count, hint: m.cull, cull: None }) {
             old.bury(&mut self.dead);
+        }
+        Ok(())
+    }
+
+    /// MATERIAL `{ prewarm, token }` (docs/PROTOCOL.md): program `prewarm` will take the place of the program
+    /// instance `id` is drawn with. Its pipelines for the streams and targets the instance is drawn with now are
+    /// queued (the two programs must take the same vertex inputs: a stream signature is per attribute list; they do
+    /// when only the light counts differ). `token` != 0: every note up to it has been applied.
+    fn prewarm_material(&mut self, id: u32, meta: &str) -> Result<(), String> {
+        #[derive(serde::Deserialize)]
+        struct Note {
+            prewarm: u32,
+            #[serde(default)]
+            token: u32,
+        }
+        let n: Note = serde_json::from_str(meta).map_err(|e| e.to_string())?;
+        if let Some(m) = self.mats3.get(&id).filter(|_| n.prewarm != 0) {
+            let same_inputs = match (self.progs.progs.get(&m.meta.program), self.progs.progs.get(&n.prewarm)) {
+                (Some(a), Some(b)) => a.attrs == b.attrs,
+                _ => false,
+            };
+            if same_inputs {
+                let meta = ProgramMaterialMeta { program: n.prewarm, ..m.meta.clone() };
+                let pipes: Vec<(StreamSig, Target)> = m.pipes.iter().filter(|p| p.2 != u32::MAX).map(|p| (p.0, p.1)).collect();
+                for (sig, target) in pipes {
+                    self.progs.prewarm(&meta, sig, target);
+                }
+            }
+        }
+        if n.token != 0 {
+            self.progs.prewarm_token(n.token);
         }
         Ok(())
     }

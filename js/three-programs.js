@@ -479,6 +479,14 @@ const OBJECT_SPECIFIC = ['bindMatrix', 'bindMatrixInverse', 'boneTexture', 'morp
 
 /** frames the lit count of a kind must stay lower before _trimLights lets its kept count shrink */
 const TRIM_HOLD = 120;
+/** frames a change of the light counts may be put off while its programs compile (_holdLights); then it goes through */
+export const LIGHT_HOLD_MAX = 180;
+/** JS ms per frame spent picking and translating the programs of a light-count change that is being put off */
+const PREWARM_MS = 2;
+/** ... and at most this many programs translated per frame (a translation is 4-5 ms; a clock may stand still) */
+const PREWARM_NEW = 2;
+const now = typeof performance !== 'undefined' && performance.now ? () => performance.now() : () => Date.now();
+function sameCounts(a, b) { return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]; }
 /** _trimLights' kind of a light: 0 point, 1 point with a shadow, 2 spot, 3 spot with a shadow; -1: not trimmed */
 function trimClass(l) {
   if (l.isPointLight === true) return l.castShadow ? 1 : 0;
@@ -495,6 +503,24 @@ export function lightStep(n) {
   if (n <= 4) return n;
   let s = 4;
   for (;;) { if (n <= s * 1.5) return s * 1.5; if (n <= s * 2) return s * 2; s *= 2; }
+}
+
+/**
+ * `src` without the trimmed lights over the counts, into `dst` (may be `src`): per trim class the first `nLit[c]` lit
+ * and the first `nDark[c]` dark lights stay, in order; other lights all stay. Returns the length. Counts down in
+ * nLit / nDark.
+ */
+function filterLights(src, dst, nLit, nDark) {
+  let n = 0;
+  for (let i = 0; i < src.length; i++) {
+    const l = src[i], c = trimClass(l);
+    if (c >= 0) {
+      const left = isDark(l) ? nDark : nLit;
+      if (left[c] > 0) left[c]--; else continue;
+    }
+    dst[n++] = l;
+  }
+  return n;
 }
 
 function materialNeedsLights(m) {
@@ -659,10 +685,20 @@ export class ThreePrograms {
     this._size = { x: 1, y: 1, set(x, y) { this.x = x; this.y = y; return this; } };
     this._casters = []; this._casterPool = []; this._nCasters = 0;
     /** per frame: uniform blocks refreshed, and how many of them changed (any word) since the previous frame */
-    this.stats = { blocks: 0, changed: 0, lightPrograms: 0, lightsDropped: 0 };
+    this.stats = { blocks: 0, changed: 0, lightPrograms: 0, lightsDropped: 0, lightsHeld: 0 };
     this._transmissionRT = { texture: { isFastRenderTransmission: true }, width: 1, height: 1 };
     // dark point / spot lights leave three's light state (see _trimLights); false: every visible light, as WebGLRenderer
     this.trimLights = opts.trimLights !== false && opts.trimLights !== 0;
+    // a change of the trimmed light counts waits until the programs for the new counts are compiled (_holdLights).
+    // Only with a host that compiles in the background and can say when it is done: host.prewarmPending(token) ->
+    // pipelines of that prewarm still compiling, -1 not seen yet, -2 not applicable (it compiles synchronously)
+    this.prewarmInstance = opts.prewarmInstance || null; // (inst | null, prog | null, token) => void
+    this.lightHold = this.trimLights && opts.lightHold !== false && opts.lightHold !== 0 && this.prewarmInstance !== null && typeof WeakRef === 'function' &&
+      !!this.host && typeof this.host.prewarmPending === 'function' && this.host.prewarmPending(0) !== -2;
+    this._prewarmTokens = 0;
+    /** light-count changes put off so far, the passes they were put off for, the programs picked ahead for them */
+    this.holdStats = { changes: 0, passes: 0, programs: 0 };
+    this._ss = null; // the scene state of the pass being written
     this._emptyScene = { isScene: true, fog: null, environment: null };
   }
 
@@ -670,14 +706,15 @@ export class ThreePrograms {
   beginFrame(scene, camera, lights) {
     const r = this.facade;
     this._frameNo++;
-    this.stats.blocks = 0; this.stats.changed = 0; this.stats.lightPrograms = 0;
+    this.stats.blocks = 0; this.stats.changed = 0; this.stats.lightPrograms = 0; this.stats.lightsHeld = 0;
     this.scene = scene; this.camera = camera;
     // shadow matrices: WebGLShadowMap would update these while rendering shadow maps (native renders them). As in
     // WebGLShadowMap.render, a map is re-rendered only while renderer.shadowMap and the light's shadow have autoUpdate
     // or needsUpdate (needsUpdate is then cleared); otherwise the native side keeps the last map and three keeps the
     // matching shadow matrix (CSM games refresh far cascades every few frames; padding lights never)
     let ss = this._sceneStates.get(scene);
-    if (ss === undefined) this._sceneStates.set(scene, (ss = { lights: new WebGLLights(this._extensions), key: [], epoch: 0, trim: null }));
+    if (ss === undefined) this._sceneStates.set(scene, (ss = { lights: new WebGLLights(this._extensions), key: [], epoch: 0, trim: null, live: [], alt: null }));
+    this._ss = ss;
     this.stats.lightsDropped = this.trimLights ? this._trimLights(lights, ss) : 0;
     const shadows = this.shadows, sm = r.shadowMap;
     const all = sm.enabled && (sm.autoUpdate !== false || sm.needsUpdate === true);
@@ -720,10 +757,13 @@ export class ThreePrograms {
     const fog = scene.fog || null;
     // (per scene: each scene keeps its own epoch; materials keep their variants per epoch)
     if (changed(ss.key, state.version, fog, fog !== null && fog.isFogExp2 === true, scene.environment || null, r.toneMapping, r.outputColorSpace,
-      r.shadowMap.enabled, r.shadowMap.type, this.clipping.numPlanes, this.clipping.numIntersection)) ss.epoch = ++this._epochs;
+      r.shadowMap.enabled, r.shadowMap.type, this.clipping.numPlanes, this.clipping.numIntersection)) { ss.epoch = ++this._epochs; ss.live.length = 0; }
     this._epoch = ss.epoch;
     // what refreshFogUniforms reads (fog values; the colour space follows the output colour space)
     if (fog !== null && changed(this._fogKey, fog, fog.color.r, fog.color.g, fog.color.b, fog.near, fog.far, fog.density, r.outputColorSpace, 0, 0)) this._fogStamp++;
+    // a light-count change that is being put off: a few more of its programs (the frame's state is all set now)
+    const hold = ss.trim !== null ? ss.trim.hold : null;
+    if (hold !== null && !hold.done) this._prewarm(ss, hold, scene);
   }
 
   /**
@@ -740,10 +780,15 @@ export class ThreePrograms {
    * for shadow lights), filled with the scene's own dark lights, and it only shrinks after the lit count has been
    * lower for TRIM_HOLD frames. So a light that blinks, or a few that fade in one after the other, cause few program
    * changes, and a variant seen once is cached (ms.programs, the native pipeline cache).
+   *
+   * When the counts do change, every lit program is another one. With a host that compiles in the background the
+   * change is put off (`lightHold`, _holdLights): the list keeps the counts it had (lights that just lit up wait,
+   * dark ones fill in) while the programs for the new counts are picked, translated and compiled a few per frame
+   * (_prewarm), and it goes through when the host says they are ready.
    */
   _trimLights(lights, ss) {
-    const t = ss.trim || (ss.trim = { frame: 0, held: [0, 0, 0, 0], since: [0, 0, 0, 0], lit: [0, 0, 0, 0], dark: [0, 0, 0, 0], keep: [0, 0, 0, 0] });
-    const lit = t.lit, dark = t.dark, keep = t.keep;
+    const t = ss.trim || (ss.trim = { frame: 0, held: [0, 0, 0, 0], since: [0, 0, 0, 0], lit: [0, 0, 0, 0], dark: [0, 0, 0, 0], keep: [0, 0, 0, 0], want: [0, 0, 0, 0], shape: null, seen: new Set(), hold: null, inList: new Set(), old: [0, 0, 0, 0], fresh: [0, 0, 0, 0] });
+    const lit = t.lit, dark = t.dark, keep = t.keep, want = t.want;
     lit[0] = lit[1] = lit[2] = lit[3] = 0; dark[0] = dark[1] = dark[2] = dark[3] = 0;
     for (let i = 0; i < lights.length; i++) {
       const l = lights[i], c = trimClass(l);
@@ -753,20 +798,129 @@ export class ThreePrograms {
     t.frame++;
     let drop = 0;
     for (let c = 0; c < 4; c++) {
-      const want = (c & 1) === 1 ? lit[c] : lightStep(lit[c]);
-      if (want >= t.held[c] || t.frame - t.since[c] > TRIM_HOLD) { t.held[c] = want; t.since[c] = t.frame; }
+      const step = (c & 1) === 1 ? lit[c] : lightStep(lit[c]);
+      if (step >= t.held[c] || t.frame - t.since[c] > TRIM_HOLD) { t.held[c] = step; t.since[c] = t.frame; }
       keep[c] = Math.min(dark[c], Math.max(0, t.held[c] - lit[c]));
-      drop += dark[c] - keep[c];
+      want[c] = lit[c] + keep[c];
     }
-    if (drop === 0) return 0;
-    let n = 0;
-    for (let i = 0; i < lights.length; i++) {
-      const l = lights[i], c = trimClass(l);
-      if (c >= 0 && isDark(l)) { if (keep[c] > 0) keep[c]--; else continue; }
-      lights[n++] = l;
+    // the counts of this frame's list: the wanted ones, or the ones it had while a change is put off
+    const count = this.lightHold ? this._holdLights(t, lights) : want;
+    if (count !== want) {
+      // put off: the lit lights that were in the list stay (a light that is on does not go out because another one
+      // came on before it in the list), then other lit ones, then dark ones, up to the counts the list had
+      this.stats.lightsHeld = 1; this.holdStats.passes++;
+      const was = t.inList, old = t.old, fresh = t.fresh;
+      old[0] = old[1] = old[2] = old[3] = 0;
+      for (let i = 0; i < lights.length; i++) { const l = lights[i], c = trimClass(l); if (c >= 0 && !isDark(l) && was.has(l)) old[c]++; }
+      for (let c = 0; c < 4; c++) {
+        const nl = Math.min(lit[c], count[c]);
+        old[c] = Math.min(old[c], nl); fresh[c] = nl - old[c];
+        keep[c] = Math.min(dark[c], count[c] - nl);
+        drop += dark[c] - keep[c];
+      }
+      let n = 0;
+      for (let i = 0; i < lights.length; i++) {
+        const l = lights[i], c = trimClass(l);
+        if (c >= 0) {
+          const left = isDark(l) ? keep : was.has(l) ? old : fresh;
+          if (left[c] > 0) left[c]--; else continue;
+        }
+        lights[n++] = l;
+      }
+      lights.length = n;
+      return drop;
     }
-    lights.length = n;
+    for (let c = 0; c < 4; c++) drop += dark[c] - keep[c];
+    if (drop !== 0) lights.length = filterLights(lights, lights, lit, keep);
+    if (this.lightHold) {
+      // the lit lights of the list, for a frame that has to put a change off
+      const was = t.inList;
+      was.clear();
+      for (let i = 0; i < lights.length; i++) { const l = lights[i]; if (trimClass(l) >= 0 && !isDark(l)) was.add(l); }
+    }
     return drop;
+  }
+
+  /**
+   * The light counts this frame's list gets while `lightHold` is on: `t.want` (what _trimLights computed), or, while
+   * a change is put off, the counts the list had (`t.shape`). A change is put off when the lights there are can
+   * still make up the old counts and these new counts have not been on screen before (then their programs exist);
+   * `t.hold` then holds the new counts and the list they give (for _prewarm). It goes through when the prewarm has
+   * handed everything to the host and the host says nothing of it is compiling any more, or after LIGHT_HOLD_MAX
+   * frames (the native side then waits for what is missing rather than drawing without it).
+   */
+  _holdLights(t, lights) {
+    const want = t.want, key = want.join();
+    if (t.shape === null || sameCounts(want, t.shape)) return this._commitLights(t, key);
+    for (let c = 0; c < 4; c++) if (t.lit[c] + t.dark[c] < t.shape[c]) return this._commitLights(t, key); // lights left the scene
+    if (t.seen.has(key)) return this._commitLights(t, key);
+    let h = t.hold;
+    if (h === null || !sameCounts(h.want, want)) {
+      // the list with the new counts, for the prewarm's own WebGLLights (a copy: setup sorts it)
+      const list = lights.slice(), nl = [0, 0, 0, 0], nk = [0, 0, 0, 0];
+      for (let c = 0; c < 4; c++) { nl[c] = t.lit[c]; nk[c] = want[c] - t.lit[c]; }
+      list.length = filterLights(lights, list, nl, nk);
+      if (h === null) this.holdStats.changes++;
+      h = t.hold = { want: want.slice(), since: h !== null ? h.since : t.frame, list, shadows: null, cursor: 0, done: false, token: 0 };
+    }
+    if (t.frame - h.since > LIGHT_HOLD_MAX) return this._commitLights(t, key);
+    if (h.done && this.host.prewarmPending(h.token) === 0) return this._commitLights(t, key);
+    return t.shape;
+  }
+
+  _commitLights(t, key) {
+    if (t.shape === null) t.shape = [0, 0, 0, 0];
+    for (let c = 0; c < 4; c++) t.shape[c] = t.want[c];
+    t.seen.add(key);
+    t.hold = null;
+    return t.want;
+  }
+
+  /**
+   * The programs of a light-count change that is being put off (`h`, _holdLights): for every material variant this
+   * scene drew since its programs last changed, the program three picks with the new counts (translated and handed
+   * to the host by _acquireProgram, as when it is first drawn), and for each of its uploaded instances a note to the
+   * host that this program will take the instance's place (`prewarmInstance`: the native side builds the pipelines
+   * the instance is drawn with, for the new program, in the background). PREWARM_MS of JS or PREWARM_NEW translations
+   * per frame. When the list is through, a last note carries the token _holdLights asks the host about.
+   */
+  _prewarm(ss, h, scene) {
+    // (a bare JavaScriptCore context has no performance.now: the host's clock)
+    const clock = this.host !== null && typeof this.host.now === 'function' ? this.host : null;
+    const live = ss.live, t0 = clock !== null ? clock.now() : now();
+    const lights = this.lights, shadows = this.shadows;
+    let translated = 0;
+    try {
+      if (h.shadows === null) {
+        if (ss.alt === null) ss.alt = new WebGLLights(this._extensions);
+        ss.alt.setup(h.list);
+        h.shadows = h.list.filter((l) => l.castShadow && l.shadow);
+      }
+      this.lights = ss.alt; this.shadows = h.shadows;
+      const sc = scene && scene.isScene ? scene : this._emptyScene;
+      while (h.cursor < live.length) {
+        const e = live[h.cursor++];
+        const object = e.object.deref();
+        // (a material disposed or changed since, an object that is gone: its variant is not the one drawn any more)
+        if (object === undefined || this._ms.get(e.material) !== e.ms || e.ms.variants === null || e.ms.variants.get(e.sig) !== e.variant) continue;
+        const known = this.programs.size;
+        const prog = this._getProgram(e.material, sc, object, e.ms, true);
+        if (this.programs.size !== known) { translated++; this.holdStats.programs++; }
+        if (prog.packer && prog !== e.variant.program) {
+          const insts = e.variant.slot.inst;
+          for (let i = 0; i < insts.length; i++) if (insts[i] !== null && !insts[i].disposed) this.prewarmInstance(insts[i], prog, 0);
+        }
+        if (translated >= PREWARM_NEW || (clock !== null ? clock.now() : now()) - t0 > PREWARM_MS) break;
+      }
+    } catch (e) {
+      h.cursor = live.length; // a program that cannot be picked now: the change goes through without it
+    }
+    this.lights = lights; this.shadows = shadows;
+    if (h.cursor >= live.length) {
+      h.done = true;
+      h.token = ++this._prewarmTokens;
+      this.prewarmInstance(null, null, h.token);
+    }
   }
 
   /**
@@ -776,7 +930,7 @@ export class ThreePrograms {
    */
   saveFrame() {
     const f = this.frame, s = this._savePool.pop() || { holders: [], shadows: [], keep: [] };
-    s.scene = this.scene; s.camera = this.camera; s.lights = this.lights; s.lightList = this.lightList; s.epoch = this._epoch;
+    s.scene = this.scene; s.camera = this.camera; s.lights = this.lights; s.lightList = this.lightList; s.epoch = this._epoch; s.ss = this._ss;
     s.clipping = this._clippingEnabled; s.height = this._height; s.trW = this._transmissionRT.width; s.trH = this._transmissionRT.height;
     s.proj = f.projectionMatrix.value; s.view = f.viewMatrix.value; s.ortho = f.isOrthographic.value; s.exposure = f.toneMappingExposure.value; s.logDepth = f.logDepthBufFC.value;
     s.cx = this._camPos.x; s.cy = this._camPos.y; s.cz = this._camPos.z;
@@ -791,7 +945,7 @@ export class ThreePrograms {
   restoreFrame(s) {
     const f = this.frame;
     this._frameNo++; // material uniforms and light blocks are refreshed again for this pass's camera
-    this.scene = s.scene; this.camera = s.camera; this.lights = s.lights; this.lightList = s.lightList; this._epoch = s.epoch;
+    this.scene = s.scene; this.camera = s.camera; this.lights = s.lights; this.lightList = s.lightList; this._epoch = s.epoch; this._ss = s.ss;
     this._clippingEnabled = s.clipping; this._height = s.height; this._transmissionRT.width = s.trW; this._transmissionRT.height = s.trH;
     f.projectionMatrix.value = s.proj; f.viewMatrix.value = s.view; f.isOrthographic.value = s.ortho; f.toneMappingExposure.value = s.exposure; f.logDepthBufFC.value = s.logDepth;
     this._camPos.x = s.cx; this._camPos.y = s.cy; this._camPos.z = s.cz; f.cameraPosition.value = this._camPos;
@@ -800,7 +954,7 @@ export class ThreePrograms {
     for (let i = 0; i < LIGHT_WIRING.length; i++) this._lightHolders[LIGHT_WIRING[i][0]].value = s.holders[i];
     // the same scene's WebGLLights may have been set up for the hook's camera: view-space light state for ours again
     if (this.lightList && this.camera) { this.lights.setup(this.lightList); this.lights.setupView(this.lightList, this.camera); }
-    s.scene = s.camera = s.lights = s.lightList = null;
+    s.scene = s.camera = s.lights = s.lightList = s.ss = null;
     this._savePool.push(s);
   }
 
@@ -859,6 +1013,20 @@ export class ThreePrograms {
       const mp = this.properties.get(material);
       variant = { program, slot, envMap: mp.envMap, environment: mp.environment, envMapRotation: mp.envMapRotation, fog: mp.fog };
       ms.variants.set(sig, variant);
+      // what this scene draws with the programs of this epoch: what a light-count change has to prewarm (_prewarm)
+      if (this.lightHold && this._ss !== null && ms.epoch === this._ss.epoch) {
+        const ss = this._ss, live = ss.live;
+        live.push({ material, ms, sig, variant, object: new WeakRef(object) });
+        // a material whose version moves every frame makes a new variant every frame: drop the entries that are not
+        // the variant drawn any more (a prewarm under way starts over; what it already picked is cached)
+        if (live.length > (ss.liveCap || 4096)) {
+          let n = 0;
+          for (let i = 0; i < live.length; i++) { const e = live[i]; if (this._ms.get(e.material) === e.ms && e.ms.variants !== null && e.ms.variants.get(e.sig) === e.variant && e.object.deref() !== undefined) live[n++] = e; }
+          live.length = n;
+          ss.liveCap = Math.max(4096, n * 2);
+          if (ss.trim !== null && ss.trim.hold !== null && !ss.trim.hold.done) ss.trim.hold.cursor = 0;
+        }
+      }
     }
     if (variant !== ms.lastVariant) {
       // what WebGLMaterials.refreshMaterialUniforms reads from the material properties, as this variant's program saw it
@@ -909,8 +1077,13 @@ export class ThreePrograms {
     this._ms.delete(material);
   }
 
-  /** mirrors WebGLRenderer.getProgram: parameters, cache key, onBeforeCompile, light wiring */
-  _getProgram(material, scene, object, ms) {
+  /**
+   * mirrors WebGLRenderer.getProgram: parameters, cache key, onBeforeCompile, light wiring.
+   * `prewarm`: for the light state and shadow list a held light-count change will bring (this.lights / this.shadows
+   * are those for the call, _prewarm): the program is picked, compiled and remembered (ms.programs), nothing the
+   * material is drawn with now is touched (its uniforms object stays, nothing is wired to that light state)
+   */
+  _getProgram(material, scene, object, ms, prewarm = false) {
     const lights = this.lights;
     const mp = this.properties.get(material);
     // WebGLMaterials reads these from the material properties (as WebGLRenderer.getProgram sets them); the env map
@@ -926,12 +1099,21 @@ export class ThreePrograms {
     const key = this.programCache.getProgramCacheKey(parameters);
     let prog = ms.programs.get(key);
     if (prog === undefined) {
-      parameters.uniforms = this.programCache.getUniforms(material);
+      // (prewarm: the material's own uniforms object, so what an onBeforeCompile hook keeps of it stays the object
+      // the material is packed from; the hook may replace holders in it, hence the new generation)
+      parameters.uniforms = prewarm && ms.uniforms !== null ? ms.uniforms : this.programCache.getUniforms(material);
+      const vertex = parameters.vertexShader;
       material.onBeforeCompile(parameters, this.facade);
       prog = this._acquireProgram(parameters, key);
+      // the hook rewrote the vertex stage: it may place vertices elsewhere than three's own does (vertexCustom)
+      if (parameters.vertexShader !== vertex) prog.vertexHooked = true;
       ms.programs.set(key, prog);
       ms.uniforms = parameters.uniforms;
       ms.uniformsGen++;
+    }
+    if (prewarm) {
+      ms.lastVariant = null; // the next draw puts the material properties of its own variant back
+      return prog;
     }
     const uniforms = ms.uniforms;
     if ((!material.isShaderMaterial && !material.isRawShaderMaterial) || material.clipping === true) uniforms.clippingPlanes = this.clipping.uniform;
@@ -1402,21 +1584,15 @@ export function writeShadowDraws(fr, w, draws) {
 }
 
 /**
- * MATERIAL meta `vertexCustom`: the vertex stage may put vertices somewhere else than three's built-in transform
- * of the geometry does: a ShaderMaterial / RawShaderMaterial, a material with its own onBeforeCompile (on the object
- * or in its class), a displacement map. The native side splits an InstancedMesh into the instances in view by itself
- * only when this is false (instanceMatrix x the geometry's bounds are then where every instance is); three's own
- * whole-mesh frustum test is all such a material gets, unless the game vouches for the bounds
- * (`mesh.userData.frInstanceCull`).
+ * MATERIAL meta `vertexCustom`: the vertex stage of `prog`, which the material `m` is drawn with, may put vertices
+ * somewhere else than three's built-in transform of the geometry does: a ShaderMaterial / RawShaderMaterial, a
+ * material whose onBeforeCompile rewrote the vertex shader (one that only touches the fragment shader does not count),
+ * a displacement map. The native side splits an InstancedMesh into the instances in view by itself only when this is
+ * false (instanceMatrix x the geometry's bounds are then where every instance is); three's own whole-mesh frustum
+ * test is all such a material gets, unless the game vouches for the bounds (`mesh.userData.frInstanceCull`).
  */
-export function vertexCustom(m) {
-  if (m.isShaderMaterial === true || (m.displacementMap !== undefined && m.displacementMap !== null)) return true;
-  // three's no-op onBeforeCompile lives on Material.prototype (the one that also has setValues); anything nearer is
-  // the game's. By shape, not by identity: the game's three may be another copy of the module than ours
-  for (let p = m; p !== null && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
-    if (Object.prototype.hasOwnProperty.call(p, 'onBeforeCompile')) return !Object.prototype.hasOwnProperty.call(p, 'setValues');
-  }
-  return false;
+export function vertexCustom(m, prog) {
+  return m.isShaderMaterial === true || (m.displacementMap !== undefined && m.displacementMap !== null) || prog.vertexHooked === true;
 }
 
 // ================================================================== texture kinds FastRenderer uploads for three's programs

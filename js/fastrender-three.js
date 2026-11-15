@@ -117,6 +117,12 @@ export class FastRenderer {
         // WebGLRenderer does). Also from the host (host.params.trimLights), for a game that runs unchanged
         trimLights: opts.trimLights ?? (this.host.params && this.host.params.trimLights),
         releaseInstance: (inst) => { if (this.host.release) this.host.release(KIND.MATERIAL, inst.id); },
+        // a light-count change is put off until its programs are compiled (three-programs.js _holdLights), with a host
+        // that can say when (host.prewarmPending); false / 0 (also host.params.lightHold): it goes through at once
+        lightHold: opts.lightHold ?? (this.host.params && this.host.params.lightHold),
+        // MATERIAL { prewarm, token }: program `prewarm` will take the place of an uploaded instance's program (build
+        // its pipelines in the background); id 0: everything up to `token` has been said
+        prewarmInstance: (inst, prog, token) => { if (inst === null) this.host.upload(KIND.MATERIAL, 0, { prewarm: 0, token }); else if (inst.uploadedProgram) this.host.upload(KIND.MATERIAL, inst.id, { prewarm: prog.id, token }); },
       });
       this._textureId = (t) => this._texture(t);
       this.extensions = compressedTextureExtensions(opts.compressedTextures ?? (this.host.params && this.host.params.compressedTextures));
@@ -386,9 +392,9 @@ export class FastRenderer {
           blendSrcAlpha: m.blendSrcAlpha ?? null, blendDstAlpha: m.blendDstAlpha ?? null, blendEquationAlpha: m.blendEquationAlpha ?? null,
           premultipliedAlpha: m.premultipliedAlpha, depthTest: m.depthTest, depthWrite: m.depthWrite, depthFunc: m.depthFunc, colorWrite: m.colorWrite,
           alphaToCoverage: m.alphaToCoverage, polygonOffset: m.polygonOffset ? [m.polygonOffsetFactor, m.polygonOffsetUnits] : null, wireframe: m.wireframe,
-          // the vertex stage may displace (its own shader, onBeforeCompile, a displacement map): no automatic
-          // per-instance culling on the native side
-          vertexCustom: vertexCustom(m),
+          // the vertex stage may displace (its own shader, an onBeforeCompile that rewrites it, a displacement map):
+          // no automatic per-instance culling on the native side
+          vertexCustom: vertexCustom(m, inst.program),
         });
       }
     }
@@ -748,7 +754,7 @@ export class FastRenderer {
     else { u[0] = MAGIC; u[1] = w; }
     this.info.render.culled = this._nCulled;
     this.info.render.calls = nDraws; this.info.render.triangles = this._tris | 0; this.info.render.frame++;
-    if (tp) { this.info.uniformBlocks.total = tp.stats.blocks; this.info.uniformBlocks.changed = tp.stats.changed; this.info.render.lightsDropped = tp.stats.lightsDropped; }
+    if (tp) { this.info.uniformBlocks.total = tp.stats.blocks; this.info.uniformBlocks.changed = tp.stats.changed; this.info.render.lightsDropped = tp.stats.lightsDropped; this.info.render.lightsHeld = tp.stats.lightsHeld; }
     if (this.host.present) this.host.present(w);
   }
 

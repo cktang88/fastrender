@@ -113,7 +113,7 @@ Items 1-3 keep the picture; item 4 moves far geometry by about a pixel or less (
    The renderer does this by itself only where it can know the bounds: the mesh is `frustumCulled` (three's own
    whole-mesh test already relies on instanceMatrix x the geometry's bounds), the geometry has no per-instance
    attribute a vertex stage could place the instance with, and the vertex stage is three's own (MATERIAL meta
-   `vertexCustom` false: no ShaderMaterial, no `onBeforeCompile`, no displacement map; three's whole-mesh test
+   `vertexCustom` false: no ShaderMaterial, no `onBeforeCompile` that rewrites the vertex shader, no displacement map; three's whole-mesh test
    tolerates a stage that sways vertices inside the mesh's bounds, a test per instance does not; added after review,
    `bindlist::instance_split_allowed`). In this game that is 0.29 M triangles (-> 0.12 M): its
    two big groups hide their bounds. The fleet is `frustumCulled = false` (1.5 M triangles), and the window parts

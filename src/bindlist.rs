@@ -823,7 +823,7 @@ impl PassCounts {
 /// - otherwise by ourselves only when three would frustum-cull the mesh as a whole on those bounds
 ///   (`frustum_culled`), the geometry has no per-instance attribute a vertex stage could place the instance with
 ///   (`instance_attributes`), and the vertex stage is three's own (`vertex_custom` false: no ShaderMaterial, no
-///   onBeforeCompile, no displacement map). three's whole-mesh test tolerates a stage that moves vertices a little
+///   onBeforeCompile that rewrites the vertex shader, no displacement map). three's whole-mesh test tolerates a stage that moves vertices a little
 ///   (wind sway inside the mesh's bounds); a per-instance test with the instance's own sphere does not.
 pub fn instance_split_allowed(reads_instance_id: bool, hint: bool, frustum_culled: bool, instance_attributes: bool, vertex_custom: bool) -> bool {
     !reads_instance_id && (hint || (frustum_culled && !instance_attributes && !vertex_custom))
@@ -862,7 +862,7 @@ mod tests {
     fn instances_are_culled_one_by_one_only_where_their_bounds_are_known() {
         // (reads gl_InstanceID, the game's hint, frustumCulled, per-instance attributes, custom vertex stage)
         assert!(instance_split_allowed(false, false, true, false, false), "a built-in material on a frustum-culled mesh");
-        assert!(!instance_split_allowed(false, false, true, false, true), "onBeforeCompile / ShaderMaterial / displacementMap: the stage may displace");
+        assert!(!instance_split_allowed(false, false, true, false, true), "a vertex-stage onBeforeCompile / ShaderMaterial / displacementMap: it may displace");
         assert!(instance_split_allowed(false, true, true, false, true), "... unless the game vouches for the bounds");
         assert!(!instance_split_allowed(false, false, false, false, false), "frustumCulled = false");
         assert!(instance_split_allowed(false, true, false, true, false), "the hint also covers per-instance attributes and frustumCulled = false");

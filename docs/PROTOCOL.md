@@ -101,7 +101,7 @@ blendSrcAlpha, blendDstAlpha, blendEquationAlpha, premultipliedAlpha, depthTest,
 alphaToCoverage, polygonOffset: [factor, units] | null, wireframe, vertexCustom }`
 
 `vertexCustom`: the vertex stage may move vertices away from three's built-in transform of the geometry (a
-ShaderMaterial, the material's own `onBeforeCompile`, a displacement map). The native side then culls the instances
+ShaderMaterial, an `onBeforeCompile` that rewrote the vertex shader, a displacement map). The native side then culls the instances
 of an InstancedMesh one by one only if the game vouches for their bounds (`userData.frInstanceCull`, INSTANCES).
 
 The native side derives blending exactly as `WebGLState.setMaterial` (Normal + opaque = off; premultiplied tables;
@@ -110,6 +110,21 @@ determinant, and the shadow pass side from `shadowSide` (else the opposite of `s
 
 Re-sent when the program or any of these pipeline-state fields change (WebGLRenderer reads them every draw).
 `host.release(3, id)` when the three material is disposed.
+
+**Prewarm notes** (optional; only with a host that has `host.prewarmPending`): `host.upload(3, id, { prewarm, token })`.
+three compiles the light counts into every lit program, so when a count changes every lit material instance gets
+another program at once. With `lightHold` (default on where the host can answer) the JS side puts the change off:
+the light list keeps its counts while, a few per frame, it picks and translates the programs of the new counts
+(`host.program`, as when they are first drawn) and tells the native side which instance each will replace:
+`prewarm` = that program's id, on the instance's id. The native side queues the pipelines the instance is drawn
+with now (same streams, targets and pipeline state) for the new program, in the background; nothing is drawn with
+them yet. The last note of a change is `host.upload(3, 0, { prewarm: 0, token })` with a fresh token.
+`host.prewarmPending(token)` then answers: `-1` the notes up to `token` are not applied yet (they are applied after
+the frame that wrote them), `n >= 0` pipelines of prewarm notes still compiling, `-2` not applicable (the host
+compiles synchronously: blocking mode; asked with token 0 at start-up, the hold is then off). At `0` the change goes
+through: the instances are re-uploaded with the new `program` ids and their pipelines are there. After 180 frames it
+goes through anyway, and the native side waits for a pipeline that replaces one that was on screen rather than
+skipping its draws (`src/mac_programs.rs`). Counts that were on screen before are never put off.
 
 ### TEXTURE (kind 2) additions
 

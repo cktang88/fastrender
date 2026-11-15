@@ -812,7 +812,7 @@ impl ThreeScene {
             // the buffers stay as they are). Off-screen instances cost vertex shading and tiling of every triangle
             // otherwise. Known = three would frustum-cull the mesh as a whole on those bounds (frustumCulled), the
             // geometry has no per-instance attribute a vertex stage could place the instance with and the vertex stage
-            // is three's own (no ShaderMaterial / onBeforeCompile / displacement map: `vertex_custom`); or the game
+            // is three's own (no ShaderMaterial / vertex-stage onBeforeCompile / displacement map: `vertex_custom`); or the game
             // says so (`userData.frInstanceCull`, `Inst::hint`), optionally with its own radius
             // (`bindlist::instance_split_allowed`).
             runs.clear();

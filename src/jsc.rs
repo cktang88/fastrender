@@ -190,6 +190,14 @@ unsafe extern "C" fn js_now(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectR
     JSValueMakeNumber(ctx, START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0)
 }
 
+/// `__fr.prewarmPending(token)`: are the pipelines of the prewarm notes up to `token` compiled
+/// (`pipeline_manifest::prewarm_answer`; js/three-programs.js `_holdLights` asks before a light-count change goes
+/// through)
+unsafe extern "C" fn js_prewarm_pending(ctx: JSContextRef, _f: JSObjectRef, _this: JSObjectRef, argc: usize, argv: *const JSValueRef, _exc: *mut JSValueRef) -> JSValueRef {
+    let token = if argc > 0 { JSValueToNumber(ctx, *argv, null_mut()) as u32 } else { 0 };
+    JSValueMakeNumber(ctx, crate::mac_programs::prewarm_pending(token) as f64)
+}
+
 unsafe extern "C" fn no_dealloc(_bytes: *mut c_void, _ctx: *mut c_void) {}
 
 thread_local! {
@@ -333,6 +341,8 @@ impl ScriptHost {
             JSObjectSetProperty(ctx, fr, JsStr::new("now").0, now as JSValueRef, 0, null_mut());
             let prog = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("program").0, js_program);
             JSObjectSetProperty(ctx, fr, JsStr::new("program").0, prog as JSValueRef, 0, null_mut());
+            let pw = JSObjectMakeFunctionWithCallback(ctx, JsStr::new("prewarmPending").0, js_prewarm_pending);
+            JSObjectSetProperty(ctx, fr, JsStr::new("prewarmPending").0, pw as JSValueRef, 0, null_mut());
             crate::image::install(ctx as *const c_void, fr); // __fr.readFile / __fr.decodeImage (src/image.rs)
             let params = JSValueMakeFromJSONString(ctx, JsStr::new(params_json).0);
             if !params.is_null() {

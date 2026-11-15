@@ -5,7 +5,7 @@
 //
 //   node js/test/world-objects.node.mjs <game dir> [--three three|three-r170] [--frames 120] [--search '?mode=world...']
 //        [--mesh-census 30] [--ablate nofarlod] [--json out.json] [--view x,y,z,yaw,pitch] [--dump-programs dir] [--profile] [--matrix-stats] [--ab property]
-//        [--matrix-check N] [--walk vx,vz]
+//        [--matrix-check N] [--walk vx,vz] [--light-hold]
 //
 // --profile        V8's sampling profiler over the measured frames, aggregated in process (no file): top functions by
 //                  self time and the inclusive time of the renderer's stages, in ms per frame
@@ -80,11 +80,16 @@ const host = makeGlslHost({});
 // --ablate a,b: the bundle's GPU-cost diagnostics (FASTRENDER_ABLATE of the native host; js/examples/world-objects.three.mjs)
 const ablateArg = opt('--ablate', '');
 if (ablateArg) host.params = { ...(host.params || {}), ablate: ablateArg };
-const hstats = { uploads: { 1: 0, 2: 0, 3: 0, 4: 0 }, uploadBytes: 0, presents: 0, words: 0, programs: 0, programMs: 0 };
+const hstats = { uploads: { 1: 0, 2: 0, 3: 0, 4: 0 }, uploadBytes: 0, presents: 0, words: 0, programs: 0, programMs: 0, prewarmNotes: 0 };
 host.attach = () => {};
-host.upload = (kind, id, meta, ...arrays) => { hstats.uploads[kind]++; for (const a of arrays) if (a) hstats.uploadBytes += a.byteLength; };
+host.upload = (kind, id, meta, ...arrays) => { hstats.uploads[kind]++; if (kind === 3 && meta && meta.prewarm !== undefined) hstats.prewarmNotes++; for (const a of arrays) if (a) hstats.uploadBytes += a.byteLength; };
 host.release = () => {};
 host.present = (w) => { hstats.presents++; hstats.words = w; };
+// --light-hold: a host that compiles in the background and is always done (host.prewarmPending -> 0): a change of the
+// light counts is put off while its programs are prewarmed (three-programs.js _holdLights); host.prewarmNotes and
+// lightHold (changes put off, passes held, programs picked ahead) in the result. Without it this host cannot tell, and a change goes through at once (as in Electron)
+const lightHold = args.includes('--light-hold');
+if (lightHold) host.prewarmPending = () => 0;
 const program0x = host.program;
 // --fix-shader-name: drop three's `#define SHADER_NAME <material.name>` line (no longer needed: normalizeGlsl /
 // src/xlat.rs sanitise names with '#' now; kept to compare)
@@ -352,7 +357,8 @@ if (mstat) {
 // native side draws only those where it may: frustumCulled without per-instance attributes and with three's own vertex
 // stage (no ShaderMaterial, onBeforeCompile, displacement map), or userData.frInstanceCull;
 // src/bindlist.rs), by distance from the camera (m). A node estimate: no GPU, no native culling runs here.
-const vertexCustom = (m) => m.isShaderMaterial === true || !!m.displacementMap || Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile'); // (three-programs.js vertexCustom)
+// (three-programs.js vertexCustom: the material's own shader, a displacement map, an onBeforeCompile that rewrote the vertex shader)
+const vertexCustom = (m) => { const ms = renderer._tp && renderer._tp._ms.get(m); return m.isShaderMaterial === true || !!m.displacementMap || (ms && ms.lastVariant ? ms.lastVariant.program.vertexHooked === true : Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile')); };
 async function meshCensus(top) {
   const BANDS = [12, 40, 100, 200, Infinity];
   const rows = new Map();
@@ -436,6 +442,7 @@ const result = {
   scene: { perInstanceAttrMeshes, perInstanceAttrs: [...perInstanceAttrs], meshes, instancedMeshes: instanced, instances: instancesTotal, skinned, sprites, points, lines, lights, materials: mats.size, shaderMaterials: [...shaderMats], onBeforeCompile: [...obc] },
   unsupportedPerFrame: Object.fromEntries(unsupported.map(([k, v]) => [k, +(v / frames).toFixed(2)])),
   uploadsPerFrame, uploadMBPerFrame, texturesWithoutPixelsPerFrame: Object.fromEntries(Object.entries(texKinds).map(([k, v]) => [k, +(v / frames).toFixed(1)])),
+  lightHold: renderer._tp ? renderer._tp.holdStats : null,
   host: hstats, world: globalThis.__worldStats, errors,
   camera: W().camera.position.toArray().map((v) => +v.toFixed(2)), player: { pos: W().player.pos.toArray().map((v) => +v.toFixed(2)), yaw: +W().player.yaw.toFixed(3), pitch: +W().player.pitch.toFixed(3) },
 };
