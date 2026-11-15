@@ -1,4 +1,4 @@
-From 153dae3b727f6bfd9844bb68834410f9f5d80e62 Mon Sep 17 00:00:00 2001
+From cb9696397b561b0bbab8b2abfc0904ba2d9a5996 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 15 Nov 2026 16:59:48 +0000
 Subject: [PATCH] Far LODs built at load: merged block meshes beyond 70 m, cars
@@ -33,17 +33,24 @@ js/test/world-objects.node.mjs --mesh-census): triangles sent 5.07 M ->
 block meshes 973k -> 642k, far cars 276k -> 136k; shadow casters per pass
 0.96 M -> 0.76 M; draws 1470 -> 1485.
 
+Rays: three's Raycaster tests hidden objects too, so the version of a
+merged mesh that is not shown has a no-op raycast (setShown): a ray hits
+what is on screen, once. Cars: whether a car is on the distant LOD is
+decided every frame for every level (fleetDistant), so one that came
+close and goes back out starts from the far LOD, not from a stale flag.
+
 tests/chunk-lod.test.ts: twins exist and are under 45 % of the triangles,
 never stick out of the original by more than the error, keep material /
-attributes / bounds / shadow flags, one version shown per level,
-hysteresis. npm run qa: 264 passed.
+attributes / bounds / shadow flags, one version shown per level and only
+that one answers rays, hysteresis for blocks and cars. npm run qa: 264
+passed.
 ---
  scripts/qa.mjs          |   5 +-
  src/nyc.ts              |  45 ++++++++
- src/nyc/chunkLod.ts     | 228 ++++++++++++++++++++++++++++++++++++++++
- src/nyc/vehicleFleet.ts | 120 +++++++++++++++++++--
- tests/chunk-lod.test.ts | 125 ++++++++++++++++++++++
- 5 files changed, 515 insertions(+), 8 deletions(-)
+ src/nyc/chunkLod.ts     | 238 ++++++++++++++++++++++++++++++++++++++++
+ src/nyc/vehicleFleet.ts | 129 +++++++++++++++++++++-
+ tests/chunk-lod.test.ts | 166 ++++++++++++++++++++++++++++
+ 5 files changed, 575 insertions(+), 8 deletions(-)
  create mode 100644 src/nyc/chunkLod.ts
  create mode 100644 tests/chunk-lod.test.ts
 
@@ -161,10 +168,10 @@ index b09f577..4d25ee0 100644
      if (this.pending) return true;
 diff --git a/src/nyc/chunkLod.ts b/src/nyc/chunkLod.ts
 new file mode 100644
-index 0000000..fdc42f8
+index 0000000..ed1b337
 --- /dev/null
 +++ b/src/nyc/chunkLod.ts
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,238 @@
 +import * as THREE from 'three';
 +import { simplifierReady, simplifyMesh, compact, remapAttribute } from '../meshlod-core';
 +
@@ -184,7 +191,8 @@ index 0000000..fdc42f8
 + * the distance where the level starts (70 degree field of view: 6 cm at 70 m), so a twin is within a pixel of
 + * the original from where it is used. What that leaves out: parts thinner than the error (a 3 cm door sill, a
 + * thin rod) collapse to nothing.
-+ * Shadows follow (a twin casts when the original did). The block's small details (`fine`, buildings.ts
++ * Shadows follow (a twin casts when the original did). Rays do not: three's Raycaster tests hidden objects too, so
++ * the version that is not shown has no raycast (a ray hits what is on screen, once). The block's small details (`fine`, buildings.ts
 + * setBlockDetail) are not touched: they are only shown on the nearest blocks anyway.
 + *
 + * When: NycLevel.update builds the twins of a block the first time it is far enough to show them, in the frames
@@ -222,6 +230,15 @@ index 0000000..fdc42f8
 +simplifierReady.then(() => (ok = true)).catch(() => {});
 +/** the simplifier's wasm has loaded and the LODs are on */
 +export const chunkLodReady = () => ok && CHUNK_LOD.on;
++
++/** a hidden version's raycast: Raycaster ignores `visible`, so without this a ray would hit both versions */
++const noRaycast: THREE.Mesh['raycast'] = () => {};
++/** only the version that is shown answers rays (the mesh's own raycast is on its prototype) */
++function setShown(m: THREE.Mesh, shown: boolean) {
++  m.visible = shown;
++  if (shown) delete (m as { raycast?: unknown }).raycast;
++  else m.raycast = noRaycast;
++}
 +
 +/** per merged mesh of a block: [original, twin of level 1, twin of level 2, ...] (null: the level before it serves) */
 +export type ChunkLod = (THREE.Mesh | null)[][];
@@ -325,7 +342,7 @@ index 0000000..fdc42f8
 +  twin.userData.owned = true;
 +  twin.userData.baked = true;
 +  twin.userData.chunkLod = { tris: lodTris, error: worst };
-+  twin.visible = false;
++  setShown(twin, false);
 +  return twin;
 +}
 +
@@ -382,7 +399,7 @@ index 0000000..fdc42f8
 +    while (show > 0 && !entry[show]) show--;
 +    for (let i = 0; i < entry.length; i++) {
 +      const m = entry[i];
-+      if (m) m.visible = i === show;
++      if (m) setShown(m, i === show);
 +    }
 +  }
 +}
@@ -394,7 +411,7 @@ index 0000000..fdc42f8
 +  return level;
 +}
 diff --git a/src/nyc/vehicleFleet.ts b/src/nyc/vehicleFleet.ts
-index c126fc9..5d37e9b 100644
+index c126fc9..28767c7 100644
 --- a/src/nyc/vehicleFleet.ts
 +++ b/src/nyc/vehicleFleet.ts
 @@ -4,6 +4,7 @@ import { mergeGeometries, toCreasedNormals } from 'three/examples/jsm/utils/Buff
@@ -485,7 +502,7 @@ index c126fc9..5d37e9b 100644
  // ---------------------------------------------------------------- lamps (night head/tail lights, brake lights)
  
  /** a soft round glow, for lamp cards and the headlight pool */
-@@ -755,8 +829,14 @@ export function nearObject(p: Prepared, paint: THREE.Material) {
+@@ -755,12 +829,26 @@ export function nearObject(p: Prepared, paint: THREE.Material) {
  
  // ---------------------------------------------------------------- instanced mid/far LODs
  
@@ -502,16 +519,28 @@ index c126fc9..5d37e9b 100644
  /** which representation a car (whose model has loaded) uses at distance d; 'near' only once its near file is in */
  export function fleetLevel(d: number, nearLoaded: boolean): 'near' | 'mid' | 'far' {
    return d < FLEET_LOD.NEAR && nearLoaded ? 'near' : d < FLEET_LOD.MID ? 'mid' : 'far';
-@@ -776,6 +856,8 @@ interface Entry {
+ }
++/**
++ * whether a car on `level` at distance d is drawn with the distant LOD. `was`: it was last frame (it then stays on
++ * it down to FAR - FAR_BACK); `has`: its model has one. A car on the near or mid level is not, so one that comes
++ * back out to the far level starts from the far LOD again.
++ */
++export function fleetDistant(level: 'near' | 'mid' | 'far', d: number, was: boolean, has: boolean) {
++  return level === 'far' && has && d > (was ? FLEET_LOD.FAR - FLEET_LOD.FAR_BACK : FLEET_LOD.FAR);
++}
+ 
+ const MID_PAINT = new THREE.MeshPhysicalMaterial({ color: '#fff', metalness: 0.45, roughness: 0.34, clearcoat: 1, clearcoatRoughness: 0.08, side: THREE.DoubleSide, name: 'car-mid-paint' });
+ const MID_REST = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.38, metalness: 0.3, side: THREE.DoubleSide, name: 'car-mid' });
+@@ -776,6 +864,8 @@ interface Entry {
    color: THREE.Color;
    /** null until the model's near LOD has loaded: the car stays on the instanced mid LOD up close */
    near: THREE.Object3D | null;
-+  /** drawn with the distant LOD last frame (hysteresis at FLEET_LOD.FAR) */
++  /** drawn with the distant LOD last frame (hysteresis at FLEET_LOD.FAR; false on the near and mid levels) */
 +  distant?: boolean;
  }
  /** a growable InstancedMesh for one (model, level, paint|rest) */
  class Batch {
-@@ -835,7 +917,9 @@ class Batch {
+@@ -835,7 +925,9 @@ class Batch {
  export class FleetInstances {
    root = new THREE.Group();
    private cars = new Set<Entry>();
@@ -522,7 +551,7 @@ index c126fc9..5d37e9b 100644
    constructor() {
      this.root.name = 'fleet-instances';
    }
-@@ -860,17 +944,33 @@ export class FleetInstances {
+@@ -860,17 +952,33 @@ export class FleetInstances {
        };
        const lamp = (g: THREE.BufferGeometry | undefined, m: THREE.Material, colored: boolean) => (g ? new Batch(this.root, g, m, false, colored) : null);
        b = {
@@ -557,13 +586,21 @@ index c126fc9..5d37e9b 100644
      for (const b of this.batches.values()) for (const x of Object.values(b)) x?.begin();
      const c = { near: 0, mid: 0, far: 0 };
      const pos = new THREE.Vector3();
-@@ -915,11 +1015,19 @@ export class FleetInstances {
+@@ -898,6 +1006,8 @@ export class FleetInstances {
+         if (e.near.userData.wheelsStill) e.near.userData.wheelsStill.visible = !spin;
+       }
+       const b = this.set(e.id);
++      // every frame, whatever the level: a car that leaves the far level is not on the distant LOD any more
++      e.distant = fleetDistant(level, d, !!e.distant, this.hasDistant.get(e.id) === true);
+       // lamps for every car, near or not: headlights + tail lights at night, brake lights when braking
+       if (lit) b.head?.push(e.obj.matrixWorld, e.color);
+       const tail = (lit ? 1.6 * night : 0) + (e.obj.userData.braking ? 2.4 : 0);
+@@ -915,11 +1025,18 @@ export class FleetInstances {
          b.midR?.push(e.obj.matrixWorld, e.color);
          c.mid++;
        } else {
 -        b.farP?.push(e.obj.matrixWorld, e.color);
 -        b.farR?.push(e.obj.matrixWorld, e.color);
-+        e.distant = this.hasDistant.get(e.id) === true && d > (e.distant ? FLEET_LOD.FAR - FLEET_LOD.FAR_BACK : FLEET_LOD.FAR);
 +        if (e.distant) {
 +          b.disP?.push(e.obj.matrixWorld, e.color);
 +          b.disR?.push(e.obj.matrixWorld, e.color);
@@ -581,10 +618,10 @@ index c126fc9..5d37e9b 100644
    }
 diff --git a/tests/chunk-lod.test.ts b/tests/chunk-lod.test.ts
 new file mode 100644
-index 0000000..6b3b505
+index 0000000..fdbb255
 --- /dev/null
 +++ b/tests/chunk-lod.test.ts
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,166 @@
 +/**
 + * Far LODs of a block's merged meshes (src/nyc/chunkLod.ts): the twins exist, are much smaller, stay within their
 + * error of the originals in both directions, keep material / attributes / bounds / shadow flags, and exactly one
@@ -595,7 +632,7 @@ index 0000000..6b3b505
 +import { nycChunk } from './world';
 +import { simplifierReady, surfaceDistance } from '../src/meshlod-core';
 +import { CHUNK_LOD, chunkLodSteps, chunkLevel, setChunkLevel, type ChunkLod } from '../src/nyc/chunkLod';
-+import { FLEET_LOD } from '../src/nyc/vehicleFleet';
++import { FLEET_LOD, fleetDistant } from '../src/nyc/vehicleFleet';
 +
 +const tris = (m: THREE.Mesh) => m.geometry.index!.count / 3;
 +const arrays = (m: THREE.Mesh) => {
@@ -689,6 +726,35 @@ index 0000000..6b3b505
 +      expect(shown[0] === e[want], `level ${level}: shows version ${e.indexOf(shown[0]!)} instead of ${want}`);
 +    }
 +  }
++  // a ray hits the version on screen, once: three's Raycaster does not look at `visible`
++  const ray = new THREE.Raycaster();
++  let probed = 0;
++  for (const e of lod) {
++    const o = e[0]!, t = e.find((m, i) => i > 0 && m);
++    if (!t) continue;
++    o.updateWorldMatrix(true, false);
++    t.updateWorldMatrix(true, false);
++    // down onto the first triangle of the original, from just above it
++    const p = o.geometry.getAttribute('position'), ix = o.geometry.index!;
++    const c = new THREE.Vector3();
++    for (let k = 0; k < 3; k++) c.add(new THREE.Vector3().fromBufferAttribute(p, ix.getX(k)));
++    c.divideScalar(3).applyMatrix4(o.matrixWorld);
++    for (const level of [0, e.indexOf(t)]) {
++      setChunkLevel(lod, level);
++      const hits: THREE.Intersection[] = [];
++      for (const dir of [new THREE.Vector3(0, -1, 0), new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 1)]) {
++        ray.set(c.clone().addScaledVector(dir, -50), dir);
++        ray.intersectObjects([o, t], false, hits);
++      }
++      const hidden = level === 0 ? t : o;
++      expect(!hits.some((h) => h.object === hidden), `level ${level}: a ray hits the hidden version`);
++      if (level === 0) expect(hits.some((h) => h.object === o), 'the original, shown, is not hit by a ray through one of its triangles');
++      expect(hidden.raycast !== THREE.Mesh.prototype.raycast && (level === 0 ? o : t).raycast === THREE.Mesh.prototype.raycast, `level ${level}: only the shown version has a raycast`);
++    }
++    if (++probed >= 6) break;
++  }
++  expect(probed > 0, 'no twin to probe');
++  setChunkLevel(lod, 0);
 +  const L = CHUNK_LOD.levels;
 +  expect(chunkLevel(0, 0) === 0 && chunkLevel(L[0].dist - 0.1, 0) === 0, 'near: the originals');
 +  expect(chunkLevel(500, 0) === L.length, 'far away: the coarsest level');
@@ -709,6 +775,18 @@ index 0000000..6b3b505
 +
 +test('cars: the distant LOD starts beyond the far LOD', () => {
 +  expect(FLEET_LOD.MID < FLEET_LOD.FAR - FLEET_LOD.FAR_BACK, 'MID < FAR - FAR_BACK');
++  const { FAR, FAR_BACK } = FLEET_LOD, inside = FAR - FAR_BACK / 2;
++  expect(!fleetDistant('far', inside, false, true) && fleetDistant('far', FAR + 1, false, true), 'onto the distant LOD beyond FAR');
++  expect(fleetDistant('far', inside, true, true) && !fleetDistant('far', FAR - FAR_BACK - 1, true, true), 'back to the far LOD inside FAR - FAR_BACK');
++  expect(!fleetDistant('far', FAR + 1, false, false), 'a model without a distant LOD stays on the far LOD');
++  // a car that was distant, came close (mid / near level) and is back in the hysteresis band starts from the far LOD
++  let was = fleetDistant('far', FAR + 1, false, true);
++  for (const level of ['mid', 'near'] as const) {
++    was = fleetDistant(level, inside, was, true);
++    expect(!was, `on the ${level} level a car is not on the distant LOD`);
++    was = true;
++  }
++  expect(!fleetDistant('far', inside, fleetDistant('mid', 20, true, true), true), 'back out after a mid frame: the far LOD until FAR');
 +});
 -- 
 2.43.0
