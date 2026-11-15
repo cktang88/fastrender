@@ -60,6 +60,7 @@ canvas-painted textures count as `texture source without pixels`.
 | `--walk vx,vz` | the player moves (m/s) so blocks stream and LODs switch during the run |
 | `--ablate a,b` | the same switches as `FASTRENDER_ABLATE` (below) |
 | `--static-subtrees N`, `--light-hold` | run with those renderer options on |
+| `--stock-opt` | what per-instance culling by compaction (`js/stock-three-opt.js`, the WebGL emulation of the native instance culling) costs in JS per frame on this game, with its cache and without, and the instances / triangles it leaves |
 | `--dump-programs dir` | every compiled program as `NAME.vert.glsl` / `NAME.frag.glsl` (input of `fastrender xlat-dump`) |
 | `--json out.json` | the report as JSON |
 
@@ -116,10 +117,66 @@ the name to `rows=` in the script, and describe it in `docs/notes/gpu-cost.md`.
 ## Electron 3-way bench (macOS): `host/electron/scripts/bench-3way.sh`
 
 three's WebGLRenderer vs WebGPURenderer vs fastrender in the same Electron app; writes `<out>/bench-3way.md|json`
-and screenshots. About 25 minutes in full.
+and screenshots. About 25 minutes in full. Do not put the script's name in a commit message unless the CI job of that name
+should run (it holds a macOS runner for ~45 minutes).
 
 ```bash
 host/electron/scripts/bench-3way.sh --scenes world --variants "webgl fastrender" --sizes 1280x800 --no-vsync-pass
+```
+
+Attribution ladder (is the gap a method any three game can use, or the native renderer? `docs/research/attribution.md`),
+real game, about 25 minutes:
+
+```bash
+host/electron/scripts/bench-3way.sh --scenes world --no-vsync-pass --sizes "1280x800 2560x1600" \
+  --variants "webgl webgl-opt webgl-opt-inst fastrender-bare fastrender"
+```
+
+A variant is a base (bundle, window, GPU path) plus switches (`game/bench-main.js` `VARIANTS`); rows of one base run
+the same bundle. The WebGL rows carry every exact method that runs on a stock WebGLRenderer
+(`js/stock-three-opt.js`: `installStockOpt(renderer, { dark, discard, instances })`), so what is left between the
+best of them and `fastrender` is the native renderer:
+
+| Variant | Base + switches | Compare with | The ratio tells |
+|---|---|---|---|
+| `webgl` | stock WebGLRenderer | - | the baseline |
+| `webgl-trim` | webgl + `dark`: dark point / spot lights out of each `render()` | `webgl` | the dark-light method under WebGL |
+| `webgl-opt` | ... + `discard`: discarding opaque draws last, nearest first (`setOpaqueSort`) | `webgl-trim` | discard ordering; with `dark`, every generic method that is free per frame |
+| `webgl-opt-inst` | ... + `instances`: only the instances in view, compacted into a second attribute per frame | `webgl-opt` | per-instance culling emulated in JS (costs JS + upload: its own row) |
+| `fastrender-bare` | fastrender + `host.params.trimLights = 0` + `FASTRENDER_V3_DEBUG=2560` (2048 + 512) | `webgl` | backend + renderer architecture, no trick on either side |
+| `fastrender-trimonly` | fastrender + `FASTRENDER_V3_DEBUG=2560` | `webgl-trim`, `fastrender-bare` | the same with the dark lights out; `trimLights` under fastrender |
+| `fastrender` | what ships | best WebGL row, `fastrender-trimonly` | **the gap that is left**; the native versions of instance culling + discard order |
+| `webgpu-trim` | webgpu + `dark` | `webgpu` | only meaningful for a stock-material scene; not on the ladder, not run anywhere yet |
+
+`--opt dark,discard,instances[,nocache]` on a `webgl` run (`game/bench-main.js`) switches the hooks one by one;
+`nocache` makes the instance hook recompute every mesh every frame, which is what a moving camera costs (the
+benchmark's camera stands still).
+
+The report's "Attribution ladder" section prints the rows, the steps and a "Checks" line: every hooked WebGL row
+against `webgl`, and `fastrender-bare` / `-trimonly` against `fastrender`, must be the same picture (MAE <= 1);
+lights were hidden; the sort ran and found discarding materials; instances were culled; `trimLights` is off only in
+`bare`; the render thread read the debug mask (`[fastrender] draws per pass (last frame): ...;
+FASTRENDER_V3_DEBUG=n` in `<tag>.log`, with `instances 0 of 0 drawn` under bit 2048). Do not quote a ladder whose
+checks failed. `webgl_programs.compiled_in_window` counts three's WebGL program compiles during the measurement:
+WebGLRenderer has no `lightHold`, so every light-count change in play compiles in the frame.
+
+JS cost of the instance hook on a real game, without a GPU (per frame, with its cache and without; add `--walk`):
+
+```bash
+node js/test/world-objects.node.mjs <game dir> --stock-opt     # -> "stockOptInstances" in the JSON
+```
+
+A new ladder row: add an entry to `VARIANTS` (base, `opt`, `params`, `v3debug`), to `LABEL` / `ORDER` / `LADDER` /
+`WHAT` / `STEPS` in `bench-3way.report.mjs`, and a check that proves the switch took effect. A new generic method:
+a switch in `js/stock-three-opt.js` with a case in `js/test/stock-three-opt.test.mjs`.
+
+Testing the WebGL rows without a Mac (software GL: timings meaningless; hooks, counters and MAE real; the real game
+needs about 20 minutes per run, so call `game/bench-main.js` directly with a large `--timeout`):
+
+```bash
+cd host/electron && BENCH_ELECTRON="xvfb-run -a npx electron --no-sandbox" BENCH_NO_SETTLE=1 \
+  BENCH_CHROMIUM_FLAGS="use-angle=swiftshader enable-unsafe-swiftshader" \
+  bash scripts/bench-3way.sh --scenes city --variants "webgl webgl-opt webgl-opt-inst" --sizes 320x200 --warmup 2 --measure 4 --no-vsync-pass
 ```
 
 Options: `--scenes "empty city world"`, `--variants "webgl webgpu fastrender"`, `--sizes "1280x800 2560x1600"`,
@@ -133,6 +190,7 @@ renders a cheaper, different frame.
 | Switch | Effect |
 |---|---|
 | `FastRenderer({ trimLights: false })`, `host.params.trimLights = 0` | keep dark lights in the light state, as WebGLRenderer does |
+| `installStockOpt(renderer, { dark, discard, instances, cache })` (`js/stock-three-opt.js`) | the generic methods for a STOCK three renderer: dark lights out of each `render()`, discarding draws last, only the instances in view (bench variants `webgl-trim` / `-opt` / `-opt-inst`) |
 | `lightHold: false` / `host.params.lightHold = 0` | a light-count change goes through at once instead of waiting for its programs |
 | `staticSubtrees: true \| N` / `host.params.staticSubtrees`, `renderer.transformsChanged(obj)` | renderer skips settled subtrees in the matrix walk (opt-in, up to N-1 frames late; `true` = 4) |
 | `mesh.userData.frInstanceCull = true \| radius` | the game vouches for per-instance bounds (set before the first draw) |

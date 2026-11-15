@@ -13,6 +13,7 @@ Ordered by what paid most on the first game. "Effect" names its source: **Air** 
 6. Shader / pipeline compile hitches
 7. Fill-bound at native resolution
 8. Merged static meshes drawn whole (cluster LOD + GPU culling, landing in steps)
+- The same fixes on a stock three renderer
 - Checked and not worth it
 - Pitfalls
 
@@ -164,6 +165,17 @@ when `globalThis.__frClusters` is set.
 
 **Effect.** Air, 2560x1600 (`9fb9e86`): main 9.91 -> 9.12 ms (~0.8 ms). Small because triangle count is not the
 limit (see entry 3). Still in progress; check `docs/notes/clusters.md` for its current state.
+
+## The same fixes on a stock three renderer
+
+Entries 1, 2 and 5 do not need fastrender. `js/stock-three-opt.js` (`installStockOpt(renderer, { dark, discard,
+instances })`) does them from outside a stock WebGLRenderer, exact, each with its switch: dark lights out of each
+`render()` (no `lightHold`: a light-count change compiles in the frame), discarding draws last through
+`setOpaqueSort`, and only the instances in view by compacting them into a second attribute per frame (JS + upload
+that the native base-instance path does not pay: node, real game, 0.7 ms per frame with a standing camera, 4.2 ms
+when every mesh is recomputed). Entries 3 and 4 are game patches and run under any renderer. They exist to answer
+"is the speed generic or native?" with the bench rows `webgl-opt` / `webgl-opt-inst` (`references/harness.md`,
+`docs/research/attribution.md`); they are also what to hand a team that ships the browser build.
 
 ## Checked and not worth it (on this game, this GPU)
 

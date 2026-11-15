@@ -39,6 +39,9 @@ How it is measured, and the one command that runs it on a real Mac: docs/HOST.md
 
 Recommendation at the end.
 
+A later question, "is fastrender's lead over WebGL a method anyone could use, or the native renderer?", has its own
+note and its own bench rows: docs/research/attribution.md.
+
 ## What was measured
 
 Scenes: the empty frame (one `render()` of an empty scene), three-city (`js/examples/city-scene.mjs`: 494 building

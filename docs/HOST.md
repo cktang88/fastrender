@@ -209,6 +209,17 @@ runs every variant in turn: plug the Mac in, close other apps, do not touch the 
 | `three` per variant (the only thing that differs between the three bundles of a scene) | `game/bench/three.{webgl,webgpu,fastrender}.mjs` |
 | Bundler, report (markdown + JSON, CI annotations), the one-command driver | `scripts/bench-3way.bundle.mjs`, `scripts/bench-3way.report.mjs`, `scripts/bench-3way.sh` |
 
+Attribution ladder (how much of the gap is a method any three renderer can use, how much the native renderer:
+`docs/research/attribution.md`). The WebGL side gets every exact method that runs on a stock WebGLRenderer
+(`js/stock-three-opt.js`: dark lights out of each `render()`, discarding draws last, only the instances in view), the
+fastrender side can switch its own versions off; each such variant is its base's bundle with switches
+(`game/bench-main.js` `VARIANTS`), and the report gets a section "Attribution ladder" with the steps and their checks:
+
+```bash
+host/electron/scripts/bench-3way.sh --scenes world --no-vsync-pass --sizes "1280x800 2560x1600" \
+  --variants "webgl webgl-opt webgl-opt-inst fastrender-bare fastrender"     # ~25 min
+```
+
 What a run is (`npx electron game/bench-main.js --variant webgl|webgpu|fastrender --scene empty|city|world --px 1280x800`):
 
 - **Same pixels.** `--px` is the colour buffer in device pixels for every variant: the window is `px / scaleFactor`
