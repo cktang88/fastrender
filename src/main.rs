@@ -13,7 +13,16 @@ const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
   xlat-dump <dir> <out>  translate every NAME.vert.glsl/NAME.frag.glsl three.js program in <dir> to MSL (any OS)
 options: --scene city|voxel|script|three --script game.js (props = box count) --three bundle.js (real three.js game) --programs three|native --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|temporal|bilinear
          --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
-         --warmup n --seconds s --warmup-seconds s --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
+         --warmup n --seconds s --warmup-seconds s --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n
+         --gpu-passes 0|1 (per-pass GPU ms: targets, shadow, main, upscale) --fence cpu|event (frames-in-flight fence: completion handler | MTLSharedEvent)
+         --thermal 0|1 (follow thermal state / Low Power Mode, default 1) --display-link 0|1 (run: CAMetalDisplayLink pacing, default 1) --run-seconds s (run: exit after s, print the frame-loop report)";
+
+// Info.plist of the bare binary (no .app bundle), read by LaunchServices from this section: the Game Mode keys
+// (docs/research/metal-2026-optimization.md "Game Mode"; it engages only while a window is full screen).
+#[cfg(target_os = "macos")]
+#[used]
+#[unsafe(link_section = "__TEXT,__info_plist")]
+static INFO_PLIST: [u8; include_bytes!("../macos/Info.plist").len()] = *include_bytes!("../macos/Info.plist");
 
 fn main() {
     // JavaScriptCore only JITs in a process signed with the allow-jit entitlement; a fresh `cargo build` is not

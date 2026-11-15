@@ -417,6 +417,29 @@ jobs:
           node -e "const r=JSON.parse(require('fs').readFileSync('electron-city-golden.json','utf8'));console.log('electron three-city MAE',r.mae);if(!(r.mae<1.0))process.exit(1)"
           test -d ../3d-world-objects || { echo "no game checkout: world gate skipped"; exit 0; }
           node -e "const r=JSON.parse(require('fs').readFileSync('electron-world-golden.json','utf8'));console.log('electron world-objects MAE',r.mae);if(!(r.mae<10))process.exit(1)"
+      # Frame loop (docs/LOG.md "frame loop: QoS, fence, per-pass GPU ms..."): frames in flight, slot / drawable waits,
+      # per-pass GPU ms, the shared-event fence, the windowed app's pacing (CAMetalDisplayLink or the nextDrawable
+      # loop), framebufferOnly, the thermal policy; the split / event-fenced frame must equal the plain one.
+      - name: frame loop - frames in flight, per-pass GPU ms, shared-event fence, windowed pacing
+        if: ${{ !cancelled() }}
+        timeout-minutes: 25
+        run: |
+          rc=0; bash .github/frame-loop.sh > frame-loop.log 2>&1 || rc=$?
+          head -45 frame-loop.txt > frame-loop-1.txt; tail -n +46 frame-loop.txt > frame-loop-2.txt
+          bash .github/annotate.sh notice "frame loop 1/2 (${{ matrix.os }}, exit $rc)" frame-loop-1.txt 45
+          bash .github/annotate.sh notice "frame loop 2/2 (${{ matrix.os }}, exit $rc)" frame-loop-2.txt 60
+          { echo '```'; cat frame-loop.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$rc" = 0 ]
+      - name: Game Mode keys - the binary's embedded Info.plist, the Electron app bundle
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          otool -s __TEXT __info_plist target/release/fastrender | head -3
+          strings target/release/fastrender | grep -A1 "LSSupportsGameMode\|LSApplicationCategoryType" | head -6
+          if [ -d host/electron/node_modules/electron ]; then
+            (cd host/electron && node scripts/game-mode.mjs && npx electron --version) 2>&1 | tee game-mode.txt
+            bash .github/annotate.sh notice "Game Mode keys (Electron.app)" game-mode.txt 5
+          fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:

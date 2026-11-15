@@ -91,6 +91,10 @@ impl Targets {
 
     pub(super) fn temporal(&self) -> bool { matches!(self.scaler, Some(Fx::Temporal(_))) }
 
+    /// Does a MetalFX scaler write the output texture? (Then the output needs the scaler's `outputTextureUsage`,
+    /// so a drawable cannot be `framebufferOnly`. Otherwise the last pass is a plain render pass into it.)
+    pub(super) fn fx_writes_output(&self) -> bool { self.scaler.is_some() }
+
     /// Can these targets serve `cfg` at `scale` without reallocating?
     pub(super) fn matches(&self, cfg: &Config, out: (usize, usize), scale: f32) -> bool {
         self.out == out

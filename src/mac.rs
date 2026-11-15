@@ -46,8 +46,14 @@ type ComputePipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 mod fx;
 use fx::{encode_motion, Targets, MOTION_FORMAT};
 
+// frame submission (src/mac_frame.rs): frames-in-flight fence, per-pass GPU timing, power state
+#[path = "mac_frame.rs"]
+mod frame;
+use frame::{FrameCmds, FrameFence};
+pub use frame::{power_state, PowerWatch};
+
 /// Size of the per-frame resource ring. The number of frames actually allowed in flight is
-/// `Renderer::in_flight` (2 when windowed for latency, 3 when benchmarking for throughput).
+/// the limit of `Renderer`'s `FrameFence` (2 when windowed for latency, 3 when benchmarking for throughput).
 pub const FRAME_SLOTS: usize = 3;
 const SHADOW_SIZE: usize = 2048;
 const SHADOW_HALF: f32 = 150.0;
@@ -139,6 +145,7 @@ pub fn probe() {
         Ok(p) => println!("pipelines: ok (deferred: {})", p.gbuffer[0].is_some()),
         Err(e) => println!("pipelines: ERROR {e}"),
     }
+    frame::probe_timers(&d);
     crate::mac_metal4_probe::probe(&d);
 }
 
@@ -300,7 +307,7 @@ struct Cube {
     i: Buffer,
 }
 
-/// Per-frame-slot buffers. The CPU only writes a slot after the semaphore says its frame finished.
+/// Per-frame-slot buffers. The CPU only writes a slot after the fence says its frame finished.
 struct FrameRes {
     uniforms: Buffer,
     /// indirect args + visible list for the camera, and for shadow casters (city only)
@@ -549,24 +556,6 @@ impl Content {
     }
 }
 
-/// Counting semaphore for frames in flight.
-struct Semaphore {
-    n: Mutex<usize>,
-    cv: Condvar,
-}
-impl Semaphore {
-    fn new(n: usize) -> Arc<Self> { Arc::new(Semaphore { n: Mutex::new(n), cv: Condvar::new() }) }
-    fn wait(&self) {
-        let mut n = self.n.lock().unwrap();
-        while *n == 0 { n = self.cv.wait(n).unwrap(); }
-        *n -= 1;
-    }
-    fn signal(&self) {
-        *self.n.lock().unwrap() += 1;
-        self.cv.notify_one();
-    }
-}
-
 // ------------------------------------------------------------------ renderer
 
 pub struct Renderer {
@@ -584,8 +573,14 @@ pub struct Renderer {
     frames: Vec<FrameRes>,
     shadow_map: Texture,
     targets: Targets,
-    in_flight: usize,
-    sem: Arc<Semaphore>,
+    /// frames-in-flight back-pressure (src/mac_frame.rs)
+    fence: FrameFence,
+    /// pipelining depth and waits of the frames since `take_loop_stats`
+    loop_stats: LoopStats,
+    /// per-pass GPU ms of completed frames (`cfg.gpu_passes`)
+    pass_times: Arc<Mutex<Vec<[f64; 4]>>>,
+    /// thermal frame cap: minimum on-screen time of a drawable, seconds (`set_present_cap`)
+    present_min_s: Option<f64>,
     /// GPU ms per completed command buffer (start..end; consecutive frames overlap on Apple GPUs,
     /// so treat this as a relative cost, and wall-clock throughput as the frame cost)
     gpu_times: Arc<Mutex<Vec<f64>>>,
@@ -635,6 +630,8 @@ impl Renderer {
         let targets = Targets::new(&dev, &cfg, caps, (cfg.width as usize, cfg.height as usize), cfg.scale)?;
         let (cv, ci) = cube();
         let in_flight = in_flight.clamp(1, FRAME_SLOTS);
+        // the thread that creates the renderer is the one that renders: keep it on the performance cores
+        crate::qos::set_thread_qos(crate::qos::Qos::UserInteractive);
         let mut r = Renderer {
             cube: Cube { v: buffer_with(&dev, &cv), i: buffer_with(&dev, &ci) },
             n_lights: lights.len(),
@@ -646,8 +643,10 @@ impl Renderer {
             targets,
             queue,
             pipes,
-            in_flight,
-            sem: Semaphore::new(in_flight),
+            fence: FrameFence::new(&dev, in_flight, cfg.fence),
+            loop_stats: LoopStats::default(),
+            pass_times: Arc::new(Mutex::new(Vec::new())),
+            present_min_s: None,
             gpu_times: Arc::new(Mutex::new(Vec::new())),
             last_gpu_end: Arc::new(Mutex::new(0.0)),
             gpu_errors: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -771,10 +770,8 @@ impl Renderer {
         self.set_config(c)
     }
 
-    pub fn wait_idle(&self) {
-        for _ in 0..self.in_flight { self.sem.wait(); }
-        for _ in 0..self.in_flight { self.sem.signal(); }
-    }
+    /// Block until every committed frame has completed (before rebuilding what frames in flight use).
+    pub fn wait_idle(&self) { self.fence.wait_idle(); }
 
     pub fn frame_count(&self) -> u64 { self.frame }
 
@@ -898,7 +895,8 @@ impl Renderer {
         F: FnOnce() -> Option<Retained<ProtocolObject<dyn objc2_quartz_core::CAMetalDrawable>>>,
     {
         use objc2_quartz_core::CAMetalDrawable;
-        self.sem.wait();
+        // back-pressure: blocks only when `limit` frames are committed and unfinished (the GPU is behind)
+        let fence_wait_ms = self.fence.begin();
         let slot = (self.frame % FRAME_SLOTS as u64) as usize;
         // scripts run here, once the slot's buffers are free to overwrite
         if let Content::Three(s) = &mut self.content {
@@ -929,7 +927,8 @@ impl Renderer {
         };
         self.prev_vp = Some((vp, eye));
         self.write_uniforms(slot, t, &vp_jittered, eye);
-        let cb = self.queue.commandBuffer().expect("command buffer");
+        // one command buffer, or one per pass group when per-pass GPU times are wanted (src/mac_frame.rs)
+        let mut cmds = FrameCmds::new(&self.queue, self.cfg.gpu_passes);
         let planes = frustum_planes(&vp);
         let shadow_planes = frustum_planes(&self.shadow_vp);
         if let Content::Three(s) = &mut self.content {
@@ -937,63 +936,101 @@ impl Renderer {
             let proj = if temporal { jittered(s.view.proj, self.jitter, (cw as f32, ch as f32)) } else { s.view.proj };
             self.last_draws = s.prepare(&self.dev, slot, &planes, &shadow_planes, eye, proj, ch as f32);
         }
-        if self.cfg.gpu_cull {
-            let f = &self.frames[slot];
-            self.content.encode_cull(&cb, &self.pipes, (&f.visible, &f.args), &planes, eye, PROP_CULL_M);
-        }
         // three.js's own programs (v3) render every shadow map of the frame themselves (directional, spot, point cube,
         // VSM blur), with three's depth programs where the native depth-only path would be wrong
         let three_v3 = matches!(&self.content, Content::Three(s) if s.view.v3);
         if let Content::Three(s) = &mut self.content {
             // render-target passes first (PMREM, post-processing, ...: src/mac_targets.rs), then the main pass's shadows
-            s.encode_offscreen(&self.dev, &cb, slot);
-            s.encode_shadows_v3(&cb, slot);
+            s.encode_offscreen(&self.dev, cmds.cb(), slot);
+        }
+        cmds.end_group(PASS_TARGETS);
+        if let Content::Three(s) = &mut self.content {
+            s.encode_shadows_v3(cmds.cb(), slot);
         }
         if shadow && !three_v3 {
             if self.cfg.gpu_cull {
                 let f = &self.frames[slot];
-                self.content.encode_cull(&cb, &self.pipes, (&f.shadow_visible, &f.shadow_args), &shadow_planes, eye, SHADOW_HALF);
+                self.content.encode_cull(cmds.cb(), &self.pipes, (&f.shadow_visible, &f.shadow_args), &shadow_planes, eye, SHADOW_HALF);
             }
-            self.encode_shadow(&cb, slot, &shadow_planes);
+            self.encode_shadow(cmds.cb(), slot, &shadow_planes);
         }
+        cmds.end_group(PASS_SHADOW);
+        if self.cfg.gpu_cull {
+            let f = &self.frames[slot];
+            self.content.encode_cull(cmds.cb(), &self.pipes, (&f.visible, &f.args), &planes, eye, PROP_CULL_M);
+        }
+        // the drawable is taken as late as possible: only the main pass (and the upscale) hold it
+        let drawable_t = Instant::now();
         let d = drawable();
+        let drawable_wait_ms = drawable_t.elapsed().as_secs_f64() * 1000.0;
+        // a host that has not caught up with `drawable_framebuffer_only` (the scale just changed): MetalFX cannot
+        // write a framebufferOnly drawable, so this one frame goes offscreen instead
+        let d = d.filter(|d| self.drawable_framebuffer_only() || !d.texture().isFramebufferOnly());
         let out_tex: Option<Texture> = d.as_ref().map(|d| d.texture());
         let color_idx = (self.frame % 2) as usize;
         {
             let final_tex: Texture = match out_tex { Some(t) => t, None => self.targets.offscreen.clone() };
             // scale 1: render straight into the output, no upscale pass
             let color: Texture = if direct { final_tex.clone() } else { self.targets.color[color_idx].clone() };
-            self.encode_main(&cb, slot, &color, &planes);
-            if temporal {
-                if let Some(m) = &self.targets.motion {
-                    encode_motion(&cb, &self.pipes.motion, &self.targets.depth[color_idx], &m[color_idx], &vp_jittered, &vp, &prev_vp, (cw, ch));
-                }
-            }
+            self.encode_main(cmds.cb(), slot, &color, &planes);
             if !direct {
-                self.encode_upscale(&cb, &color, &final_tex);
+                cmds.end_group(PASS_MAIN);
+                // Motion vectors for MetalFX temporal, after the main pass: today always the depth-reprojection
+                // fallback (camera motion only). Object motion vectors written by the main pass (PC2, through xlat)
+                // will fill `targets.motion` there, and this pass then runs only for content without them.
+                if temporal {
+                    if let Some(m) = &self.targets.motion {
+                        encode_motion(cmds.cb(), &self.pipes.motion, &self.targets.depth[color_idx], &m[color_idx], &vp_jittered, &vp, &prev_vp, (cw, ch));
+                    }
+                }
+                self.encode_upscale(cmds.cb(), &color, &final_tex);
             }
         }
+        let (cb, spans) = cmds.finish(if direct { PASS_MAIN } else { PASS_UPSCALE });
+        let (_, in_flight, done) = self.fence.submit(&cb);
+        self.loop_stats.commit(in_flight, fence_wait_ms, drawable_wait_ms);
         if let Some(d) = &d {
-            cb.presentDrawable(ProtocolObject::from_ref(&**d));
+            let d: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&**d);
+            match self.present_min_s {
+                Some(s) => cb.presentDrawable_afterMinimumDuration(d, s),
+                None => cb.presentDrawable(d),
+            }
         }
-        let sem = self.sem.clone();
+        let pass_times = self.pass_times.clone();
         let times = self.gpu_times.clone();
         let last_end = self.last_gpu_end.clone();
         let errors = self.gpu_errors.clone();
         let handler = RcBlock::new(move |cb: NonNull<CmdBuf>| {
             let cb = unsafe { cb.as_ref() };
-            if cb.status() == MTLCommandBufferStatus::Completed {
+            let ok = cb.status() == MTLCommandBufferStatus::Completed;
+            if ok {
                 // this frame's own GPU time: from when it could start (after the previous frame
                 // ended) to its end, so cross-frame overlap and stalls don't inflate it
                 let mut prev = last_end.lock().unwrap();
                 let (start, end) = (cb.GPUStartTime(), cb.GPUEndTime());
-                times.lock().unwrap().push((end - start.max(*prev)).max(0.0) * 1000.0);
-                *prev = end;
+                match &spans {
+                    // per-pass: the earlier groups' command buffers completed (and recorded themselves) before this one
+                    Some((spans, group)) => {
+                        let mut sp = spans.lock().unwrap();
+                        sp.push(*group, start, end);
+                        let (ms, last) = sp.resolve(*prev);
+                        times.lock().unwrap().push(ms.iter().sum());
+                        let mut pt = pass_times.lock().unwrap();
+                        if pt.len() < 4096 {
+                            pt.push(ms);
+                        }
+                        *prev = last;
+                    }
+                    None => {
+                        times.lock().unwrap().push((end - start.max(*prev)).max(0.0) * 1000.0);
+                        *prev = end;
+                    }
+                }
             } else if let Some(e) = cb.error() {
                 eprintln!("GPU error: {}", e.localizedDescription());
                 errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            sem.signal();
+            done.signal(ok);
         });
         unsafe { cb.addCompletedHandler(RcBlock::as_ptr(&handler)) };
         cb.commit();
@@ -1353,6 +1390,8 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     }
     r.wait_idle();
     r.take_gpu_times();
+    r.take_pass_times();
+    r.take_loop_stats();
     let start = Instant::now();
     let mut last_log = Instant::now();
     let mut logged = 0usize;
@@ -1392,6 +1431,15 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     }
     for ms in r.take_gpu_times() {
         gpu.push(ms);
+    }
+    // pipelining of the measured frames (lines CI greps): how deep the GPU queue ran and where the thread blocked
+    println!("frame loop: {}; fence: {}; render thread QoS {:?}", r.take_loop_stats().line(r.in_flight_limit()), r.fence_label(), crate::qos::thread_qos());
+    if r.cfg.gpu_passes {
+        let mut passes = PassStats::default();
+        for ms in r.take_pass_times() {
+            passes.push(ms);
+        }
+        println!("gpu passes (ms avg over {} frames, one command buffer per group): {}; frame {:.2}", passes.frames, passes.line(), gpu.avg());
     }
     if let Content::Three(s) = &r.content {
         // one line CI greps: per-frame CPU cost split (render() wall = JS frame + upload + prepare + encode)

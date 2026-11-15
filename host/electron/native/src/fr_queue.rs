@@ -149,6 +149,8 @@ pub fn spawn_reader(slot: Arc<Slot>, shared: Arc<Shared>) -> std::thread::JoinHa
     std::thread::Builder::new()
         .name("fastrender-ring".into())
         .spawn(move || {
+            // decodes the frame the render thread is waiting for: just below it, still on the performance cores
+            fastrender::qos::set_thread_qos(fastrender::qos::Qos::UserInitiated);
             let mut c = Consumer::new(slot);
             c.sink = Some(sink_into(shared.clone()));
             c.header().render_ready.store(1, std::sync::atomic::Ordering::Release);

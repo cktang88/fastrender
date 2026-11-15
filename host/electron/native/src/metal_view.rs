@@ -127,6 +127,7 @@ pub fn spawn_render_thread(slot: Arc<Slot>, layer: Retained<CAMetalLayer>, devic
         .spawn(move || {
             let pack = pack;
             let (layer, device) = pack.0;
+            fastrender::qos::set_thread_qos(fastrender::qos::Qos::UserInteractive);
             render_loop(slot, &layer, &device);
         })
         .expect("spawn render thread")

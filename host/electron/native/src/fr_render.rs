@@ -7,6 +7,11 @@
 //!   the window is. A `Batch::reset` (page reload, renderer crash) drops it: ids restart with the new page.
 //! - Options (startHost's `rendererJson`): any `fastrender` CLI option as {"key": "value"} (`scale`, `upscale`,
 //!   `dynres`, `vsync`, `shadow-every`...), applied with `Config::apply_args`.
+//! - Frame loop: the thread runs at QoS user-interactive; at most 2 frames are in flight (the renderer's fence blocks
+//!   only when the GPU is behind); the layer is `framebufferOnly` unless a MetalFX scaler writes the drawable; the
+//!   thermal state and Low Power Mode lower the scale ceiling and cap the presented rate (`{"thermal": 0}` to opt
+//!   out); `{"gpu-passes": 1}` logs per-pass GPU ms. A `shot` frame is rendered offscreen and read back from there
+//!   (it is not presented), so no drawable is ever read.
 //! - Pipelines are created here, synchronously, from the programs the renderer process translated (H5: an async
 //!   compile later only changes this side; the wire protocol stays).
 
@@ -17,13 +22,14 @@ use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use fastrender::core::{Config, DynRes};
+use fastrender::core::{Config, DynRes, LoopStats, PassStats};
 use fastrender::host::{Feed, FeedSource};
-use fastrender::mac::Renderer;
+use fastrender::mac::{PowerWatch, Renderer};
+use fastrender::qos::{Qos, set_thread_qos};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
-use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use objc2_quartz_core::CAMetalLayer;
 
 use crate::fr_queue::Shared;
 use crate::shm::Slot;
@@ -54,8 +60,8 @@ pub fn config_from(json: &str) -> Result<Config, String> {
 }
 
 pub fn prepare_layer(layer: &CAMetalLayer) {
-    // MetalFX and the bilinear upscale write straight into the drawable; output tagged sRGB like the windowed app
-    layer.setFramebufferOnly(false);
+    // output tagged sRGB like the windowed app. framebufferOnly (set by create_view) is kept in step with the
+    // renderer by the render loop: off only while a MetalFX scaler writes the drawable
     let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }));
     layer.setColorspace(srgb.as_deref());
 }
@@ -68,6 +74,8 @@ pub fn spawn(slot: Arc<Slot>, shared: Arc<Shared>, layer: Retained<CAMetalLayer>
         .name("fastrender-render".into())
         .spawn(move || {
             let pack = pack;
+            // the frame the user is looking at: performance cores (Renderer::with_source sets it too)
+            set_thread_qos(Qos::UserInteractive);
             render_loop(slot, shared, &pack.0, cfg);
         })
         .expect("spawn render thread")
@@ -84,6 +92,12 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
     let mut r: Option<Renderer> = None;
     let mut dynres: Option<DynRes> = None;
     let mut failed: Option<String> = None;
+    let mut fb_only = layer.framebufferOnly();
+    let mut power = PowerWatch::new(base.thermal);
+    // the scale the page asked for; the thermal ceiling may hold the renderer below it
+    let mut base_scale = base.scale;
+    let (mut loop_stats, mut passes) = (LoopStats::default(), PassStats::default());
+    let mut limit = 2;
     let t0 = Instant::now();
     while let Some(b) = shared.next_batch() {
         autoreleasepool(|_| {
@@ -115,6 +129,9 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                     Ok(nr) => {
                         println!("[fastrender] renderer {}x{} {} on {}", dw, dh, nr.cfg.label(), fastrender::mac::device_name());
                         dynres = (nr.cfg.dynres_ms > 0.0).then(|| DynRes::new(nr.cfg.dynres_ms, nr.cfg.scale));
+                        base_scale = nr.cfg.scale;
+                        limit = nr.in_flight_limit();
+                        power = PowerWatch::new(base.thermal); // re-applied to the new renderer below
                         r = Some(nr);
                     }
                     Err(e) => {
@@ -133,21 +150,35 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                     eprintln!("[fastrender] resize: {e}");
                 }
             }
+            // thermal state / Low Power Mode (polled once a second): scale ceiling and presented-rate cap
+            if let Some(state) = power.poll() {
+                let l = state.limits();
+                println!("[fastrender] power: {} -> scale <= {:.2}, frame cap {:?}", state.label(), l.max_scale, l.fps_cap);
+                rr.set_present_cap(l.fps_cap);
+                let scale = match dynres.as_mut() {
+                    Some(d) => {
+                        d.set_limits(l);
+                        d.scale
+                    }
+                    None => base_scale.min(l.max_scale),
+                };
+                if (scale - rr.cfg.scale).abs() > 1e-4 {
+                    let _ = rr.set_scale(scale);
+                }
+            }
+            // drawables are framebufferOnly unless a MetalFX scaler writes them (follows the scale / upscale config)
+            if rr.drawable_framebuffer_only() != fb_only {
+                fb_only = !fb_only;
+                layer.setFramebufferOnly(fb_only);
+            }
             let tc = Instant::now();
-            let mut drawn = None;
-            rr.render(t0.elapsed().as_secs_f32(), || {
-                let d = layer.nextDrawable();
-                drawn = d.clone();
-                d
-            });
+            // a `shot` frame renders offscreen (same passes, same size) and is read back from there
+            let shot = b.shot.is_some();
+            rr.render(t0.elapsed().as_secs_f32(), || if shot { None } else { layer.nextDrawable() });
             let cpu = tc.elapsed();
             if let Some(path) = &b.shot {
                 // the frame's exact output (no window compositing, no DOM): read back after the frame's GPU work
-                let r = match &drawn {
-                    Some(d) => rr.read_texture(&d.texture()).and_then(|(w, hh, px)| fastrender::mac::save_png(path, w, hh, &px)),
-                    None => Err("no drawable".into()),
-                };
-                match r {
+                match rr.screenshot(path) {
                     Ok(()) => println!("[fastrender] shot {path}"),
                     Err(e) => eprintln!("[fastrender] shot {path}: {e}"),
                 }
@@ -159,6 +190,13 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
                     if d.update(ms as f32) {
                         let _ = rr.set_scale(d.scale);
                     }
+                }
+            }
+            loop_stats.merge(&rr.take_loop_stats());
+            for ms in rr.take_pass_times() {
+                passes.push(ms);
+                if passes.frames % 300 == 0 {
+                    println!("[fastrender] gpu passes (ms avg over {} frames): {}", passes.frames, passes.line());
                 }
             }
             h.render_ns.fetch_add(cpu.as_nanos() as u64, Ordering::Relaxed);
@@ -176,5 +214,9 @@ fn render_loop(slot: Arc<Slot>, shared: Arc<Shared>, layer: &CAMetalLayer, base:
     }
     if let Some(r) = r {
         r.wait_idle();
+        println!("[fastrender] frame loop: {}; fence: {}; render thread QoS {:?}; framebufferOnly {fb_only}", loop_stats.line(limit), r.fence_label(), fastrender::qos::thread_qos());
+        if passes.frames > 0 {
+            println!("[fastrender] gpu passes (ms avg over {} frames): {}", passes.frames, passes.line());
+        }
     }
 }

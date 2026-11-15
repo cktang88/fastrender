@@ -75,6 +75,27 @@ pub struct Config {
     /// three.js scenes: "three" (three's own programs, translated to MSL; the default) or "native" (the
     /// hand-written `fs_three`, protocol v2). Passed to the bundle as `__fr.params.programs`.
     pub programs: String,
+    /// per-pass GPU ms (targets, shadow, main, upscale): the frame is committed as one command buffer per pass group
+    /// (`--gpu-passes 1`; key G in the window). Off by default: three more commits per frame.
+    pub gpu_passes: bool,
+    /// frames-in-flight back-pressure: completion-handler counter (default) or an `MTLSharedEvent` the GPU signals
+    /// (`--fence event`: the shape Metal 4's `MTL4CommandQueue.signalEvent` needs)
+    pub fence: Fence,
+    /// follow `NSProcessInfo.thermalState` / Low Power Mode: lower the scale ceiling and cap the frame rate
+    /// (`--thermal 0` to ignore them, e.g. for benchmarks)
+    pub thermal: bool,
+    /// windowed mode: pace frames with `CAMetalDisplayLink` (macOS 14+) when vsync is on (`--display-link 0`: the
+    /// `nextDrawable` loop)
+    pub display_link: bool,
+    /// windowed mode: exit after this many seconds and print the frame-loop report (0 = run until closed)
+    pub run_seconds: f32,
+}
+
+/// What counts frames in flight (`mac::FrameFence`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fence {
+    Cpu,
+    Event,
 }
 
 impl Default for Config {
@@ -105,6 +126,11 @@ impl Default for Config {
             shot: None,
             fixed_t: None,
             programs: "three".into(),
+            gpu_passes: false,
+            fence: Fence::Cpu,
+            thermal: true,
+            display_link: true,
+            run_seconds: 0.0,
         }
     }
 }
@@ -161,6 +187,11 @@ impl Config {
                 "shot" => self.shot = Some(v.clone()),
                 "time" => self.fixed_t = Some(num(v)? as f32),
                 "programs" => self.programs = match v.as_str() { "three" | "native" => v.clone(), _ => return Err(format!("bad --programs {v} (three|native)")) },
+                "gpu-passes" => self.gpu_passes = num(v)? != 0.0,
+                "fence" => self.fence = match v.as_str() { "cpu" | "semaphore" => Fence::Cpu, "event" => Fence::Event, _ => return Err(format!("bad --fence {v} (cpu|event)")) },
+                "thermal" => self.thermal = num(v)? != 0.0,
+                "display-link" => self.display_link = num(v)? != 0.0,
+                "run-seconds" => self.run_seconds = num(v)? as f32,
                 _ => return Err(format!("unknown option --{k}")),
             }
             i += 2;
@@ -385,6 +416,19 @@ impl DynRes {
     pub fn new(target_ms: f32, start: f32) -> Self {
         DynRes { target_ms, scale: start, min: 0.35, max: 1.0, ema: target_ms, cooldown: 0 }
     }
+    /// New floor and ceiling (thermal state, Low Power Mode: `PowerState::limits`); returns true when the current
+    /// scale had to move to stay inside them. A raised ceiling is climbed by `update` at its usual pace.
+    pub fn set_limits(&mut self, l: PowerLimits) -> bool {
+        self.min = l.min_scale.min(l.max_scale);
+        self.max = l.max_scale;
+        let new = self.scale.clamp(self.min, self.max);
+        let changed = (new - self.scale).abs() > 1e-4;
+        self.scale = new;
+        if changed {
+            self.cooldown = 20;
+        }
+        changed
+    }
     /// feed one GPU frame time; returns true when the scale changed
     pub fn update(&mut self, gpu_ms: f32) -> bool {
         self.ema = self.ema * 0.9 + gpu_ms * 0.1;
@@ -409,6 +453,154 @@ impl DynRes {
         } else {
             false
         }
+    }
+}
+
+// ------------------------------------------------------------------ thermal state and Low Power Mode
+//
+// A fanless Air has no way to shed heat but to do less. `NSProcessInfo.thermalState` and Low Power Mode are read by
+// the hosts about once a second (`mac::power_state`) and turned into limits here (pure, unit-tested):
+// - fair: dynamic resolution may go lower (nothing is taken away yet);
+// - serious: scale ceiling 0.75 (44 % fewer pixels than native) and a 30 fps cap;
+// - critical: scale ceiling 0.5 and a 30 fps cap;
+// - Low Power Mode: scale ceiling 0.75; no cap of our own (the system lowers the display's refresh itself).
+
+/// `NSProcessInfoThermalState`
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Thermal {
+    #[default]
+    Nominal,
+    Fair,
+    Serious,
+    Critical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PowerState {
+    pub thermal: Thermal,
+    pub low_power: bool,
+}
+
+/// What a power state allows: the range of the internal-resolution scale and the frame-rate cap.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PowerLimits {
+    pub min_scale: f32,
+    pub max_scale: f32,
+    pub fps_cap: Option<f32>,
+}
+
+impl PowerState {
+    /// From `FASTRENDER_THERMAL=nominal|fair|serious|critical` and `FASTRENDER_LOW_POWER=1` (to try the policy by
+    /// hand and on CI, where the real state never leaves nominal).
+    pub fn from_env() -> Option<PowerState> {
+        let thermal = match std::env::var("FASTRENDER_THERMAL").ok().as_deref() {
+            Some("nominal") => Some(Thermal::Nominal),
+            Some("fair") => Some(Thermal::Fair),
+            Some("serious") => Some(Thermal::Serious),
+            Some("critical") => Some(Thermal::Critical),
+            _ => None,
+        };
+        let low_power = std::env::var("FASTRENDER_LOW_POWER").ok().map(|v| v != "0");
+        if thermal.is_none() && low_power.is_none() {
+            return None;
+        }
+        Some(PowerState { thermal: thermal.unwrap_or_default(), low_power: low_power.unwrap_or(false) })
+    }
+
+    pub fn limits(self) -> PowerLimits {
+        let (min_scale, mut max_scale, fps_cap): (f32, f32, Option<f32>) = match self.thermal {
+            Thermal::Nominal => (0.35, 1.0, None),
+            Thermal::Fair => (0.3, 1.0, None),
+            Thermal::Serious => (0.3, 0.75, Some(30.0)),
+            Thermal::Critical => (0.25, 0.5, Some(30.0)),
+        };
+        if self.low_power {
+            max_scale = max_scale.min(0.75);
+        }
+        PowerLimits { min_scale, max_scale, fps_cap }
+    }
+
+    pub fn label(self) -> String {
+        format!("thermal {}{}", match self.thermal { Thermal::Nominal => "nominal", Thermal::Fair => "fair", Thermal::Serious => "serious", Thermal::Critical => "critical" }, if self.low_power { ", low power" } else { "" })
+    }
+}
+
+// ------------------------------------------------------------------ frame-loop and per-pass GPU statistics
+
+/// Pass groups of a frame, in the order they are encoded. Per-pass GPU time is reported per group.
+pub const GPU_PASSES: [&str; 4] = ["targets", "shadow", "main", "upscale"];
+/// offscreen render-target passes (PMREM, post-processing chains: src/mac_targets.rs)
+pub const PASS_TARGETS: usize = 0;
+/// every shadow map of the frame (and the shadow cull)
+pub const PASS_SHADOW: usize = 1;
+/// camera cull + the main pass
+pub const PASS_MAIN: usize = 2;
+/// motion vectors + MetalFX / bilinear upscale (nothing at scale 1)
+pub const PASS_UPSCALE: usize = 3;
+
+/// GPU ms per pass group, averaged (`mac::Renderer::take_pass_times`).
+#[derive(Clone, Debug, Default)]
+pub struct PassStats {
+    pub frames: u64,
+    pub sum_ms: [f64; 4],
+}
+impl PassStats {
+    pub fn push(&mut self, ms: [f64; 4]) {
+        self.frames += 1;
+        for i in 0..4 { self.sum_ms[i] += ms[i]; }
+    }
+    pub fn avg(&self) -> [f64; 4] { self.sum_ms.map(|s| if self.frames == 0 { 0.0 } else { s / self.frames as f64 }) }
+    /// "targets 0.12, shadow 1.30, main 4.21, upscale 0.80"
+    pub fn line(&self) -> String {
+        let a = self.avg();
+        (0..4).map(|i| format!("{} {:.2}", GPU_PASSES[i], a[i])).collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// How the frame loop ran: pipelining depth and where the render thread blocked.
+#[derive(Clone, Debug, Default)]
+pub struct LoopStats {
+    pub frames: u64,
+    /// frames in flight at each commit, the committed one included: 1 = the GPU was idle (CPU-bound), the limit =
+    /// the GPU is the bottleneck
+    pub in_flight_sum: u64,
+    pub in_flight_max: u32,
+    /// time blocked waiting for a frame slot (back-pressure: by design, only when GPU-bound)
+    pub fence_wait_ms: f64,
+    pub fence_wait_max_ms: f64,
+    /// frames that waited more than 1 ms for a slot
+    pub fence_stalls: u64,
+    /// time inside the drawable callback (`nextDrawable`; ~0 with a display link, which hands the drawable over)
+    pub drawable_wait_ms: f64,
+    pub drawable_wait_max_ms: f64,
+}
+impl LoopStats {
+    pub fn commit(&mut self, in_flight: u32, fence_wait_ms: f64, drawable_wait_ms: f64) {
+        self.frames += 1;
+        self.in_flight_sum += in_flight as u64;
+        self.in_flight_max = self.in_flight_max.max(in_flight);
+        self.fence_wait_ms += fence_wait_ms;
+        self.fence_wait_max_ms = self.fence_wait_max_ms.max(fence_wait_ms);
+        if fence_wait_ms > 1.0 { self.fence_stalls += 1; }
+        self.drawable_wait_ms += drawable_wait_ms;
+        self.drawable_wait_max_ms = self.drawable_wait_max_ms.max(drawable_wait_ms);
+    }
+    pub fn merge(&mut self, o: &LoopStats) {
+        self.frames += o.frames;
+        self.in_flight_sum += o.in_flight_sum;
+        self.in_flight_max = self.in_flight_max.max(o.in_flight_max);
+        self.fence_wait_ms += o.fence_wait_ms;
+        self.fence_wait_max_ms = self.fence_wait_max_ms.max(o.fence_wait_max_ms);
+        self.fence_stalls += o.fence_stalls;
+        self.drawable_wait_ms += o.drawable_wait_ms;
+        self.drawable_wait_max_ms = self.drawable_wait_max_ms.max(o.drawable_wait_max_ms);
+    }
+    pub fn line(&self, limit: usize) -> String {
+        let n = self.frames.max(1) as f64;
+        format!(
+            "frames in flight {:.2} avg, {} max (limit {limit}); slot wait {:.3} ms avg, {:.2} max, {} of {} frames > 1 ms; drawable wait {:.3} ms avg, {:.2} max",
+            self.in_flight_sum as f64 / n, self.in_flight_max, self.fence_wait_ms / n, self.fence_wait_max_ms, self.fence_stalls, self.frames, self.drawable_wait_ms / n, self.drawable_wait_max_ms
+        )
     }
 }
 
@@ -580,6 +772,70 @@ mod tests {
         let mut changes = 0;
         for _ in 0..500 { if d.update(40.0 * d.scale * d.scale) { changes += 1; } }
         assert!(changes <= 1 && (d.scale - s).abs() < 0.06);
+    }
+
+    #[test]
+    fn power_limits_follow_the_thermal_state() {
+        let l = |t, lp| PowerState { thermal: t, low_power: lp }.limits();
+        assert_eq!(l(Thermal::Nominal, false), PowerLimits { min_scale: 0.35, max_scale: 1.0, fps_cap: None });
+        assert_eq!(l(Thermal::Fair, false).max_scale, 1.0);
+        assert!(l(Thermal::Fair, false).min_scale < 0.35);
+        assert_eq!((l(Thermal::Serious, false).max_scale, l(Thermal::Serious, false).fps_cap), (0.75, Some(30.0)));
+        assert_eq!((l(Thermal::Critical, false).max_scale, l(Thermal::Critical, false).fps_cap), (0.5, Some(30.0)));
+        // Low Power Mode lowers the ceiling, never raises it, and adds no cap of its own
+        assert_eq!((l(Thermal::Nominal, true).max_scale, l(Thermal::Nominal, true).fps_cap), (0.75, None));
+        assert_eq!(l(Thermal::Critical, true).max_scale, 0.5);
+        // monotonic: a hotter state never allows more
+        let order = [Thermal::Nominal, Thermal::Fair, Thermal::Serious, Thermal::Critical];
+        assert!(order.windows(2).all(|w| l(w[1], false).max_scale <= l(w[0], false).max_scale && l(w[1], false).min_scale <= l(w[0], false).min_scale));
+    }
+
+    #[test]
+    fn dynres_obeys_power_limits() {
+        // a cheap frame: DynRes sits at scale 1 until the state goes serious
+        let mut d = DynRes::new(16.0, 1.0);
+        for _ in 0..200 { d.update(4.0); }
+        assert_eq!(d.scale, 1.0);
+        assert!(d.set_limits(PowerState { thermal: Thermal::Serious, low_power: false }.limits()));
+        assert_eq!(d.scale, 0.75);
+        for _ in 0..500 { d.update(4.0 * d.scale * d.scale); }
+        assert_eq!(d.scale, 0.75, "must not climb past the ceiling");
+        // back to nominal: no jump, then it climbs on its own
+        assert!(!d.set_limits(PowerState::default().limits()));
+        for _ in 0..500 { d.update(4.0 * d.scale * d.scale); }
+        assert_eq!(d.scale, 1.0);
+        // critical while already low: unchanged scale, lower floor available
+        let mut d = DynRes::new(16.0, 0.4);
+        assert!(!d.set_limits(PowerState { thermal: Thermal::Critical, low_power: true }.limits()));
+        assert_eq!((d.min, d.max), (0.25, 0.5));
+    }
+
+    #[test]
+    fn loop_and_pass_stats() {
+        let mut l = LoopStats::default();
+        l.commit(1, 0.0, 0.2);
+        l.commit(2, 3.0, 0.4);
+        assert_eq!((l.frames, l.in_flight_max, l.fence_stalls), (2, 2, 1));
+        let mut m = LoopStats::default();
+        m.merge(&l);
+        m.merge(&l);
+        assert_eq!((m.frames, m.in_flight_sum, m.fence_wait_max_ms), (4, 6, 3.0));
+        assert!(m.line(2).starts_with("frames in flight 1.50 avg, 2 max (limit 2)"));
+        let mut p = PassStats::default();
+        p.push([0.0, 1.0, 4.0, 1.0]);
+        p.push([0.0, 3.0, 2.0, 1.0]);
+        assert_eq!(p.avg(), [0.0, 2.0, 3.0, 1.0]);
+        assert_eq!(p.line(), "targets 0.00, shadow 2.00, main 3.00, upscale 1.00");
+    }
+
+    #[test]
+    fn frame_loop_options_parse() {
+        let mut c = Config::default();
+        assert!(!c.gpu_passes && c.fence == Fence::Cpu && c.thermal && c.display_link);
+        let args: Vec<String> = "--gpu-passes 1 --fence event --thermal 0 --display-link 0 --run-seconds 2.5".split(' ').map(String::from).collect();
+        c.apply_args(&args).unwrap();
+        assert!(c.gpu_passes && c.fence == Fence::Event && !c.thermal && !c.display_link && c.run_seconds == 2.5);
+        assert!(c.apply_args(&["--fence".into(), "nope".into()]).is_err());
     }
 
     #[test]

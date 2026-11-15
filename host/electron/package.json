@@ -9,7 +9,18 @@
     "build:debug": "napi build --platform --manifest-path native/Cargo.toml --output-dir native",
     "start": "electron app/main.js",
     "spike": "electron app/main.js --frames 120 --out ../..",
-    "test": "node --import ./test/three-alias.mjs test/host-wrapper.test.mjs"
+    "test": "node --import ./test/three-alias.mjs test/host-wrapper.test.mjs",
+    "game-mode": "node scripts/game-mode.mjs"
+  },
+  "build": {
+    "appId": "dev.fastrender.electron",
+    "mac": {
+      "category": "public.app-category-games",
+      "extendInfo": {
+        "LSSupportsGameMode": true,
+        "GCSupportsGameMode": true
+      }
+    }
   },
   "napi": {
     "binaryName": "fastrender-electron",

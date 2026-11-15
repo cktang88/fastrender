@@ -121,7 +121,10 @@ pub fn attach(handle: Option<Buffer>, buffer: Uint32Array, shm_name: Option<Stri
             let shm = Shm::open(&name).map_err(err)?;
             if shm.header().mode.load(Ordering::Acquire) == shm::MODE_FASTRENDER {
                 // glslang's one-time process setup off the first host.program call's path
-                let _ = std::thread::Builder::new().name("xlat-warm-up".into()).spawn(fastrender::xlat::warm_up);
+                let _ = std::thread::Builder::new().name("xlat-warm-up".into()).spawn(|| {
+                    fastrender::qos::set_thread_qos(fastrender::qos::Qos::Utility); // background work: off the performance cores
+                    fastrender::xlat::warm_up()
+                });
             }
             lock().shm = Some(Arc::new(shm));
             name
