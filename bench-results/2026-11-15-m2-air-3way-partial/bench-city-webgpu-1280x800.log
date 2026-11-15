@@ -1,0 +1,5 @@
+[page] [bench] city: 494 buildings, 18395 instanced windows
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 0 ms
+[bench-main] result {"tag":"bench-city-webgpu-1280x800","fps":151.912,"frame_ms":{"mean":6.574,"p50":3.8,"p95":15.1,"p99":16.4,"max":18.1,"n":3038},"js_ms":0.9,"render_ms":0.9,"gpu_ms":4.762,"draws":357,"cpu":55.3,"backend":"WebGPU"}
+[bench-main] DONE bench-city-webgpu-1280x800 (exit 0)

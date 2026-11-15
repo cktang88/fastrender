@@ -1,0 +1,207 @@
+{
+  "tag": "bench-city-fastrender-1280x800-fx",
+  "label": "MetalFX-spatial-from-0.5x-per-axis",
+  "variant": "fastrender",
+  "scene": "city",
+  "px": "1280x800",
+  "aa": false,
+  "vsync": false,
+  "electron": "45.3.2",
+  "chrome": "156.0.8078.100",
+  "platform": "darwin arm64",
+  "isolated": true,
+  "requests": {
+    "local": 0,
+    "missing": 0,
+    "remote": 0
+  },
+  "display": {
+    "scaleFactor": 2,
+    "size": {
+      "width": 1470,
+      "height": 956
+    },
+    "refresh": 60.00239944458008,
+    "window_points": "640x400"
+  },
+  "gpu_feature_status": {
+    "2d_canvas": "disabled_software",
+    "direct_rendering_display_compositor": "disabled_off_ok",
+    "gpu_compositing": "disabled_software",
+    "multiple_raster_threads": "enabled_on",
+    "opengl": "disabled_off",
+    "rasterization": "disabled_software",
+    "raw_draw": "disabled_off_ok",
+    "skia_graphite": "disabled_off",
+    "trees_in_viz": "disabled_off",
+    "video_decode": "disabled_software",
+    "video_encode": "disabled_software",
+    "webgl": "disabled_off",
+    "webgpu": "disabled_off",
+    "webnn": "disabled_off"
+  },
+  "renderer_options": {
+    "scale": 0.5,
+    "upscale": "metalfx",
+    "vsync": 0
+  },
+  "shm": "/frb-69250",
+  "shot": "bench-city-fastrender-1280x800-fx-shot.png",
+  "processes": {
+    "wall_s": 20,
+    "main": {
+      "cpu_percent": 8.9,
+      "cpu_s": 1.779,
+      "working_set_mb": 241.8,
+      "peak_working_set_mb": 245.8,
+      "footprint_mb": 168,
+      "processes": 1
+    },
+    "gpu": {
+      "cpu_percent": 0,
+      "cpu_s": 0,
+      "working_set_mb": 66.1,
+      "peak_working_set_mb": 66.2,
+      "footprint_mb": 12,
+      "processes": 1
+    },
+    "other": {
+      "cpu_percent": 0,
+      "cpu_s": 0,
+      "working_set_mb": 47.5,
+      "peak_working_set_mb": 47.6,
+      "footprint_mb": 7.1,
+      "processes": 1
+    },
+    "page": {
+      "cpu_percent": 61.6,
+      "cpu_s": 12.323,
+      "working_set_mb": 455.5,
+      "peak_working_set_mb": 455.5,
+      "footprint_mb": 264,
+      "processes": 1
+    },
+    "total": {
+      "cpu_percent": 70.5,
+      "cpu_s": 14.102,
+      "working_set_mb": 810.9,
+      "footprint_mb": 451.1
+    },
+    "main_process_cpu_percent_node": 8.9
+  },
+  "pace": "gpu",
+  "warmup_s": 10,
+  "measure_s": 20.003,
+  "backend": {
+    "api": "Metal (fastrender)",
+    "renderer": "fastrender render thread, main process",
+    "antialias": false,
+    "samples": 1,
+    "drawingBuffer": "1280x800"
+  },
+  "frames": 7083,
+  "fps": 354.093,
+  "drain_ms": 2.6,
+  "frame_ms": {
+    "mean": 2.824,
+    "p50": 2.2,
+    "p95": 9.3,
+    "p99": 16.6,
+    "max": 44.4,
+    "n": 7082
+  },
+  "js_ms": {
+    "mean": 0.112,
+    "p50": 0.1,
+    "p95": 0.2,
+    "p99": 0.2,
+    "max": 0.4,
+    "n": 7083
+  },
+  "render_ms": {
+    "mean": 0.102,
+    "p50": 0.1,
+    "p95": 0.2,
+    "p99": 0.2,
+    "max": 0.3,
+    "n": 7083
+  },
+  "update_ms": {
+    "mean": 0.01,
+    "p50": 0,
+    "p95": 0.1,
+    "p99": 0.1,
+    "max": 0.2,
+    "n": 7083
+  },
+  "flush_ms": {
+    "mean": 0.012,
+    "p50": 0,
+    "p95": 0.1,
+    "p99": 0.1,
+    "max": 0.2,
+    "n": 7083
+  },
+  "gpu_ms": {
+    "mean": 1.825,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null,
+    "n": 7083
+  },
+  "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+  "draws": {
+    "mean": 152.969,
+    "p50": 149,
+    "p95": 300,
+    "p99": 318,
+    "max": 326,
+    "n": 7083
+  },
+  "triangles": 224176,
+  "render_calls_per_frame": 1,
+  "raf_ticks": 1432575,
+  "waited_ticks": 1425492,
+  "gpu_wait_ms_per_frame": 2.708,
+  "issues": {
+    "errors": [],
+    "warnings": [],
+    "gpu": []
+  },
+  "net": {
+    "inflight": 0,
+    "done": 0,
+    "failed": 0
+  },
+  "native": {
+    "rendered": 7083,
+    "skipped": 0,
+    "rendered_fps": 354.093,
+    "render_thread_cpu_ms": 2.546,
+    "draws": 289,
+    "programs": 5,
+    "gpu_errors": 0,
+    "drawable": "1280x800",
+    "xlat": {
+      "count": 5,
+      "avg_ms": 0.028
+    },
+    "images": {
+      "calls": 0,
+      "cached": 0,
+      "failed": 0,
+      "ms": 0,
+      "bytes": 0,
+      "maxMs": 0
+    }
+  },
+  "unsupported": {},
+  "city": {
+    "buildings": 494,
+    "windows": 18395
+  },
+  "compile_ms": 10.6,
+  "ok": true,
+  "console_top": []
+}

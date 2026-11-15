@@ -1,0 +1,5 @@
+[page] [bench] city: 494 buildings, 18395 instanced windows
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 3 ms
+[bench-main] result {"tag":"bench-city-webgl-2560x1600","fps":154.986,"frame_ms":{"mean":6.451,"p50":5.8,"p95":13.8,"p99":14.8,"max":15.9,"n":3100},"js_ms":0.4,"render_ms":0.4,"gpu_ms":7.472,"draws":353,"cpu":51.6,"backend":"WebGL2"}
+[bench-main] DONE bench-city-webgl-2560x1600 (exit 0)

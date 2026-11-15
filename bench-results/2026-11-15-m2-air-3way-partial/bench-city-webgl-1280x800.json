@@ -1,0 +1,173 @@
+{
+  "tag": "bench-city-webgl-1280x800",
+  "label": "",
+  "variant": "webgl",
+  "scene": "city",
+  "px": "1280x800",
+  "aa": false,
+  "vsync": false,
+  "electron": "45.3.2",
+  "chrome": "156.0.8078.100",
+  "platform": "darwin arm64",
+  "isolated": true,
+  "requests": {
+    "local": 0,
+    "missing": 0,
+    "remote": 0
+  },
+  "display": {
+    "scaleFactor": 2,
+    "size": {
+      "width": 1470,
+      "height": 956
+    },
+    "refresh": 60.00239944458008,
+    "window_points": "640x400"
+  },
+  "gpu_feature_status": {
+    "2d_canvas": "disabled_software",
+    "direct_rendering_display_compositor": "disabled_off_ok",
+    "gpu_compositing": "disabled_software",
+    "multiple_raster_threads": "enabled_on",
+    "opengl": "disabled_off",
+    "rasterization": "disabled_software",
+    "raw_draw": "disabled_off_ok",
+    "skia_graphite": "disabled_off",
+    "trees_in_viz": "disabled_off",
+    "video_decode": "disabled_software",
+    "video_encode": "disabled_software",
+    "webgl": "disabled_off",
+    "webgpu": "disabled_off",
+    "webnn": "disabled_off"
+  },
+  "shot": "bench-city-webgl-1280x800-shot.png",
+  "processes": {
+    "wall_s": 20.01,
+    "main": {
+      "cpu_percent": 0.2,
+      "cpu_s": 0.041,
+      "working_set_mb": 165.6,
+      "peak_working_set_mb": 174.9,
+      "footprint_mb": 45,
+      "processes": 1
+    },
+    "gpu": {
+      "cpu_percent": 13.1,
+      "cpu_s": 2.612,
+      "working_set_mb": 102.6,
+      "peak_working_set_mb": 105.1,
+      "footprint_mb": 115,
+      "processes": 1
+    },
+    "other": {
+      "cpu_percent": 0,
+      "cpu_s": 0,
+      "working_set_mb": 47.5,
+      "peak_working_set_mb": 47.5,
+      "footprint_mb": 7.1,
+      "processes": 1
+    },
+    "page": {
+      "cpu_percent": 33.4,
+      "cpu_s": 6.677,
+      "working_set_mb": 221.9,
+      "peak_working_set_mb": 224.5,
+      "footprint_mb": 103,
+      "processes": 1
+    },
+    "total": {
+      "cpu_percent": 46.7,
+      "cpu_s": 9.33,
+      "working_set_mb": 537.6,
+      "footprint_mb": 270.1
+    },
+    "main_process_cpu_percent_node": 0.2
+  },
+  "pace": "gpu",
+  "warmup_s": 10,
+  "measure_s": 20.012,
+  "backend": {
+    "api": "WebGL2",
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+    "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+    "antialias": false,
+    "samples": 0,
+    "drawingBuffer": "1280x800",
+    "timerQuery": true
+  },
+  "frames": 3138,
+  "fps": 156.807,
+  "drain_ms": 2.7,
+  "frame_ms": {
+    "mean": 6.374,
+    "p50": 4.4,
+    "p95": 15.2,
+    "p99": 16.3,
+    "max": 16.6,
+    "n": 3137
+  },
+  "js_ms": {
+    "mean": 0.58,
+    "p50": 0.6,
+    "p95": 0.8,
+    "p99": 1,
+    "max": 1.1,
+    "n": 3138
+  },
+  "render_ms": {
+    "mean": 0.57,
+    "p50": 0.6,
+    "p95": 0.8,
+    "p99": 1,
+    "max": 1.1,
+    "n": 3138
+  },
+  "update_ms": {
+    "mean": 0.01,
+    "p50": 0,
+    "p95": 0.1,
+    "p99": 0.1,
+    "max": 0.1,
+    "n": 3138
+  },
+  "flush_ms": null,
+  "gpu_ms": {
+    "mean": 4.185,
+    "p50": 3.881,
+    "p95": 6.72,
+    "p99": 7.073,
+    "max": 7.986,
+    "n": 3140
+  },
+  "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+  "draws": {
+    "mean": 384.911,
+    "p50": 351,
+    "p95": 537,
+    "p99": 562,
+    "max": 572,
+    "n": 3138
+  },
+  "triangles": 224114,
+  "render_calls_per_frame": 1,
+  "raf_ticks": 698524,
+  "waited_ticks": 695386,
+  "gpu_wait_ms_per_frame": 1.177,
+  "issues": {
+    "errors": [],
+    "warnings": [],
+    "gpu": []
+  },
+  "net": {
+    "inflight": 0,
+    "done": 0,
+    "failed": 0
+  },
+  "city": {
+    "buildings": 494,
+    "windows": 18395
+  },
+  "compile_ms": 303.9,
+  "ok": true,
+  "console_top": []
+}

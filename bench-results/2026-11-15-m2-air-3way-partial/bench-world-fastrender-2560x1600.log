@@ -1,0 +1,27 @@
+[page] [boot] modules loaded 0s
+[page] [boot] quality applied 0s
+[page] [boot] pbr 0.03s
+[page] [boot] manifest 0.03s
+[fastrender] renderer 2560x1600 three forward memoryless scale=1.00 up=bilinear shadow=cached lights=64 cull=gpu props=150000 on Apple M2
+[page] [boot] museum data 0.05s
+[page] [boot] rebuilt index 0.05s
+[page] [boot] ready 0.05s
+[page] [boot] level build start 0.05s
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] [seamless] built {"kind":"nyc","seed":20261105,"name":"Manhattan"} in 0.0 ms
+[page] [boot] level built 0.05s
+[page] [boot] programs compiled (0) 0.05s
+[page] [boot] first frame (0 programs, 862 calls, 0 ms) 0.07s
+[page] [bench] world started after 3 frames, 2.5 s; fetch {"inflight":62,"done":24,"failed":0}
+[page] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch
+[page] Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock.
+pipeline cache: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//com.github.Electron/com.apple.gpuarchiver/gpuarchiver-b3df32/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-fca546.metallib': expecting 'fragment' stage in pipeline no. '44'
+
+[fastrender] shot ~/github/fastrender/host/electron/bench-out/bench-world-fastrender-2560x1600-shot.png
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 8 ms
+[bench-main] result {"tag":"bench-world-fastrender-2560x1600","fps":6.346,"frame_ms":{"mean":157.585,"p50":157.3,"p95":160.4,"p99":167.4,"max":170,"n":126},"js_ms":9,"render_ms":7.2,"gpu_ms":157.678,"draws":1476,"cpu":34.4,"backend":"Metal (fastrender)"}
+[fastrender] frame loop: frames in flight 1.94 avg, 2 max (limit 2); slot wait 133.308 ms avg, 162.23 max, 195 of 214 frames > 1 ms; drawable wait 0.220 ms avg, 17.75 max; fence: completion handler; render thread QoS Some(UserInteractive); framebufferOnly true
+[bench-main] DONE bench-world-fastrender-2560x1600 (exit 0)

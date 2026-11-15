@@ -1,0 +1,26 @@
+[page] THREE.NodeBuilder: Material "ShaderMaterial" is not compatible.
+[page] [boot] modules loaded 0s
+[page] [boot] quality applied 0s
+[page] THREE.NodeBuilder: Material "ShaderMaterial" is not compatible.
+[page] [boot] pbr 0.03s
+[page] [boot] manifest 0.03s
+[page] [boot] museum data 0.03s
+[page] [boot] rebuilt index 0.03s
+[page] [boot] ready 0.03s
+[page] [boot] level build start 0.03s
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] [seamless] built {"kind":"nyc","seed":20261105,"name":"Manhattan"} in 0.0 ms
+[page] [boot] level built 0.03s
+[page] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch
+[page] [boot] programs compiled (0) 3.25s
+[page] Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock.
+[page] [boot] first frame (0 programs, 226 calls, 0 ms) 3.27s
+[page] [bench] world started after 195 frames, 9.1 s; fetch {"inflight":1,"done":163,"failed":28}
+[page] Calling [RenderPassEncoder (unlabeled)].Draw with a vertex count of 0 is unusual.
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 65 ms
+[page] Calling [RenderPassEncoder (unlabeled)].Draw with an index count of 0 is unusual.
+[bench-main] result {"tag":"bench-world-webgpu-1280x800","fps":25.253,"frame_ms":{"mean":39.519,"p50":39.5,"p95":41.3,"p99":41.9,"max":43.3,"n":506},"js_ms":13.7,"render_ms":12.2,"gpu_ms":37.261,"draws":1637,"cpu":84.9,"backend":"WebGPU"}
+[bench-main] DONE bench-world-webgpu-1280x800 (exit 0)

@@ -1,0 +1,4 @@
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 1 ms
+[bench-main] result {"tag":"bench-empty-webgpu-1280x800","fps":154.267,"frame_ms":{"mean":6.474,"p50":1.5,"p95":17.4,"p99":17.6,"max":18.9,"n":3086},"js_ms":0.3,"render_ms":0.2,"gpu_ms":null,"draws":1,"cpu":51.2,"backend":"WebGPU"}
+[bench-main] DONE bench-empty-webgpu-1280x800 (exit 0)

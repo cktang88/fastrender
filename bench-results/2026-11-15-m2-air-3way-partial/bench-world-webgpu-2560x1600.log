@@ -1,0 +1,25 @@
+[page] THREE.NodeBuilder: Material "ShaderMaterial" is not compatible.
+[page] [boot] modules loaded 0s
+[page] [boot] quality applied 0s
+[page] THREE.NodeBuilder: Material "ShaderMaterial" is not compatible.
+[page] [boot] pbr 0.03s
+[page] [boot] manifest 0.03s
+[page] [boot] museum data 0.03s
+[page] [boot] rebuilt index 0.05s
+[page] [boot] ready 0.05s
+[page] [boot] level build start 0.05s
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] [seamless] built {"kind":"nyc","seed":20261105,"name":"Manhattan"} in 0.0 ms
+[page] [boot] level built 0.05s
+[page] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch
+[page] [boot] programs compiled (0) 0.2s
+[page] [boot] first frame (0 programs, 226 calls, 0 ms) 0.22s
+[page] [bench] world started after 12 frames, 4.1 s; fetch {"inflight":24,"done":93,"failed":28}
+[page] Uncaught (in promise) WrongDocumentError: The root document of this element is not valid for pointer lock.
+[page] Calling [RenderPassEncoder (unlabeled)].Draw with a vertex count of 0 is unusual.
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 111 ms
+[bench-main] result {"tag":"bench-world-webgpu-2560x1600","fps":10.183,"frame_ms":{"mean":97.727,"p50":97.8,"p95":101.4,"p99":103.6,"max":105.3,"n":204},"js_ms":16,"render_ms":14,"gpu_ms":120.495,"draws":1720,"cpu":53.7,"backend":"WebGPU"}
+[bench-main] DONE bench-world-webgpu-2560x1600 (exit 0)

@@ -1,0 +1,25 @@
+[page] [boot] modules loaded 0s
+[page] [boot] quality applied 0s
+[page] [boot] pbr 0.03s
+[fastrender] renderer 1280x800 three forward memoryless scale=1.00 up=bilinear shadow=cached lights=64 cull=gpu props=150000 on Apple M2
+[page] [boot] manifest 0.05s
+[page] [boot] museum data 0.05s
+[page] [boot] rebuilt index 0.07s
+[page] [boot] ready 0.07s
+[page] [boot] level build start 0.07s
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] [seamless] built {"kind":"nyc","seed":20261105,"name":"Manhattan"} in 0.0 ms
+[page] [boot] level built 0.07s
+[page] [boot] programs compiled (0) 0.07s
+[page] [boot] first frame (0 programs, 904 calls, 0 ms) 0.08s
+[page] [bench] world started after 4 frames, 4 s; fetch {"inflight":63,"done":24,"failed":0}
+[page] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch
+[page] Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock.
+[fastrender] shot ~/github/fastrender/host/electron/bench-out/bench-world-fastrender-1280x800-shot.png
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 43 ms
+[bench-main] result {"tag":"bench-world-fastrender-1280x800","fps":17.584,"frame_ms":{"mean":56.844,"p50":56.2,"p95":62.2,"p99":63.5,"max":76.4,"n":351},"js_ms":8.3,"render_ms":6.7,"gpu_ms":56.874,"draws":1402,"cpu":49.3,"backend":"Metal (fastrender)"}
+[fastrender] frame loop: frames in flight 1.99 avg, 2 max (limit 2); slot wait 44.972 ms avg, 56.51 max, 532 of 539 frames > 1 ms; drawable wait 0.119 ms avg, 15.41 max; fence: completion handler; render thread QoS Some(UserInteractive); framebufferOnly true
+[bench-main] DONE bench-world-fastrender-1280x800 (exit 0)

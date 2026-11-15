@@ -1,0 +1,183 @@
+{
+  "tag": "bench-empty-webgpu-1280x800",
+  "label": "",
+  "variant": "webgpu",
+  "scene": "empty",
+  "px": "1280x800",
+  "aa": false,
+  "vsync": false,
+  "electron": "45.3.2",
+  "chrome": "156.0.8078.100",
+  "platform": "darwin arm64",
+  "isolated": true,
+  "requests": {
+    "local": 0,
+    "missing": 0,
+    "remote": 0
+  },
+  "display": {
+    "scaleFactor": 2,
+    "size": {
+      "width": 1470,
+      "height": 956
+    },
+    "refresh": 60.00239944458008,
+    "window_points": "640x400"
+  },
+  "gpu_feature_status": {
+    "2d_canvas": "disabled_software",
+    "direct_rendering_display_compositor": "disabled_off_ok",
+    "gpu_compositing": "disabled_software",
+    "multiple_raster_threads": "enabled_on",
+    "opengl": "disabled_off",
+    "rasterization": "disabled_software",
+    "raw_draw": "disabled_off_ok",
+    "skia_graphite": "disabled_off",
+    "trees_in_viz": "disabled_off",
+    "video_decode": "disabled_software",
+    "video_encode": "disabled_software",
+    "webgl": "disabled_off",
+    "webgpu": "disabled_off",
+    "webnn": "disabled_off"
+  },
+  "shot": "bench-empty-webgpu-1280x800-shot.png",
+  "processes": {
+    "wall_s": 20.01,
+    "main": {
+      "cpu_percent": 0.2,
+      "cpu_s": 0.044,
+      "working_set_mb": 166.3,
+      "peak_working_set_mb": 178.5,
+      "footprint_mb": 45,
+      "processes": 1
+    },
+    "gpu": {
+      "cpu_percent": 30.5,
+      "cpu_s": 6.11,
+      "working_set_mb": 98.7,
+      "peak_working_set_mb": 98.8,
+      "footprint_mb": 84,
+      "processes": 1
+    },
+    "other": {
+      "cpu_percent": 0,
+      "cpu_s": 0,
+      "working_set_mb": 47.5,
+      "peak_working_set_mb": 47.6,
+      "footprint_mb": 7.1,
+      "processes": 1
+    },
+    "page": {
+      "cpu_percent": 20.5,
+      "cpu_s": 4.094,
+      "working_set_mb": 186.5,
+      "peak_working_set_mb": 186.7,
+      "footprint_mb": 72,
+      "processes": 1
+    },
+    "total": {
+      "cpu_percent": 51.2,
+      "cpu_s": 10.248,
+      "working_set_mb": 499,
+      "footprint_mb": 208.1
+    },
+    "main_process_cpu_percent_node": 0.3
+  },
+  "pace": "gpu",
+  "warmup_s": 10,
+  "measure_s": 20.011,
+  "backend": {
+    "api": "WebGPU",
+    "renderer": "apple metal-3 0x0000 Apple M2",
+    "antialias": false,
+    "samples": 0,
+    "timestampQuery": true,
+    "transientAttachment": true,
+    "features": [
+      "bgra8unorm-storage",
+      "clip-distances",
+      "core-features-and-limits",
+      "depth-clip-control",
+      "depth32float-stencil8",
+      "dual-source-blending",
+      "float32-blendable",
+      "float32-filterable",
+      "indirect-first-instance",
+      "rg11b10ufloat-renderable",
+      "shader-f16",
+      "subgroups",
+      "texture-compression-astc",
+      "texture-compression-astc-sliced-3d",
+      "texture-compression-bc",
+      "texture-compression-bc-sliced-3d",
+      "texture-compression-etc2",
+      "texture-formats-tier1",
+      "texture-formats-tier2",
+      "timestamp-query"
+    ]
+  },
+  "frames": 3087,
+  "fps": 154.267,
+  "drain_ms": 0.4,
+  "frame_ms": {
+    "mean": 6.474,
+    "p50": 1.5,
+    "p95": 17.4,
+    "p99": 17.6,
+    "max": 18.9,
+    "n": 3086
+  },
+  "js_ms": {
+    "mean": 0.269,
+    "p50": 0.3,
+    "p95": 0.5,
+    "p99": 0.6,
+    "max": 0.8,
+    "n": 3087
+  },
+  "render_ms": {
+    "mean": 0.264,
+    "p50": 0.2,
+    "p95": 0.5,
+    "p99": 0.6,
+    "max": 0.8,
+    "n": 3087
+  },
+  "update_ms": {
+    "mean": 0.005,
+    "p50": 0,
+    "p95": 0.1,
+    "p99": 0.1,
+    "max": 0.2,
+    "n": 3087
+  },
+  "flush_ms": null,
+  "gpu_ms": null,
+  "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+  "draws": {
+    "mean": 1,
+    "p50": 1,
+    "p95": 1,
+    "p99": 1,
+    "max": 1,
+    "n": 3087
+  },
+  "triangles": 1,
+  "render_calls_per_frame": 1,
+  "raf_ticks": 66749,
+  "waited_ticks": 63662,
+  "gpu_wait_ms_per_frame": 0.22,
+  "issues": {
+    "errors": [],
+    "warnings": [],
+    "gpu": []
+  },
+  "net": {
+    "inflight": 0,
+    "done": 0,
+    "failed": 0
+  },
+  "compat": {},
+  "ok": true,
+  "console_top": []
+}

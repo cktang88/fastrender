@@ -1,0 +1,7 @@
+[fastrender] renderer 1280x800 three forward memoryless scale=1.00 up=bilinear shadow=cached lights=64 cull=gpu props=150000 on Apple M2
+[fastrender] shot ~/github/fastrender/host/electron/bench-out/bench-empty-fastrender-1280x800-shot.png
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 2 ms
+[bench-main] result {"tag":"bench-empty-fastrender-1280x800","fps":464.997,"frame_ms":{"mean":2.15,"p50":2,"p95":3.3,"p99":4.2,"max":45.8,"n":9300},"js_ms":0,"render_ms":0,"gpu_ms":0.093,"draws":0,"cpu":65.5,"backend":"Metal (fastrender)"}
+[fastrender] frame loop: frames in flight 1.05 avg, 2 max (limit 2); slot wait 0.002 ms avg, 0.28 max, 0 of 13776 frames > 1 ms; drawable wait 2.076 ms avg, 45.71 max; fence: completion handler; render thread QoS Some(UserInteractive); framebufferOnly true
+[bench-main] DONE bench-empty-fastrender-1280x800 (exit 0)

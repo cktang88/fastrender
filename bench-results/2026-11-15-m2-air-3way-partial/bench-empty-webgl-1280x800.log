@@ -1,0 +1,5 @@
+Downloading Electron binary...
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 3 ms
+[bench-main] result {"tag":"bench-empty-webgl-1280x800","fps":190.809,"frame_ms":{"mean":5.237,"p50":0.8,"p95":17.6,"p99":17.7,"max":17.9,"n":3816},"js_ms":0.1,"render_ms":0,"gpu_ms":0.292,"draws":0,"cpu":37.4,"backend":"WebGL2"}
+[bench-main] DONE bench-empty-webgl-1280x800 (exit 0)

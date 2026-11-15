@@ -1,0 +1,195 @@
+{
+  "tag": "bench-city-webgpu-2560x1600",
+  "label": "",
+  "variant": "webgpu",
+  "scene": "city",
+  "px": "2560x1600",
+  "aa": false,
+  "vsync": false,
+  "electron": "45.3.2",
+  "chrome": "156.0.8078.100",
+  "platform": "darwin arm64",
+  "isolated": true,
+  "requests": {
+    "local": 0,
+    "missing": 0,
+    "remote": 0
+  },
+  "display": {
+    "scaleFactor": 2,
+    "size": {
+      "width": 1470,
+      "height": 956
+    },
+    "refresh": 60.00239944458008,
+    "window_points": "1280x800"
+  },
+  "gpu_feature_status": {
+    "2d_canvas": "disabled_software",
+    "direct_rendering_display_compositor": "disabled_off_ok",
+    "gpu_compositing": "disabled_software",
+    "multiple_raster_threads": "enabled_on",
+    "opengl": "disabled_off",
+    "rasterization": "disabled_software",
+    "raw_draw": "disabled_off_ok",
+    "skia_graphite": "disabled_off",
+    "trees_in_viz": "disabled_off",
+    "video_decode": "disabled_software",
+    "video_encode": "disabled_software",
+    "webgl": "disabled_off",
+    "webgpu": "disabled_off",
+    "webnn": "disabled_off"
+  },
+  "shot": "bench-city-webgpu-2560x1600-shot.png",
+  "processes": {
+    "wall_s": 20.01,
+    "main": {
+      "cpu_percent": 0.1,
+      "cpu_s": 0.023,
+      "working_set_mb": 167.4,
+      "peak_working_set_mb": 191.4,
+      "footprint_mb": 45,
+      "processes": 1
+    },
+    "gpu": {
+      "cpu_percent": 19.2,
+      "cpu_s": 3.84,
+      "working_set_mb": 105.9,
+      "peak_working_set_mb": 118.4,
+      "footprint_mb": 266,
+      "processes": 1
+    },
+    "other": {
+      "cpu_percent": 0,
+      "cpu_s": 0,
+      "working_set_mb": 47.5,
+      "peak_working_set_mb": 47.6,
+      "footprint_mb": 7.1,
+      "processes": 1
+    },
+    "page": {
+      "cpu_percent": 42.3,
+      "cpu_s": 8.457,
+      "working_set_mb": 300.7,
+      "peak_working_set_mb": 301.3,
+      "footprint_mb": 147,
+      "processes": 1
+    },
+    "total": {
+      "cpu_percent": 61.6,
+      "cpu_s": 12.32,
+      "working_set_mb": 621.5,
+      "footprint_mb": 465.1
+    },
+    "main_process_cpu_percent_node": 0.2
+  },
+  "pace": "gpu",
+  "warmup_s": 10,
+  "measure_s": 20.005,
+  "backend": {
+    "api": "WebGPU",
+    "renderer": "apple metal-3 0x0000 Apple M2",
+    "antialias": false,
+    "samples": 0,
+    "timestampQuery": true,
+    "transientAttachment": true,
+    "features": [
+      "bgra8unorm-storage",
+      "clip-distances",
+      "core-features-and-limits",
+      "depth-clip-control",
+      "depth32float-stencil8",
+      "dual-source-blending",
+      "float32-blendable",
+      "float32-filterable",
+      "indirect-first-instance",
+      "rg11b10ufloat-renderable",
+      "shader-f16",
+      "subgroups",
+      "texture-compression-astc",
+      "texture-compression-astc-sliced-3d",
+      "texture-compression-bc",
+      "texture-compression-bc-sliced-3d",
+      "texture-compression-etc2",
+      "texture-formats-tier1",
+      "texture-formats-tier2",
+      "timestamp-query"
+    ]
+  },
+  "frames": 2977,
+  "fps": 148.816,
+  "drain_ms": 0.1,
+  "frame_ms": {
+    "mean": 6.715,
+    "p50": 5.5,
+    "p95": 14.8,
+    "p99": 17.4,
+    "max": 18.8,
+    "n": 2976
+  },
+  "js_ms": {
+    "mean": 0.694,
+    "p50": 0.7,
+    "p95": 0.9,
+    "p99": 1,
+    "max": 2.2,
+    "n": 2977
+  },
+  "render_ms": {
+    "mean": 0.691,
+    "p50": 0.7,
+    "p95": 0.9,
+    "p99": 1,
+    "max": 2.2,
+    "n": 2977
+  },
+  "update_ms": {
+    "mean": 0.003,
+    "p50": 0,
+    "p95": 0,
+    "p99": 0.1,
+    "max": 0.1,
+    "n": 2977
+  },
+  "flush_ms": null,
+  "gpu_ms": {
+    "mean": 7.826,
+    "p50": 7.732,
+    "p95": 10.634,
+    "p99": 11.956,
+    "max": 13.757,
+    "n": 1944
+  },
+  "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+  "draws": {
+    "mean": 392.588,
+    "p50": 358,
+    "p95": 539,
+    "p99": 564,
+    "max": 573,
+    "n": 2977
+  },
+  "triangles": 224331,
+  "render_calls_per_frame": 2,
+  "raf_ticks": 1838206,
+  "waited_ticks": 1835229,
+  "gpu_wait_ms_per_frame": 1.601,
+  "issues": {
+    "errors": [],
+    "warnings": [],
+    "gpu": []
+  },
+  "net": {
+    "inflight": 0,
+    "done": 0,
+    "failed": 0
+  },
+  "city": {
+    "buildings": 494,
+    "windows": 18395
+  },
+  "compile_ms": 97.1,
+  "compat": {},
+  "ok": true,
+  "console_top": []
+}

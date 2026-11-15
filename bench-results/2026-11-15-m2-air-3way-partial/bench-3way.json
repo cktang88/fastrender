@@ -1,0 +1,6362 @@
+{
+  "generated": "2026-11-15T15:31:53.223Z",
+  "note": "partial run (stopped at run 24 of the vsync-off pass), MacBook Air M2, AC power, --power",
+  "summary": [
+    {
+      "scene": "empty",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "webgl",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGL2",
+      "fps": 190.809,
+      "frame_ms": {
+        "mean": 5.237,
+        "p50": 0.8,
+        "p95": 17.6,
+        "p99": 17.7,
+        "max": 17.9,
+        "n": 3816
+      },
+      "js_ms_p50": 0.1,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0,
+      "gpu_ms_mean": 0.292,
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws_p50": 0,
+      "cpu_percent": {
+        "main": 1,
+        "gpu": 22.3,
+        "page": 14.1,
+        "total": 37.4
+      },
+      "cpu_ms_per_frame": 1.96,
+      "mem_mb": {
+        "main": 175.3,
+        "gpu": 79.5,
+        "page": 152.9
+      },
+      "mae_vs_webgl": null
+    },
+    {
+      "scene": "empty",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "webgpu",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGPU",
+      "fps": 154.267,
+      "frame_ms": {
+        "mean": 6.474,
+        "p50": 1.5,
+        "p95": 17.4,
+        "p99": 17.6,
+        "max": 18.9,
+        "n": 3086
+      },
+      "js_ms_p50": 0.3,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.2,
+      "gpu_ms_mean": null,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws_p50": 1,
+      "cpu_percent": {
+        "main": 0.2,
+        "gpu": 30.5,
+        "page": 20.5,
+        "total": 51.2
+      },
+      "cpu_ms_per_frame": 3.319,
+      "mem_mb": {
+        "main": 166.3,
+        "gpu": 98.7,
+        "page": 186.5
+      },
+      "mae_vs_webgl": 0
+    },
+    {
+      "scene": "empty",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 464.997,
+      "frame_ms": {
+        "mean": 2.15,
+        "p50": 2,
+        "p95": 3.3,
+        "p99": 4.2,
+        "max": 45.8,
+        "n": 9300
+      },
+      "js_ms_p50": 0,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0,
+      "gpu_ms_mean": 0.093,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 0,
+      "native": {
+        "rendered": 9301,
+        "skipped": 0,
+        "rendered_fps": 464.997,
+        "render_thread_cpu_ms": 2.068,
+        "draws": 0,
+        "programs": 0,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 0,
+          "avg_ms": 0
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "cpu_percent": {
+        "main": 6.6,
+        "gpu": 0,
+        "page": 58.9,
+        "total": 65.5
+      },
+      "cpu_ms_per_frame": 1.409,
+      "mem_mb": {
+        "main": 176.4,
+        "gpu": 65.6,
+        "page": 349.9
+      },
+      "mae_vs_webgl": 18
+    },
+    {
+      "scene": "empty",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "webgl",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGL2",
+      "fps": 169.19,
+      "frame_ms": {
+        "mean": 5.907,
+        "p50": 1.3,
+        "p95": 17.6,
+        "p99": 17.8,
+        "max": 20.2,
+        "n": 3385
+      },
+      "js_ms_p50": 0.1,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0,
+      "gpu_ms_mean": 0.823,
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws_p50": 0,
+      "cpu_percent": {
+        "main": 0.2,
+        "gpu": 23.4,
+        "page": 17.7,
+        "total": 41.3
+      },
+      "cpu_ms_per_frame": 2.441,
+      "mem_mb": {
+        "main": 166.9,
+        "gpu": 94.3,
+        "page": 159.5
+      },
+      "mae_vs_webgl": null
+    },
+    {
+      "scene": "empty",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "webgpu",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGPU",
+      "fps": 156.364,
+      "frame_ms": {
+        "mean": 6.387,
+        "p50": 2.4,
+        "p95": 16.4,
+        "p99": 16.8,
+        "max": 17.4,
+        "n": 3128
+      },
+      "js_ms_p50": 0.2,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.2,
+      "gpu_ms_mean": null,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws_p50": 1,
+      "cpu_percent": {
+        "main": 0.2,
+        "gpu": 30.2,
+        "page": 24.4,
+        "total": 54.8
+      },
+      "cpu_ms_per_frame": 3.505,
+      "mem_mb": {
+        "main": 167,
+        "gpu": 100.7,
+        "page": 181
+      },
+      "mae_vs_webgl": 0
+    },
+    {
+      "scene": "empty",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 372.894,
+      "frame_ms": {
+        "mean": 2.682,
+        "p50": 2.7,
+        "p95": 4.8,
+        "p99": 6,
+        "max": 34.7,
+        "n": 7457
+      },
+      "js_ms_p50": 0,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0,
+      "gpu_ms_mean": 0.308,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 0,
+      "native": {
+        "rendered": 7458,
+        "skipped": 0,
+        "rendered_fps": 372.894,
+        "render_thread_cpu_ms": 2.481,
+        "draws": 0,
+        "programs": 0,
+        "gpu_errors": 0,
+        "drawable": "2560x1600",
+        "xlat": {
+          "count": 0,
+          "avg_ms": 0
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "cpu_percent": {
+        "main": 5.7,
+        "gpu": 0,
+        "page": 65.6,
+        "total": 71.3
+      },
+      "cpu_ms_per_frame": 1.912,
+      "mem_mb": {
+        "main": 175.4,
+        "gpu": 65.6,
+        "page": 345.1
+      },
+      "mae_vs_webgl": 18
+    },
+    {
+      "scene": "city",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "webgl",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGL2",
+      "fps": 156.807,
+      "frame_ms": {
+        "mean": 6.374,
+        "p50": 4.4,
+        "p95": 15.2,
+        "p99": 16.3,
+        "max": 16.6,
+        "n": 3137
+      },
+      "js_ms_p50": 0.6,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.6,
+      "gpu_ms_mean": 4.185,
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws_p50": 351,
+      "cpu_percent": {
+        "main": 0.2,
+        "gpu": 13.1,
+        "page": 33.4,
+        "total": 46.7
+      },
+      "cpu_ms_per_frame": 2.978,
+      "mem_mb": {
+        "main": 165.6,
+        "gpu": 102.6,
+        "page": 221.9
+      },
+      "mae_vs_webgl": null
+    },
+    {
+      "scene": "city",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "webgpu",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGPU",
+      "fps": 151.912,
+      "frame_ms": {
+        "mean": 6.574,
+        "p50": 3.8,
+        "p95": 15.1,
+        "p99": 16.4,
+        "max": 18.1,
+        "n": 3038
+      },
+      "js_ms_p50": 0.9,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.9,
+      "gpu_ms_mean": 4.762,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws_p50": 357,
+      "cpu_percent": {
+        "main": 0.2,
+        "gpu": 19.6,
+        "page": 35.5,
+        "total": 55.3
+      },
+      "cpu_ms_per_frame": 3.64,
+      "mem_mb": {
+        "main": 165.8,
+        "gpu": 112.4,
+        "page": 247.6
+      },
+      "mae_vs_webgl": 2.06
+    },
+    {
+      "scene": "city",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 382.294,
+      "frame_ms": {
+        "mean": 2.616,
+        "p50": 2.1,
+        "p95": 4.2,
+        "p99": 16.7,
+        "max": 36.7,
+        "n": 7645
+      },
+      "js_ms_p50": 0.1,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.1,
+      "gpu_ms_mean": 1.882,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 160,
+      "native": {
+        "rendered": 7646,
+        "skipped": 0,
+        "rendered_fps": 382.294,
+        "render_thread_cpu_ms": 2.399,
+        "draws": 145,
+        "programs": 5,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 5,
+          "avg_ms": 22.865
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "cpu_percent": {
+        "main": 7.6,
+        "gpu": 0,
+        "page": 60.3,
+        "total": 67.9
+      },
+      "cpu_ms_per_frame": 1.776,
+      "mem_mb": {
+        "main": 241.2,
+        "gpu": 66.2,
+        "page": 453.5
+      },
+      "mae_vs_webgl": 95.4
+    },
+    {
+      "scene": "city",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "MetalFX-spatial-from-0.5x-per-axis",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 354.093,
+      "frame_ms": {
+        "mean": 2.824,
+        "p50": 2.2,
+        "p95": 9.3,
+        "p99": 16.6,
+        "max": 44.4,
+        "n": 7082
+      },
+      "js_ms_p50": 0.1,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.1,
+      "gpu_ms_mean": 1.825,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 149,
+      "native": {
+        "rendered": 7083,
+        "skipped": 0,
+        "rendered_fps": 354.093,
+        "render_thread_cpu_ms": 2.546,
+        "draws": 289,
+        "programs": 5,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 5,
+          "avg_ms": 0.028
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "cpu_percent": {
+        "main": 8.9,
+        "gpu": 0,
+        "page": 61.6,
+        "total": 70.5
+      },
+      "cpu_ms_per_frame": 1.991,
+      "mem_mb": {
+        "main": 241.8,
+        "gpu": 66.1,
+        "page": 455.5
+      },
+      "mae_vs_webgl": 15.63
+    },
+    {
+      "scene": "city",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "webgl",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGL2",
+      "fps": 154.986,
+      "frame_ms": {
+        "mean": 6.451,
+        "p50": 5.8,
+        "p95": 13.8,
+        "p99": 14.8,
+        "max": 15.9,
+        "n": 3100
+      },
+      "js_ms_p50": 0.4,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.4,
+      "gpu_ms_mean": 7.472,
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws_p50": 353,
+      "cpu_percent": {
+        "main": 0.1,
+        "gpu": 10.8,
+        "page": 40.7,
+        "total": 51.6
+      },
+      "cpu_ms_per_frame": 3.329,
+      "mem_mb": {
+        "main": 167.2,
+        "gpu": 114.2,
+        "page": 223.4
+      },
+      "mae_vs_webgl": null
+    },
+    {
+      "scene": "city",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "webgpu",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGPU",
+      "fps": 148.816,
+      "frame_ms": {
+        "mean": 6.715,
+        "p50": 5.5,
+        "p95": 14.8,
+        "p99": 17.4,
+        "max": 18.8,
+        "n": 2976
+      },
+      "js_ms_p50": 0.7,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.7,
+      "gpu_ms_mean": 7.826,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws_p50": 358,
+      "cpu_percent": {
+        "main": 0.1,
+        "gpu": 19.2,
+        "page": 42.3,
+        "total": 61.6
+      },
+      "cpu_ms_per_frame": 4.139,
+      "mem_mb": {
+        "main": 167.4,
+        "gpu": 105.9,
+        "page": 300.7
+      },
+      "mae_vs_webgl": 2.06
+    },
+    {
+      "scene": "city",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 220.22,
+      "frame_ms": {
+        "mean": 4.541,
+        "p50": 4.5,
+        "p95": 7.2,
+        "p99": 16.7,
+        "max": 35.6,
+        "n": 4404
+      },
+      "js_ms_p50": 0.1,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.1,
+      "gpu_ms_mean": 3.509,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 167,
+      "native": {
+        "rendered": 4405,
+        "skipped": 0,
+        "rendered_fps": 220.22,
+        "render_thread_cpu_ms": 4.242,
+        "draws": 78,
+        "programs": 5,
+        "gpu_errors": 0,
+        "drawable": "2560x1600",
+        "xlat": {
+          "count": 5,
+          "avg_ms": 0.026
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "cpu_percent": {
+        "main": 5.3,
+        "gpu": 0,
+        "page": 54.8,
+        "total": 60.1
+      },
+      "cpu_ms_per_frame": 2.729,
+      "mem_mb": {
+        "main": 241.2,
+        "gpu": 66.2,
+        "page": 431.8
+      },
+      "mae_vs_webgl": 15.33
+    },
+    {
+      "scene": "city",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "MetalFX-spatial-from-0.5x-per-axis",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 205.433,
+      "frame_ms": {
+        "mean": 4.867,
+        "p50": 4.9,
+        "p95": 7.3,
+        "p99": 10.4,
+        "max": 34.4,
+        "n": 4109
+      },
+      "js_ms_p50": 0.1,
+      "update_ms_p50": 0,
+      "render_ms_p50": 0.1,
+      "gpu_ms_mean": 3.524,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 180,
+      "native": {
+        "rendered": 4110,
+        "skipped": 0,
+        "rendered_fps": 205.433,
+        "render_thread_cpu_ms": 4.574,
+        "draws": 155,
+        "programs": 5,
+        "gpu_errors": 0,
+        "drawable": "2560x1600",
+        "xlat": {
+          "count": 5,
+          "avg_ms": 0.034
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "cpu_percent": {
+        "main": 6.3,
+        "gpu": 0,
+        "page": 51.6,
+        "total": 57.9
+      },
+      "cpu_ms_per_frame": 2.818,
+      "mem_mb": {
+        "main": 242.4,
+        "gpu": 66.2,
+        "page": 432.7
+      },
+      "mae_vs_webgl": 15.49
+    },
+    {
+      "scene": "world",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "webgl",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGL2",
+      "fps": 7.61,
+      "frame_ms": {
+        "mean": 130.554,
+        "p50": 132.4,
+        "p95": 135.3,
+        "p99": 136.3,
+        "max": 138.5,
+        "n": 153
+      },
+      "js_ms_p50": 18,
+      "update_ms_p50": 1.8,
+      "render_ms_p50": 16.2,
+      "gpu_ms_mean": 156.445,
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws_p50": 3009,
+      "cpu_percent": {
+        "main": 0.2,
+        "gpu": 13.2,
+        "page": 37.8,
+        "total": 51.2
+      },
+      "cpu_ms_per_frame": 67.28,
+      "mem_mb": {
+        "main": 160.4,
+        "gpu": 560.9,
+        "page": 1384.5
+      },
+      "mae_vs_webgl": null
+    },
+    {
+      "scene": "world",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "webgl",
+      "aa": true,
+      "label": "",
+      "ok": true,
+      "backend": "WebGL2",
+      "fps": 6.66,
+      "frame_ms": {
+        "mean": 149.065,
+        "p50": 150.8,
+        "p95": 154.5,
+        "p99": 161.3,
+        "max": 162.2,
+        "n": 134
+      },
+      "js_ms_p50": 18.2,
+      "update_ms_p50": 1.8,
+      "render_ms_p50": 16.3,
+      "gpu_ms_mean": 176.333,
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws_p50": 3014,
+      "cpu_percent": {
+        "main": 0.2,
+        "gpu": 11.9,
+        "page": 36.5,
+        "total": 48.6
+      },
+      "cpu_ms_per_frame": 72.973,
+      "mem_mb": {
+        "main": 194.7,
+        "gpu": 577.5,
+        "page": 1772.4
+      },
+      "mae_vs_webgl": 2.29
+    },
+    {
+      "scene": "world",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "webgpu",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGPU",
+      "fps": 25.253,
+      "frame_ms": {
+        "mean": 39.519,
+        "p50": 39.5,
+        "p95": 41.3,
+        "p99": 41.9,
+        "max": 43.3,
+        "n": 506
+      },
+      "js_ms_p50": 13.7,
+      "update_ms_p50": 1.5,
+      "render_ms_p50": 12.2,
+      "gpu_ms_mean": 37.261,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws_p50": 1637,
+      "cpu_percent": {
+        "main": 0,
+        "gpu": 21.8,
+        "page": 63.1,
+        "total": 84.9
+      },
+      "cpu_ms_per_frame": 33.62,
+      "mem_mb": {
+        "main": 185.8,
+        "gpu": 621.5,
+        "page": 2576.1
+      },
+      "mae_vs_webgl": 106.9
+    },
+    {
+      "scene": "world",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "webgpu",
+      "aa": true,
+      "label": "",
+      "ok": true,
+      "backend": "WebGPU",
+      "fps": 21.015,
+      "frame_ms": {
+        "mean": 47.466,
+        "p50": 47.6,
+        "p95": 49.6,
+        "p99": 50.2,
+        "max": 50.9,
+        "n": 421
+      },
+      "js_ms_p50": 14.2,
+      "update_ms_p50": 1.6,
+      "render_ms_p50": 12.5,
+      "gpu_ms_mean": 49.633,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws_p50": 1648,
+      "cpu_percent": {
+        "main": 0.2,
+        "gpu": 18.7,
+        "page": 57,
+        "total": 75.9
+      },
+      "cpu_ms_per_frame": 36.117,
+      "mem_mb": {
+        "main": 216.2,
+        "gpu": 481.7,
+        "page": 3142.8
+      },
+      "mae_vs_webgl": 105.81
+    },
+    {
+      "scene": "world",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 17.584,
+      "frame_ms": {
+        "mean": 56.844,
+        "p50": 56.2,
+        "p95": 62.2,
+        "p99": 63.5,
+        "max": 76.4,
+        "n": 351
+      },
+      "js_ms_p50": 8.3,
+      "update_ms_p50": 1.5,
+      "render_ms_p50": 6.7,
+      "gpu_ms_mean": 56.874,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 1402,
+      "native": {
+        "rendered": 352,
+        "skipped": 0,
+        "rendered_fps": 17.584,
+        "render_thread_cpu_ms": 47.845,
+        "draws": 1266,
+        "programs": 95,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 95,
+          "avg_ms": 20.515
+        },
+        "images": {
+          "calls": 91,
+          "cached": 9,
+          "failed": 0,
+          "ms": 375.40000005066395,
+          "bytes": 350371840,
+          "maxMs": 32.30000001192093
+        }
+      },
+      "cpu_percent": {
+        "main": 7.1,
+        "gpu": 0,
+        "page": 42.2,
+        "total": 49.3
+      },
+      "cpu_ms_per_frame": 28.037,
+      "mem_mb": {
+        "main": 1230.7,
+        "gpu": 168.2,
+        "page": 2194.8
+      },
+      "mae_vs_webgl": 11.66
+    },
+    {
+      "scene": "world",
+      "px": "1280x800",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "MetalFX-spatial-from-0.5x-per-axis",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 33.368,
+      "frame_ms": {
+        "mean": 29.962,
+        "p50": 29.6,
+        "p95": 33.8,
+        "p99": 35.4,
+        "max": 43.9,
+        "n": 667
+      },
+      "js_ms_p50": 7.4,
+      "update_ms_p50": 1.3,
+      "render_ms_p50": 6.1,
+      "gpu_ms_mean": 29.964,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 1385,
+      "native": {
+        "rendered": 668,
+        "skipped": 0,
+        "rendered_fps": 33.368,
+        "render_thread_cpu_ms": 22.1,
+        "draws": 1291,
+        "programs": 96,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 96,
+          "avg_ms": 0.388
+        },
+        "images": {
+          "calls": 91,
+          "cached": 9,
+          "failed": 0,
+          "ms": 353.8000000715256,
+          "bytes": 350371840,
+          "maxMs": 30.5
+        }
+      },
+      "cpu_percent": {
+        "main": 12.3,
+        "gpu": 0,
+        "page": 51.5,
+        "total": 63.8
+      },
+      "cpu_ms_per_frame": 19.12,
+      "mem_mb": {
+        "main": 1151.6,
+        "gpu": 179.6,
+        "page": 2751.4
+      },
+      "mae_vs_webgl": 15.32
+    },
+    {
+      "scene": "world",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "webgl",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGL2",
+      "fps": 2.945,
+      "frame_ms": {
+        "mean": 333.19,
+        "p50": 338,
+        "p95": 345.9,
+        "p99": 351.5,
+        "max": 351.5,
+        "n": 60
+      },
+      "js_ms_p50": 17.7,
+      "update_ms_p50": 1.7,
+      "render_ms_p50": 15.8,
+      "gpu_ms_mean": 452.221,
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws_p50": 3076,
+      "cpu_percent": {
+        "main": 0.3,
+        "gpu": 5.6,
+        "page": 31.5,
+        "total": 37.4
+      },
+      "cpu_ms_per_frame": 126.995,
+      "mem_mb": {
+        "main": 185.6,
+        "gpu": 610.6,
+        "page": 1825.5
+      },
+      "mae_vs_webgl": null
+    },
+    {
+      "scene": "world",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "webgpu",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "WebGPU",
+      "fps": 10.183,
+      "frame_ms": {
+        "mean": 97.727,
+        "p50": 97.8,
+        "p95": 101.4,
+        "p99": 103.6,
+        "max": 105.3,
+        "n": 204
+      },
+      "js_ms_p50": 16,
+      "update_ms_p50": 1.8,
+      "render_ms_p50": 14,
+      "gpu_ms_mean": 120.495,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws_p50": 1720,
+      "cpu_percent": {
+        "main": 0.1,
+        "gpu": 10.4,
+        "page": 43.2,
+        "total": 53.7
+      },
+      "cpu_ms_per_frame": 52.735,
+      "mem_mb": {
+        "main": 228.3,
+        "gpu": 396.8,
+        "page": 2614.8
+      },
+      "mae_vs_webgl": 106.74
+    },
+    {
+      "scene": "world",
+      "px": "2560x1600",
+      "cap": "uncapped",
+      "variant": "fastrender",
+      "aa": false,
+      "label": "",
+      "ok": true,
+      "backend": "Metal (fastrender)",
+      "fps": 6.346,
+      "frame_ms": {
+        "mean": 157.585,
+        "p50": 157.3,
+        "p95": 160.4,
+        "p99": 167.4,
+        "max": 170,
+        "n": 126
+      },
+      "js_ms_p50": 9,
+      "update_ms_p50": 1.7,
+      "render_ms_p50": 7.2,
+      "gpu_ms_mean": 157.678,
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws_p50": 1476,
+      "native": {
+        "rendered": 127,
+        "skipped": 0,
+        "rendered_fps": 6.346,
+        "render_thread_cpu_ms": 148.229,
+        "draws": 1330,
+        "programs": 91,
+        "gpu_errors": 0,
+        "drawable": "2560x1600",
+        "xlat": {
+          "count": 91,
+          "avg_ms": 0.059
+        },
+        "images": {
+          "calls": 90,
+          "cached": 9,
+          "failed": 0,
+          "ms": 361.9000000357628,
+          "bytes": 350240768,
+          "maxMs": 31.100000008940697
+        }
+      },
+      "cpu_percent": {
+        "main": 2.8,
+        "gpu": 0,
+        "page": 31.6,
+        "total": 34.4
+      },
+      "cpu_ms_per_frame": 54.207,
+      "mem_mb": {
+        "main": 1131.4,
+        "gpu": 181.8,
+        "page": 2300.6
+      },
+      "mae_vs_webgl": 11.66
+    }
+  ],
+  "runs": [
+    {
+      "tag": "bench-city-fastrender-1280x800-fx",
+      "label": "MetalFX-spatial-from-0.5x-per-axis",
+      "variant": "fastrender",
+      "scene": "city",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 0.5,
+        "upscale": "metalfx",
+        "vsync": 0
+      },
+      "shm": "/frb-69250",
+      "shot": "bench-city-fastrender-1280x800-fx-shot.png",
+      "processes": {
+        "wall_s": 20,
+        "main": {
+          "cpu_percent": 8.9,
+          "cpu_s": 1.779,
+          "working_set_mb": 241.8,
+          "peak_working_set_mb": 245.8,
+          "footprint_mb": 168,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 66.1,
+          "peak_working_set_mb": 66.2,
+          "footprint_mb": 12,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 61.6,
+          "cpu_s": 12.323,
+          "working_set_mb": 455.5,
+          "peak_working_set_mb": 455.5,
+          "footprint_mb": 264,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 70.5,
+          "cpu_s": 14.102,
+          "working_set_mb": 810.9,
+          "footprint_mb": 451.1
+        },
+        "main_process_cpu_percent_node": 8.9
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.003,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "1280x800"
+      },
+      "frames": 7083,
+      "fps": 354.093,
+      "drain_ms": 2.6,
+      "frame_ms": {
+        "mean": 2.824,
+        "p50": 2.2,
+        "p95": 9.3,
+        "p99": 16.6,
+        "max": 44.4,
+        "n": 7082
+      },
+      "js_ms": {
+        "mean": 0.112,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.4,
+        "n": 7083
+      },
+      "render_ms": {
+        "mean": 0.102,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.3,
+        "n": 7083
+      },
+      "update_ms": {
+        "mean": 0.01,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 7083
+      },
+      "flush_ms": {
+        "mean": 0.012,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 7083
+      },
+      "gpu_ms": {
+        "mean": 1.825,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 7083
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 152.969,
+        "p50": 149,
+        "p95": 300,
+        "p99": 318,
+        "max": 326,
+        "n": 7083
+      },
+      "triangles": 224176,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 1432575,
+      "waited_ticks": 1425492,
+      "gpu_wait_ms_per_frame": 2.708,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "native": {
+        "rendered": 7083,
+        "skipped": 0,
+        "rendered_fps": 354.093,
+        "render_thread_cpu_ms": 2.546,
+        "draws": 289,
+        "programs": 5,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 5,
+          "avg_ms": 0.028
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "unsupported": {},
+      "city": {
+        "buildings": 494,
+        "windows": 18395
+      },
+      "compile_ms": 10.6,
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-city-fastrender-1280x800",
+      "label": "",
+      "variant": "fastrender",
+      "scene": "city",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 1,
+        "upscale": "bilinear",
+        "vsync": 0
+      },
+      "shm": "/frb-69081",
+      "shot": "bench-city-fastrender-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20,
+        "main": {
+          "cpu_percent": 7.6,
+          "cpu_s": 1.519,
+          "working_set_mb": 241.2,
+          "peak_working_set_mb": 245.2,
+          "footprint_mb": 162,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 66.2,
+          "peak_working_set_mb": 66.2,
+          "footprint_mb": 12,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 60.3,
+          "cpu_s": 12.056,
+          "working_set_mb": 453.5,
+          "peak_working_set_mb": 454.5,
+          "footprint_mb": 273,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 67.9,
+          "cpu_s": 13.575,
+          "working_set_mb": 808.4,
+          "footprint_mb": 454.1
+        },
+        "main_process_cpu_percent_node": 7.6
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "1280x800"
+      },
+      "frames": 7646,
+      "fps": 382.294,
+      "drain_ms": 0,
+      "frame_ms": {
+        "mean": 2.616,
+        "p50": 2.1,
+        "p95": 4.2,
+        "p99": 16.7,
+        "max": 36.7,
+        "n": 7645
+      },
+      "js_ms": {
+        "mean": 0.108,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.3,
+        "n": 7646
+      },
+      "render_ms": {
+        "mean": 0.1,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.3,
+        "n": 7646
+      },
+      "update_ms": {
+        "mean": 0.008,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 7646
+      },
+      "flush_ms": {
+        "mean": 0.011,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 7646
+      },
+      "gpu_ms": {
+        "mean": 1.882,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 7646
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 156,
+        "p50": 160,
+        "p95": 299,
+        "p99": 318,
+        "max": 326,
+        "n": 7646
+      },
+      "triangles": 222530,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 1362894,
+      "waited_ticks": 1355248,
+      "gpu_wait_ms_per_frame": 2.505,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "native": {
+        "rendered": 7646,
+        "skipped": 0,
+        "rendered_fps": 382.294,
+        "render_thread_cpu_ms": 2.399,
+        "draws": 145,
+        "programs": 5,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 5,
+          "avg_ms": 22.865
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "unsupported": {},
+      "city": {
+        "buildings": 494,
+        "windows": 18395
+      },
+      "compile_ms": 125.1,
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-city-fastrender-2560x1600-fx",
+      "label": "MetalFX-spatial-from-0.5x-per-axis",
+      "variant": "fastrender",
+      "scene": "city",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 0.5,
+        "upscale": "metalfx",
+        "vsync": 0
+      },
+      "shm": "/frb-69907",
+      "shot": "bench-city-fastrender-2560x1600-fx-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 6.3,
+          "cpu_s": 1.263,
+          "working_set_mb": 242.4,
+          "peak_working_set_mb": 246.4,
+          "footprint_mb": 235,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 66.2,
+          "peak_working_set_mb": 66.3,
+          "footprint_mb": 12,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.4,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 51.6,
+          "cpu_s": 10.325,
+          "working_set_mb": 432.7,
+          "peak_working_set_mb": 432.7,
+          "footprint_mb": 273,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 57.9,
+          "cpu_s": 11.588,
+          "working_set_mb": 788.7,
+          "footprint_mb": 527
+        },
+        "main_process_cpu_percent_node": 6.3
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.006,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "2560x1600"
+      },
+      "frames": 4110,
+      "fps": 205.433,
+      "drain_ms": 5.2,
+      "frame_ms": {
+        "mean": 4.867,
+        "p50": 4.9,
+        "p95": 7.3,
+        "p99": 10.4,
+        "max": 34.4,
+        "n": 4109
+      },
+      "js_ms": {
+        "mean": 0.127,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.3,
+        "max": 0.4,
+        "n": 4110
+      },
+      "render_ms": {
+        "mean": 0.118,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.3,
+        "max": 0.4,
+        "n": 4110
+      },
+      "update_ms": {
+        "mean": 0.01,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 4110
+      },
+      "flush_ms": {
+        "mean": 0.015,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.1,
+        "n": 4110
+      },
+      "gpu_ms": {
+        "mean": 3.524,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 4110
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 160.732,
+        "p50": 180,
+        "p95": 290,
+        "p99": 311,
+        "max": 318,
+        "n": 4110
+      },
+      "triangles": 222638,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 1066899,
+      "waited_ticks": 1062789,
+      "gpu_wait_ms_per_frame": 4.736,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "native": {
+        "rendered": 4110,
+        "skipped": 0,
+        "rendered_fps": 205.433,
+        "render_thread_cpu_ms": 4.574,
+        "draws": 155,
+        "programs": 5,
+        "gpu_errors": 0,
+        "drawable": "2560x1600",
+        "xlat": {
+          "count": 5,
+          "avg_ms": 0.034
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "unsupported": {},
+      "city": {
+        "buildings": 494,
+        "windows": 18395
+      },
+      "compile_ms": 10.5,
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-city-fastrender-2560x1600",
+      "label": "",
+      "variant": "fastrender",
+      "scene": "city",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 1,
+        "upscale": "bilinear",
+        "vsync": 0
+      },
+      "shm": "/frb-69747",
+      "shot": "bench-city-fastrender-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20,
+        "main": {
+          "cpu_percent": 5.3,
+          "cpu_s": 1.054,
+          "working_set_mb": 241.2,
+          "peak_working_set_mb": 245.2,
+          "footprint_mb": 211,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 66.2,
+          "peak_working_set_mb": 66.3,
+          "footprint_mb": 12,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 54.8,
+          "cpu_s": 10.954,
+          "working_set_mb": 431.8,
+          "peak_working_set_mb": 432,
+          "footprint_mb": 256,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 60.1,
+          "cpu_s": 12.008,
+          "working_set_mb": 786.7,
+          "footprint_mb": 486.1
+        },
+        "main_process_cpu_percent_node": 5.3
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.003,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "2560x1600"
+      },
+      "frames": 4405,
+      "fps": 220.22,
+      "drain_ms": 2.5,
+      "frame_ms": {
+        "mean": 4.541,
+        "p50": 4.5,
+        "p95": 7.2,
+        "p99": 16.7,
+        "max": 35.6,
+        "n": 4404
+      },
+      "js_ms": {
+        "mean": 0.116,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.9,
+        "n": 4405
+      },
+      "render_ms": {
+        "mean": 0.107,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.8,
+        "n": 4405
+      },
+      "update_ms": {
+        "mean": 0.009,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 4405
+      },
+      "flush_ms": {
+        "mean": 0.015,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 4405
+      },
+      "gpu_ms": {
+        "mean": 3.509,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 4405
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 161.278,
+        "p50": 167,
+        "p95": 288,
+        "p99": 310,
+        "max": 318,
+        "n": 4405
+      },
+      "triangles": 221750,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 1216839,
+      "waited_ticks": 1212434,
+      "gpu_wait_ms_per_frame": 4.42,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "native": {
+        "rendered": 4405,
+        "skipped": 0,
+        "rendered_fps": 220.22,
+        "render_thread_cpu_ms": 4.242,
+        "draws": 78,
+        "programs": 5,
+        "gpu_errors": 0,
+        "drawable": "2560x1600",
+        "xlat": {
+          "count": 5,
+          "avg_ms": 0.026
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "unsupported": {},
+      "city": {
+        "buildings": 494,
+        "windows": 18395
+      },
+      "compile_ms": 10.8,
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-city-webgl-1280x800",
+      "label": "",
+      "variant": "webgl",
+      "scene": "city",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-city-webgl-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 0.2,
+          "cpu_s": 0.041,
+          "working_set_mb": 165.6,
+          "peak_working_set_mb": 174.9,
+          "footprint_mb": 45,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 13.1,
+          "cpu_s": 2.612,
+          "working_set_mb": 102.6,
+          "peak_working_set_mb": 105.1,
+          "footprint_mb": 115,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 33.4,
+          "cpu_s": 6.677,
+          "working_set_mb": 221.9,
+          "peak_working_set_mb": 224.5,
+          "footprint_mb": 103,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 46.7,
+          "cpu_s": 9.33,
+          "working_set_mb": 537.6,
+          "footprint_mb": 270.1
+        },
+        "main_process_cpu_percent_node": 0.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.012,
+      "backend": {
+        "api": "WebGL2",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "antialias": false,
+        "samples": 0,
+        "drawingBuffer": "1280x800",
+        "timerQuery": true
+      },
+      "frames": 3138,
+      "fps": 156.807,
+      "drain_ms": 2.7,
+      "frame_ms": {
+        "mean": 6.374,
+        "p50": 4.4,
+        "p95": 15.2,
+        "p99": 16.3,
+        "max": 16.6,
+        "n": 3137
+      },
+      "js_ms": {
+        "mean": 0.58,
+        "p50": 0.6,
+        "p95": 0.8,
+        "p99": 1,
+        "max": 1.1,
+        "n": 3138
+      },
+      "render_ms": {
+        "mean": 0.57,
+        "p50": 0.6,
+        "p95": 0.8,
+        "p99": 1,
+        "max": 1.1,
+        "n": 3138
+      },
+      "update_ms": {
+        "mean": 0.01,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.1,
+        "n": 3138
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 4.185,
+        "p50": 3.881,
+        "p95": 6.72,
+        "p99": 7.073,
+        "max": 7.986,
+        "n": 3140
+      },
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws": {
+        "mean": 384.911,
+        "p50": 351,
+        "p95": 537,
+        "p99": 562,
+        "max": 572,
+        "n": 3138
+      },
+      "triangles": 224114,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 698524,
+      "waited_ticks": 695386,
+      "gpu_wait_ms_per_frame": 1.177,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "city": {
+        "buildings": 494,
+        "windows": 18395
+      },
+      "compile_ms": 303.9,
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-city-webgl-2560x1600",
+      "label": "",
+      "variant": "webgl",
+      "scene": "city",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-city-webgl-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 0.1,
+          "cpu_s": 0.024,
+          "working_set_mb": 167.2,
+          "peak_working_set_mb": 187.3,
+          "footprint_mb": 45,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 10.8,
+          "cpu_s": 2.158,
+          "working_set_mb": 114.2,
+          "peak_working_set_mb": 128.3,
+          "footprint_mb": 227,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.6,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.2,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 40.7,
+          "cpu_s": 8.139,
+          "working_set_mb": 223.4,
+          "peak_working_set_mb": 229.3,
+          "footprint_mb": 97,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 51.6,
+          "cpu_s": 10.321,
+          "working_set_mb": 552.4,
+          "footprint_mb": 376.2
+        },
+        "main_process_cpu_percent_node": 0.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.008,
+      "backend": {
+        "api": "WebGL2",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "antialias": false,
+        "samples": 0,
+        "drawingBuffer": "2560x1600",
+        "timerQuery": true
+      },
+      "frames": 3101,
+      "fps": 154.986,
+      "drain_ms": 8.2,
+      "frame_ms": {
+        "mean": 6.451,
+        "p50": 5.8,
+        "p95": 13.8,
+        "p99": 14.8,
+        "max": 15.9,
+        "n": 3100
+      },
+      "js_ms": {
+        "mean": 0.435,
+        "p50": 0.4,
+        "p95": 0.6,
+        "p99": 0.7,
+        "max": 0.9,
+        "n": 3101
+      },
+      "render_ms": {
+        "mean": 0.427,
+        "p50": 0.4,
+        "p95": 0.6,
+        "p99": 0.7,
+        "max": 0.9,
+        "n": 3101
+      },
+      "update_ms": {
+        "mean": 0.008,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.1,
+        "n": 3101
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 7.472,
+        "p50": 8.066,
+        "p95": 10.624,
+        "p99": 11.322,
+        "max": 11.953,
+        "n": 3103
+      },
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws": {
+        "mean": 386.785,
+        "p50": 353,
+        "p95": 537,
+        "p99": 562,
+        "max": 572,
+        "n": 3101
+      },
+      "triangles": 224162,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 1406734,
+      "waited_ticks": 1403633,
+      "gpu_wait_ms_per_frame": 1.788,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "city": {
+        "buildings": 494,
+        "windows": 18395
+      },
+      "compile_ms": 36.8,
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-city-webgpu-1280x800",
+      "label": "",
+      "variant": "webgpu",
+      "scene": "city",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-city-webgpu-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 0.2,
+          "cpu_s": 0.04,
+          "working_set_mb": 165.8,
+          "peak_working_set_mb": 179,
+          "footprint_mb": 45,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 19.6,
+          "cpu_s": 3.912,
+          "working_set_mb": 112.4,
+          "peak_working_set_mb": 114,
+          "footprint_mb": 146,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.2,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 35.5,
+          "cpu_s": 7.098,
+          "working_set_mb": 247.6,
+          "peak_working_set_mb": 247.6,
+          "footprint_mb": 143,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 55.3,
+          "cpu_s": 11.05,
+          "working_set_mb": 573.3,
+          "footprint_mb": 341.2
+        },
+        "main_process_cpu_percent_node": 0.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.005,
+      "backend": {
+        "api": "WebGPU",
+        "renderer": "apple metal-3 0x0000 Apple M2",
+        "antialias": false,
+        "samples": 0,
+        "timestampQuery": true,
+        "transientAttachment": true,
+        "features": [
+          "bgra8unorm-storage",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroups",
+          "texture-compression-astc",
+          "texture-compression-astc-sliced-3d",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-compression-etc2",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ]
+      },
+      "frames": 3039,
+      "fps": 151.912,
+      "drain_ms": 0.1,
+      "frame_ms": {
+        "mean": 6.574,
+        "p50": 3.8,
+        "p95": 15.1,
+        "p99": 16.4,
+        "max": 18.1,
+        "n": 3038
+      },
+      "js_ms": {
+        "mean": 0.87,
+        "p50": 0.9,
+        "p95": 1.1,
+        "p99": 1.2,
+        "max": 2.3,
+        "n": 3039
+      },
+      "render_ms": {
+        "mean": 0.867,
+        "p50": 0.9,
+        "p95": 1.1,
+        "p99": 1.2,
+        "max": 2.3,
+        "n": 3039
+      },
+      "update_ms": {
+        "mean": 0.002,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0.1,
+        "max": 0.1,
+        "n": 3039
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 4.762,
+        "p50": 4.566,
+        "p95": 6.716,
+        "p99": 7.135,
+        "max": 7.911,
+        "n": 2026
+      },
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws": {
+        "mean": 390.168,
+        "p50": 357,
+        "p95": 538,
+        "p99": 563,
+        "max": 573,
+        "n": 3039
+      },
+      "triangles": 224259,
+      "render_calls_per_frame": 2,
+      "raf_ticks": 878629,
+      "waited_ticks": 875590,
+      "gpu_wait_ms_per_frame": 0.963,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "city": {
+        "buildings": 494,
+        "windows": 18395
+      },
+      "compile_ms": 515.3,
+      "compat": {},
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-city-webgpu-2560x1600",
+      "label": "",
+      "variant": "webgpu",
+      "scene": "city",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-city-webgpu-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 0.1,
+          "cpu_s": 0.023,
+          "working_set_mb": 167.4,
+          "peak_working_set_mb": 191.4,
+          "footprint_mb": 45,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 19.2,
+          "cpu_s": 3.84,
+          "working_set_mb": 105.9,
+          "peak_working_set_mb": 118.4,
+          "footprint_mb": 266,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 42.3,
+          "cpu_s": 8.457,
+          "working_set_mb": 300.7,
+          "peak_working_set_mb": 301.3,
+          "footprint_mb": 147,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 61.6,
+          "cpu_s": 12.32,
+          "working_set_mb": 621.5,
+          "footprint_mb": 465.1
+        },
+        "main_process_cpu_percent_node": 0.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.005,
+      "backend": {
+        "api": "WebGPU",
+        "renderer": "apple metal-3 0x0000 Apple M2",
+        "antialias": false,
+        "samples": 0,
+        "timestampQuery": true,
+        "transientAttachment": true,
+        "features": [
+          "bgra8unorm-storage",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroups",
+          "texture-compression-astc",
+          "texture-compression-astc-sliced-3d",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-compression-etc2",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ]
+      },
+      "frames": 2977,
+      "fps": 148.816,
+      "drain_ms": 0.1,
+      "frame_ms": {
+        "mean": 6.715,
+        "p50": 5.5,
+        "p95": 14.8,
+        "p99": 17.4,
+        "max": 18.8,
+        "n": 2976
+      },
+      "js_ms": {
+        "mean": 0.694,
+        "p50": 0.7,
+        "p95": 0.9,
+        "p99": 1,
+        "max": 2.2,
+        "n": 2977
+      },
+      "render_ms": {
+        "mean": 0.691,
+        "p50": 0.7,
+        "p95": 0.9,
+        "p99": 1,
+        "max": 2.2,
+        "n": 2977
+      },
+      "update_ms": {
+        "mean": 0.003,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0.1,
+        "max": 0.1,
+        "n": 2977
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 7.826,
+        "p50": 7.732,
+        "p95": 10.634,
+        "p99": 11.956,
+        "max": 13.757,
+        "n": 1944
+      },
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws": {
+        "mean": 392.588,
+        "p50": 358,
+        "p95": 539,
+        "p99": 564,
+        "max": 573,
+        "n": 2977
+      },
+      "triangles": 224331,
+      "render_calls_per_frame": 2,
+      "raf_ticks": 1838206,
+      "waited_ticks": 1835229,
+      "gpu_wait_ms_per_frame": 1.601,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "city": {
+        "buildings": 494,
+        "windows": 18395
+      },
+      "compile_ms": 97.1,
+      "compat": {},
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-empty-fastrender-1280x800",
+      "label": "",
+      "variant": "fastrender",
+      "scene": "empty",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 1,
+        "upscale": "bilinear",
+        "vsync": 0
+      },
+      "shm": "/frb-68079",
+      "shot": "bench-empty-fastrender-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20,
+        "main": {
+          "cpu_percent": 6.6,
+          "cpu_s": 1.321,
+          "working_set_mb": 176.4,
+          "peak_working_set_mb": 181.1,
+          "footprint_mb": 76,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 65.6,
+          "peak_working_set_mb": 65.6,
+          "footprint_mb": 12,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 58.9,
+          "cpu_s": 11.782,
+          "working_set_mb": 349.9,
+          "peak_working_set_mb": 349.9,
+          "footprint_mb": 197,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 65.5,
+          "cpu_s": 13.103,
+          "working_set_mb": 639.4,
+          "footprint_mb": 292
+        },
+        "main_process_cpu_percent_node": 6.7
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.002,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "1280x800"
+      },
+      "frames": 9301,
+      "fps": 464.997,
+      "drain_ms": 2.3,
+      "frame_ms": {
+        "mean": 2.15,
+        "p50": 2,
+        "p95": 3.3,
+        "p99": 4.2,
+        "max": 45.8,
+        "n": 9300
+      },
+      "js_ms": {
+        "mean": 0.015,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 9301
+      },
+      "render_ms": {
+        "mean": 0.008,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 9301
+      },
+      "update_ms": {
+        "mean": 0.007,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 9301
+      },
+      "flush_ms": {
+        "mean": 0.006,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 9301
+      },
+      "gpu_ms": {
+        "mean": 0.093,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 9301
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "n": 9301
+      },
+      "triangles": 0,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 1364754,
+      "waited_ticks": 1355453,
+      "gpu_wait_ms_per_frame": 2.132,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "native": {
+        "rendered": 9301,
+        "skipped": 0,
+        "rendered_fps": 464.997,
+        "render_thread_cpu_ms": 2.068,
+        "draws": 0,
+        "programs": 0,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 0,
+          "avg_ms": 0
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "unsupported": {},
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-empty-fastrender-2560x1600",
+      "label": "",
+      "variant": "fastrender",
+      "scene": "empty",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 1,
+        "upscale": "bilinear",
+        "vsync": 0
+      },
+      "shm": "/frb-68566",
+      "shot": "bench-empty-fastrender-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20,
+        "main": {
+          "cpu_percent": 5.7,
+          "cpu_s": 1.15,
+          "working_set_mb": 175.4,
+          "peak_working_set_mb": 202.4,
+          "footprint_mb": 129,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 65.6,
+          "peak_working_set_mb": 65.7,
+          "footprint_mb": 12,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 65.6,
+          "cpu_s": 13.114,
+          "working_set_mb": 345.1,
+          "peak_working_set_mb": 345.2,
+          "footprint_mb": 189,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 71.3,
+          "cpu_s": 14.264,
+          "working_set_mb": 633.6,
+          "footprint_mb": 337.1
+        },
+        "main_process_cpu_percent_node": 5.8
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "2560x1600"
+      },
+      "frames": 7458,
+      "fps": 372.894,
+      "drain_ms": 0,
+      "frame_ms": {
+        "mean": 2.682,
+        "p50": 2.7,
+        "p95": 4.8,
+        "p99": 6,
+        "max": 34.7,
+        "n": 7457
+      },
+      "js_ms": {
+        "mean": 0.014,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 7458
+      },
+      "render_ms": {
+        "mean": 0.007,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 7458
+      },
+      "update_ms": {
+        "mean": 0.007,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 7458
+      },
+      "flush_ms": {
+        "mean": 0.005,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 7458
+      },
+      "gpu_ms": {
+        "mean": 0.308,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 7458
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "n": 7458
+      },
+      "triangles": 0,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 1896449,
+      "waited_ticks": 1888991,
+      "gpu_wait_ms_per_frame": 2.665,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "native": {
+        "rendered": 7458,
+        "skipped": 0,
+        "rendered_fps": 372.894,
+        "render_thread_cpu_ms": 2.481,
+        "draws": 0,
+        "programs": 0,
+        "gpu_errors": 0,
+        "drawable": "2560x1600",
+        "xlat": {
+          "count": 0,
+          "avg_ms": 0
+        },
+        "images": {
+          "calls": 0,
+          "cached": 0,
+          "failed": 0,
+          "ms": 0,
+          "bytes": 0,
+          "maxMs": 0
+        }
+      },
+      "unsupported": {},
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-empty-webgl-1280x800",
+      "label": "",
+      "variant": "webgl",
+      "scene": "empty",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-empty-webgl-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 1,
+          "cpu_s": 0.208,
+          "working_set_mb": 175.3,
+          "peak_working_set_mb": 187.1,
+          "footprint_mb": 49,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 22.3,
+          "cpu_s": 4.462,
+          "working_set_mb": 79.5,
+          "peak_working_set_mb": 85,
+          "footprint_mb": 68,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 14.1,
+          "cpu_s": 2.829,
+          "working_set_mb": 152.9,
+          "peak_working_set_mb": 182.4,
+          "footprint_mb": 35,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 37.4,
+          "cpu_s": 7.499,
+          "working_set_mb": 455.2,
+          "footprint_mb": 159.1
+        },
+        "main_process_cpu_percent_node": 1.1
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.004,
+      "backend": {
+        "api": "WebGL2",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "antialias": false,
+        "samples": 0,
+        "drawingBuffer": "1280x800",
+        "timerQuery": true
+      },
+      "frames": 3817,
+      "fps": 190.809,
+      "drain_ms": 3.3,
+      "frame_ms": {
+        "mean": 5.237,
+        "p50": 0.8,
+        "p95": 17.6,
+        "p99": 17.7,
+        "max": 17.9,
+        "n": 3816
+      },
+      "js_ms": {
+        "mean": 0.067,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.8,
+        "n": 3817
+      },
+      "render_ms": {
+        "mean": 0.031,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.2,
+        "max": 0.4,
+        "n": 3817
+      },
+      "update_ms": {
+        "mean": 0.036,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.2,
+        "max": 0.8,
+        "n": 3817
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 0.292,
+        "p50": 0.267,
+        "p95": 0.597,
+        "p99": 1.434,
+        "max": 2.689,
+        "n": 3818
+      },
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws": {
+        "mean": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "n": 3817
+      },
+      "triangles": 0,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 38445,
+      "waited_ticks": 34628,
+      "gpu_wait_ms_per_frame": 0.132,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-empty-webgl-2560x1600",
+      "label": "",
+      "variant": "webgl",
+      "scene": "empty",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-empty-webgl-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 0.2,
+          "cpu_s": 0.049,
+          "working_set_mb": 166.9,
+          "peak_working_set_mb": 187,
+          "footprint_mb": 45,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 23.4,
+          "cpu_s": 4.692,
+          "working_set_mb": 94.3,
+          "peak_working_set_mb": 107.8,
+          "footprint_mb": 195,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0.001,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 17.7,
+          "cpu_s": 3.545,
+          "working_set_mb": 159.5,
+          "peak_working_set_mb": 161.8,
+          "footprint_mb": 52,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 41.3,
+          "cpu_s": 8.287,
+          "working_set_mb": 468.2,
+          "footprint_mb": 299.1
+        },
+        "main_process_cpu_percent_node": 0.3
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.013,
+      "backend": {
+        "api": "WebGL2",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "antialias": false,
+        "samples": 0,
+        "drawingBuffer": "2560x1600",
+        "timerQuery": true
+      },
+      "frames": 3386,
+      "fps": 169.19,
+      "drain_ms": 3,
+      "frame_ms": {
+        "mean": 5.907,
+        "p50": 1.3,
+        "p95": 17.6,
+        "p99": 17.8,
+        "max": 20.2,
+        "n": 3385
+      },
+      "js_ms": {
+        "mean": 0.086,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.3,
+        "max": 0.5,
+        "n": 3386
+      },
+      "render_ms": {
+        "mean": 0.038,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.2,
+        "max": 0.2,
+        "n": 3386
+      },
+      "update_ms": {
+        "mean": 0.047,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.2,
+        "max": 0.5,
+        "n": 3386
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 0.823,
+        "p50": 0.705,
+        "p95": 1.809,
+        "p99": 2.165,
+        "max": 2.441,
+        "n": 3387
+      },
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws": {
+        "mean": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "n": 3386
+      },
+      "triangles": 0,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 67842,
+      "waited_ticks": 64456,
+      "gpu_wait_ms_per_frame": 0.257,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-empty-webgpu-1280x800",
+      "label": "",
+      "variant": "webgpu",
+      "scene": "empty",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-empty-webgpu-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 0.2,
+          "cpu_s": 0.044,
+          "working_set_mb": 166.3,
+          "peak_working_set_mb": 178.5,
+          "footprint_mb": 45,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 30.5,
+          "cpu_s": 6.11,
+          "working_set_mb": 98.7,
+          "peak_working_set_mb": 98.8,
+          "footprint_mb": 84,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 20.5,
+          "cpu_s": 4.094,
+          "working_set_mb": 186.5,
+          "peak_working_set_mb": 186.7,
+          "footprint_mb": 72,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 51.2,
+          "cpu_s": 10.248,
+          "working_set_mb": 499,
+          "footprint_mb": 208.1
+        },
+        "main_process_cpu_percent_node": 0.3
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.011,
+      "backend": {
+        "api": "WebGPU",
+        "renderer": "apple metal-3 0x0000 Apple M2",
+        "antialias": false,
+        "samples": 0,
+        "timestampQuery": true,
+        "transientAttachment": true,
+        "features": [
+          "bgra8unorm-storage",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroups",
+          "texture-compression-astc",
+          "texture-compression-astc-sliced-3d",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-compression-etc2",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ]
+      },
+      "frames": 3087,
+      "fps": 154.267,
+      "drain_ms": 0.4,
+      "frame_ms": {
+        "mean": 6.474,
+        "p50": 1.5,
+        "p95": 17.4,
+        "p99": 17.6,
+        "max": 18.9,
+        "n": 3086
+      },
+      "js_ms": {
+        "mean": 0.269,
+        "p50": 0.3,
+        "p95": 0.5,
+        "p99": 0.6,
+        "max": 0.8,
+        "n": 3087
+      },
+      "render_ms": {
+        "mean": 0.264,
+        "p50": 0.2,
+        "p95": 0.5,
+        "p99": 0.6,
+        "max": 0.8,
+        "n": 3087
+      },
+      "update_ms": {
+        "mean": 0.005,
+        "p50": 0,
+        "p95": 0.1,
+        "p99": 0.1,
+        "max": 0.2,
+        "n": 3087
+      },
+      "flush_ms": null,
+      "gpu_ms": null,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1,
+        "n": 3087
+      },
+      "triangles": 1,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 66749,
+      "waited_ticks": 63662,
+      "gpu_wait_ms_per_frame": 0.22,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "compat": {},
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-empty-webgpu-2560x1600",
+      "label": "",
+      "variant": "webgpu",
+      "scene": "empty",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 0,
+        "missing": 0,
+        "remote": 0
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-empty-webgpu-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 0.2,
+          "cpu_s": 0.039,
+          "working_set_mb": 167,
+          "peak_working_set_mb": 191,
+          "footprint_mb": 45,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 30.2,
+          "cpu_s": 6.047,
+          "working_set_mb": 100.7,
+          "peak_working_set_mb": 113.3,
+          "footprint_mb": 231,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 24.4,
+          "cpu_s": 4.884,
+          "working_set_mb": 181,
+          "peak_working_set_mb": 181.2,
+          "footprint_mb": 66,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 54.8,
+          "cpu_s": 10.97,
+          "working_set_mb": 496.2,
+          "footprint_mb": 349.1
+        },
+        "main_process_cpu_percent_node": 0.3
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.011,
+      "backend": {
+        "api": "WebGPU",
+        "renderer": "apple metal-3 0x0000 Apple M2",
+        "antialias": false,
+        "samples": 0,
+        "timestampQuery": true,
+        "transientAttachment": true,
+        "features": [
+          "bgra8unorm-storage",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroups",
+          "texture-compression-astc",
+          "texture-compression-astc-sliced-3d",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-compression-etc2",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ]
+      },
+      "frames": 3129,
+      "fps": 156.364,
+      "drain_ms": 0.5,
+      "frame_ms": {
+        "mean": 6.387,
+        "p50": 2.4,
+        "p95": 16.4,
+        "p99": 16.8,
+        "max": 17.4,
+        "n": 3128
+      },
+      "js_ms": {
+        "mean": 0.194,
+        "p50": 0.2,
+        "p95": 0.4,
+        "p99": 0.5,
+        "max": 0.9,
+        "n": 3129
+      },
+      "render_ms": {
+        "mean": 0.19,
+        "p50": 0.2,
+        "p95": 0.4,
+        "p99": 0.4,
+        "max": 0.8,
+        "n": 3129
+      },
+      "update_ms": {
+        "mean": 0.005,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0.1,
+        "max": 0.1,
+        "n": 3129
+      },
+      "flush_ms": null,
+      "gpu_ms": null,
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1,
+        "n": 3129
+      },
+      "triangles": 1,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 279921,
+      "waited_ticks": 276792,
+      "gpu_wait_ms_per_frame": 0.61,
+      "issues": {
+        "errors": [],
+        "warnings": [],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 0,
+        "failed": 0
+      },
+      "compat": {},
+      "ok": true,
+      "console_top": []
+    },
+    {
+      "tag": "bench-world-fastrender-1280x800-fx",
+      "label": "MetalFX-spatial-from-0.5x-per-axis",
+      "variant": "fastrender",
+      "scene": "world",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 0.5,
+        "upscale": "metalfx",
+        "vsync": 0
+      },
+      "shm": "/frb-71323",
+      "shot": "bench-world-fastrender-1280x800-fx-shot.png",
+      "processes": {
+        "wall_s": 20.02,
+        "main": {
+          "cpu_percent": 12.3,
+          "cpu_s": 2.457,
+          "working_set_mb": 1151.6,
+          "peak_working_set_mb": 1163.2,
+          "footprint_mb": 1118,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0.002,
+          "working_set_mb": 179.6,
+          "peak_working_set_mb": 283.1,
+          "footprint_mb": 276,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 51.5,
+          "cpu_s": 10.316,
+          "working_set_mb": 2751.4,
+          "peak_working_set_mb": 2757.7,
+          "footprint_mb": 2203,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 63.8,
+          "cpu_s": 12.775,
+          "working_set_mb": 4130.1,
+          "footprint_mb": 3604.1
+        },
+        "main_process_cpu_percent_node": 12.3
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.019,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "1280x800"
+      },
+      "frames": 668,
+      "fps": 33.368,
+      "drain_ms": 17.9,
+      "frame_ms": {
+        "mean": 29.962,
+        "p50": 29.6,
+        "p95": 33.8,
+        "p99": 35.4,
+        "max": 43.9,
+        "n": 667
+      },
+      "js_ms": {
+        "mean": 7.771,
+        "p50": 7.4,
+        "p95": 9.7,
+        "p99": 12.7,
+        "max": 41.3,
+        "n": 668
+      },
+      "render_ms": {
+        "mean": 6.231,
+        "p50": 6.1,
+        "p95": 6.8,
+        "p99": 7.6,
+        "max": 40,
+        "n": 668
+      },
+      "update_ms": {
+        "mean": 1.54,
+        "p50": 1.3,
+        "p95": 3.5,
+        "p99": 6.4,
+        "max": 6.6,
+        "n": 668
+      },
+      "flush_ms": {
+        "mean": 0.191,
+        "p50": 0.2,
+        "p95": 0.3,
+        "p99": 0.3,
+        "max": 0.4,
+        "n": 668
+      },
+      "gpu_ms": {
+        "mean": 29.964,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 668
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 1518.307,
+        "p50": 1385,
+        "p95": 1957,
+        "p99": 1965,
+        "max": 1966,
+        "n": 668
+      },
+      "triangles": 5050808,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 477816,
+      "waited_ticks": 477148,
+      "gpu_wait_ms_per_frame": 22.133,
+      "issues": {
+        "errors": [
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "native": {
+        "rendered": 668,
+        "skipped": 0,
+        "rendered_fps": 33.368,
+        "render_thread_cpu_ms": 22.1,
+        "draws": 1291,
+        "programs": 96,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 96,
+          "avg_ms": 0.388
+        },
+        "images": {
+          "calls": 91,
+          "cached": 9,
+          "failed": 0,
+          "ms": 353.8000000715256,
+          "bytes": 350371840,
+          "maxMs": 30.5
+        }
+      },
+      "unsupported": {
+        "texture source without pixels": 12,
+        "transmission": 1
+      },
+      "boot_frames": 3,
+      "boot_s": 2.5,
+      "census": {
+        "objects": 25428,
+        "meshes": 15068,
+        "visible_meshes": 2437,
+        "instanced": 962,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 480,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 253,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 396,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2778,
+          "objects_plain": 99
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 117,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 0,
+      "rt_renders": {
+        "cube render target (RoomEnvironment)": 6,
+        "cube render target (object pass)": 84,
+        "cube render target (scene pass)": 6,
+        "render target (fullscreen/ortho pass)": 120
+      },
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+        }
+      ]
+    },
+    {
+      "tag": "bench-world-fastrender-1280x800",
+      "label": "",
+      "variant": "fastrender",
+      "scene": "world",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 1,
+        "upscale": "bilinear",
+        "vsync": 0
+      },
+      "shm": "/frb-70654",
+      "shot": "bench-world-fastrender-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20.02,
+        "main": {
+          "cpu_percent": 7.1,
+          "cpu_s": 1.428,
+          "working_set_mb": 1230.7,
+          "peak_working_set_mb": 1359.8,
+          "footprint_mb": 1146,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0.002,
+          "working_set_mb": 168.2,
+          "peak_working_set_mb": 268.3,
+          "footprint_mb": 274,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 44.3,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 42.2,
+          "cpu_s": 8.452,
+          "working_set_mb": 2194.8,
+          "peak_working_set_mb": 2233.3,
+          "footprint_mb": 2012,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 49.3,
+          "cpu_s": 9.882,
+          "working_set_mb": 3638,
+          "footprint_mb": 3439.1
+        },
+        "main_process_cpu_percent_node": 7.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.018,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "1280x800"
+      },
+      "frames": 352,
+      "fps": 17.584,
+      "drain_ms": 17.8,
+      "frame_ms": {
+        "mean": 56.844,
+        "p50": 56.2,
+        "p95": 62.2,
+        "p99": 63.5,
+        "max": 76.4,
+        "n": 351
+      },
+      "js_ms": {
+        "mean": 8.951,
+        "p50": 8.3,
+        "p95": 12.2,
+        "p99": 15,
+        "max": 73.6,
+        "n": 352
+      },
+      "render_ms": {
+        "mean": 7.127,
+        "p50": 6.7,
+        "p95": 7.5,
+        "p99": 13.2,
+        "max": 69.2,
+        "n": 352
+      },
+      "update_ms": {
+        "mean": 1.824,
+        "p50": 1.5,
+        "p95": 3.8,
+        "p99": 7.2,
+        "max": 7.3,
+        "n": 352
+      },
+      "flush_ms": {
+        "mean": 0.152,
+        "p50": 0.1,
+        "p95": 0.3,
+        "p99": 0.3,
+        "max": 0.3,
+        "n": 352
+      },
+      "gpu_ms": {
+        "mean": 56.874,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 352
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 1530.261,
+        "p50": 1402,
+        "p95": 1959,
+        "p99": 1981,
+        "max": 1987,
+        "n": 352
+      },
+      "triangles": 5049293,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 438343,
+      "waited_ticks": 437991,
+      "gpu_wait_ms_per_frame": 47.734,
+      "issues": {
+        "errors": [
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "native": {
+        "rendered": 352,
+        "skipped": 0,
+        "rendered_fps": 17.584,
+        "render_thread_cpu_ms": 47.845,
+        "draws": 1266,
+        "programs": 95,
+        "gpu_errors": 0,
+        "drawable": "1280x800",
+        "xlat": {
+          "count": 95,
+          "avg_ms": 20.515
+        },
+        "images": {
+          "calls": 91,
+          "cached": 9,
+          "failed": 0,
+          "ms": 375.40000005066395,
+          "bytes": 350371840,
+          "maxMs": 32.30000001192093
+        }
+      },
+      "unsupported": {
+        "texture source without pixels": 12,
+        "transmission": 1
+      },
+      "boot_frames": 4,
+      "boot_s": 4,
+      "census": {
+        "objects": 25428,
+        "meshes": 15068,
+        "visible_meshes": 2419,
+        "instanced": 962,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 474,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 247,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 390,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2759,
+          "objects_plain": 100
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 111,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 0,
+      "rt_renders": {
+        "cube render target (RoomEnvironment)": 6,
+        "cube render target (object pass)": 84,
+        "cube render target (scene pass)": 6,
+        "render target (fullscreen/ortho pass)": 120
+      },
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+        }
+      ]
+    },
+    {
+      "tag": "bench-world-fastrender-2560x1600",
+      "label": "",
+      "variant": "fastrender",
+      "scene": "world",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "renderer_options": {
+        "scale": 1,
+        "upscale": "bilinear",
+        "vsync": 0
+      },
+      "shm": "/frb-72110",
+      "shot": "bench-world-fastrender-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20.01,
+        "main": {
+          "cpu_percent": 2.8,
+          "cpu_s": 0.558,
+          "working_set_mb": 1131.4,
+          "peak_working_set_mb": 1163.6,
+          "footprint_mb": 1242,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 0,
+          "cpu_s": 0.001,
+          "working_set_mb": 181.8,
+          "peak_working_set_mb": 293.8,
+          "footprint_mb": 317,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 31.6,
+          "cpu_s": 6.323,
+          "working_set_mb": 2300.6,
+          "peak_working_set_mb": 2356,
+          "footprint_mb": 2028,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 34.4,
+          "cpu_s": 6.882,
+          "working_set_mb": 3661.3,
+          "footprint_mb": 3594
+        },
+        "main_process_cpu_percent_node": 2.8
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.011,
+      "backend": {
+        "api": "Metal (fastrender)",
+        "renderer": "fastrender render thread, main process",
+        "antialias": false,
+        "samples": 1,
+        "drawingBuffer": "2560x1600"
+      },
+      "frames": 127,
+      "fps": 6.346,
+      "drain_ms": 11.4,
+      "frame_ms": {
+        "mean": 157.585,
+        "p50": 157.3,
+        "p95": 160.4,
+        "p99": 167.4,
+        "max": 170,
+        "n": 126
+      },
+      "js_ms": {
+        "mean": 9.268,
+        "p50": 9,
+        "p95": 12.3,
+        "p99": 14.6,
+        "max": 17.3,
+        "n": 127
+      },
+      "render_ms": {
+        "mean": 7.219,
+        "p50": 7.2,
+        "p95": 7.9,
+        "p99": 8.5,
+        "max": 8.7,
+        "n": 127
+      },
+      "update_ms": {
+        "mean": 2.049,
+        "p50": 1.7,
+        "p95": 5.1,
+        "p99": 7.9,
+        "max": 11.1,
+        "n": 127
+      },
+      "flush_ms": {
+        "mean": 0.088,
+        "p50": 0.1,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.2,
+        "n": 127
+      },
+      "gpu_ms": {
+        "mean": 157.678,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "n": 127
+      },
+      "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+      "draws": {
+        "mean": 1595.189,
+        "p50": 1476,
+        "p95": 2019,
+        "p99": 2019,
+        "max": 2019,
+        "n": 127
+      },
+      "triangles": 5023698,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 409518,
+      "waited_ticks": 409391,
+      "gpu_wait_ms_per_frame": 147.124,
+      "issues": {
+        "errors": [
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "native": {
+        "rendered": 127,
+        "skipped": 0,
+        "rendered_fps": 6.346,
+        "render_thread_cpu_ms": 148.229,
+        "draws": 1330,
+        "programs": 91,
+        "gpu_errors": 0,
+        "drawable": "2560x1600",
+        "xlat": {
+          "count": 91,
+          "avg_ms": 0.059
+        },
+        "images": {
+          "calls": 90,
+          "cached": 9,
+          "failed": 0,
+          "ms": 361.9000000357628,
+          "bytes": 350240768,
+          "maxMs": 31.100000008940697
+        }
+      },
+      "unsupported": {
+        "texture source without pixels": 12,
+        "transmission": 1
+      },
+      "boot_frames": 3,
+      "boot_s": 2.5,
+      "census": {
+        "objects": 25426,
+        "meshes": 15066,
+        "visible_meshes": 2397,
+        "instanced": 960,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 469,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 242,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 385,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2741,
+          "objects_plain": 96
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 106,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 0,
+      "rt_renders": {
+        "cube render target (RoomEnvironment)": 6,
+        "cube render target (object pass)": 84,
+        "cube render target (scene pass)": 6,
+        "render target (fullscreen/ortho pass)": 120
+      },
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+        }
+      ]
+    },
+    {
+      "tag": "bench-world-webgl-1280x800-aa",
+      "label": "",
+      "variant": "webgl",
+      "scene": "world",
+      "px": "1280x800",
+      "aa": true,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-world-webgl-1280x800-aa-shot.png",
+      "processes": {
+        "wall_s": 20.27,
+        "main": {
+          "cpu_percent": 0.2,
+          "cpu_s": 0.032,
+          "working_set_mb": 194.7,
+          "peak_working_set_mb": 222,
+          "footprint_mb": 52,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 11.9,
+          "cpu_s": 2.416,
+          "working_set_mb": 577.5,
+          "peak_working_set_mb": 616.3,
+          "footprint_mb": 2498,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 42.1,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 36.5,
+          "cpu_s": 7.39,
+          "working_set_mb": 1772.4,
+          "peak_working_set_mb": 1772.9,
+          "footprint_mb": 1717,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 48.6,
+          "cpu_s": 9.838,
+          "working_set_mb": 2586.7,
+          "footprint_mb": 4274.1
+        },
+        "main_process_cpu_percent_node": 0.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.271,
+      "backend": {
+        "api": "WebGL2",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "antialias": true,
+        "samples": 4,
+        "drawingBuffer": "1280x800",
+        "timerQuery": true
+      },
+      "frames": 135,
+      "fps": 6.66,
+      "drain_ms": 269.7,
+      "frame_ms": {
+        "mean": 149.065,
+        "p50": 150.8,
+        "p95": 154.5,
+        "p99": 161.3,
+        "max": 162.2,
+        "n": 134
+      },
+      "js_ms": {
+        "mean": 18.512,
+        "p50": 18.2,
+        "p95": 20.8,
+        "p99": 23.9,
+        "max": 27.3,
+        "n": 135
+      },
+      "render_ms": {
+        "mean": 16.37,
+        "p50": 16.3,
+        "p95": 17.7,
+        "p99": 18.9,
+        "max": 18.9,
+        "n": 135
+      },
+      "update_ms": {
+        "mean": 2.141,
+        "p50": 1.8,
+        "p95": 4.5,
+        "p99": 8,
+        "max": 8.9,
+        "n": 135
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 176.333,
+        "p50": 174.95,
+        "p95": 185.63,
+        "p99": 193.423,
+        "max": 197.472,
+        "n": 137
+      },
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws": {
+        "mean": 3033.067,
+        "p50": 3014,
+        "p95": 3077,
+        "p99": 3077,
+        "max": 3077,
+        "n": 135
+      },
+      "triangles": 10589667,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 831258,
+      "waited_ticks": 831123,
+      "gpu_wait_ms_per_frame": 129.519,
+      "issues": {
+        "errors": [
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "boot_frames": 72,
+      "boot_s": 8.8,
+      "census": {
+        "objects": 25426,
+        "meshes": 15066,
+        "visible_meshes": 2400,
+        "instanced": 960,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 469,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 242,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 385,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2744,
+          "objects_plain": 96
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 106,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 145,
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+        }
+      ]
+    },
+    {
+      "tag": "bench-world-webgl-1280x800",
+      "label": "",
+      "variant": "webgl",
+      "scene": "world",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-world-webgl-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20.24,
+        "main": {
+          "cpu_percent": 0.2,
+          "cpu_s": 0.035,
+          "working_set_mb": 160.4,
+          "peak_working_set_mb": 216.8,
+          "footprint_mb": 53,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 13.2,
+          "cpu_s": 2.666,
+          "working_set_mb": 560.9,
+          "peak_working_set_mb": 578,
+          "footprint_mb": 2341,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 42.1,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 37.8,
+          "cpu_s": 7.659,
+          "working_set_mb": 1384.5,
+          "peak_working_set_mb": 1416.1,
+          "footprint_mb": 1725,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 51.2,
+          "cpu_s": 10.36,
+          "working_set_mb": 2147.9,
+          "footprint_mb": 4126
+        },
+        "main_process_cpu_percent_node": 0.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.235,
+      "backend": {
+        "api": "WebGL2",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "antialias": false,
+        "samples": 0,
+        "drawingBuffer": "1280x800",
+        "timerQuery": true
+      },
+      "frames": 154,
+      "fps": 7.61,
+      "drain_ms": 235.3,
+      "frame_ms": {
+        "mean": 130.554,
+        "p50": 132.4,
+        "p95": 135.3,
+        "p99": 136.3,
+        "max": 138.5,
+        "n": 153
+      },
+      "js_ms": {
+        "mean": 18.349,
+        "p50": 18,
+        "p95": 20.9,
+        "p99": 24.4,
+        "max": 24.6,
+        "n": 154
+      },
+      "render_ms": {
+        "mean": 16.216,
+        "p50": 16.2,
+        "p95": 17.3,
+        "p99": 17.9,
+        "max": 18.4,
+        "n": 154
+      },
+      "update_ms": {
+        "mean": 2.134,
+        "p50": 1.8,
+        "p95": 4.6,
+        "p99": 8.4,
+        "max": 9.1,
+        "n": 154
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 156.445,
+        "p50": 155.352,
+        "p95": 164.454,
+        "p99": 167.558,
+        "max": 167.559,
+        "n": 156
+      },
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws": {
+        "mean": 3022.019,
+        "p50": 3009,
+        "p95": 3076,
+        "p99": 3077,
+        "max": 3077,
+        "n": 154
+      },
+      "triangles": 10561131,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 870099,
+      "waited_ticks": 869945,
+      "gpu_wait_ms_per_frame": 111.445,
+      "issues": {
+        "errors": [
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "boot_frames": 6,
+      "boot_s": 17.3,
+      "census": {
+        "objects": 25426,
+        "meshes": 15066,
+        "visible_meshes": 2402,
+        "instanced": 960,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 469,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 242,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 385,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2746,
+          "objects_plain": 96
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 106,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 145,
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+        }
+      ]
+    },
+    {
+      "tag": "bench-world-webgl-2560x1600",
+      "label": "",
+      "variant": "webgl",
+      "scene": "world",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-world-webgl-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20.71,
+        "main": {
+          "cpu_percent": 0.3,
+          "cpu_s": 0.055,
+          "working_set_mb": 185.6,
+          "peak_working_set_mb": 229.2,
+          "footprint_mb": 54,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 5.6,
+          "cpu_s": 1.163,
+          "working_set_mb": 610.6,
+          "peak_working_set_mb": 709.4,
+          "footprint_mb": 2815,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 44.3,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 31.5,
+          "cpu_s": 6.526,
+          "working_set_mb": 1825.5,
+          "peak_working_set_mb": 1881.1,
+          "footprint_mb": 1768,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 37.4,
+          "cpu_s": 7.744,
+          "working_set_mb": 2666,
+          "footprint_mb": 4644.1
+        },
+        "main_process_cpu_percent_node": 0.3
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.71,
+      "backend": {
+        "api": "WebGL2",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "antialias": false,
+        "samples": 0,
+        "drawingBuffer": "2560x1600",
+        "timerQuery": true
+      },
+      "frames": 61,
+      "fps": 2.945,
+      "drain_ms": 700.7,
+      "frame_ms": {
+        "mean": 333.19,
+        "p50": 338,
+        "p95": 345.9,
+        "p99": 351.5,
+        "max": 351.5,
+        "n": 60
+      },
+      "js_ms": {
+        "mean": 17.995,
+        "p50": 17.7,
+        "p95": 20.7,
+        "p99": 25,
+        "max": 25,
+        "n": 61
+      },
+      "render_ms": {
+        "mean": 15.926,
+        "p50": 15.8,
+        "p95": 17.3,
+        "p99": 20.1,
+        "max": 20.1,
+        "n": 61
+      },
+      "update_ms": {
+        "mean": 2.069,
+        "p50": 1.7,
+        "p95": 3.9,
+        "p99": 10.6,
+        "max": 10.6,
+        "n": 61
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 452.221,
+        "p50": 455.338,
+        "p95": 477.652,
+        "p99": 483.642,
+        "max": 483.642,
+        "n": 63
+      },
+      "gpu_source": "EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame)",
+      "draws": {
+        "mean": 3071.984,
+        "p50": 3076,
+        "p95": 3082,
+        "p99": 3083,
+        "max": 3083,
+        "n": 61
+      },
+      "triangles": 10595447,
+      "render_calls_per_frame": 1,
+      "raf_ticks": 1058366,
+      "waited_ticks": 1058305,
+      "gpu_wait_ms_per_frame": 309.956,
+      "issues": {
+        "errors": [
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "boot_frames": 7,
+      "boot_s": 3.8,
+      "census": {
+        "objects": 25426,
+        "meshes": 15066,
+        "visible_meshes": 2411,
+        "instanced": 960,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 469,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 242,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 385,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2753,
+          "objects_plain": 98
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 106,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 145,
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+        }
+      ]
+    },
+    {
+      "tag": "bench-world-webgpu-1280x800-aa",
+      "label": "",
+      "variant": "webgpu",
+      "scene": "world",
+      "px": "1280x800",
+      "aa": true,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-world-webgpu-1280x800-aa-shot.png",
+      "processes": {
+        "wall_s": 20.08,
+        "main": {
+          "cpu_percent": 0.2,
+          "cpu_s": 0.033,
+          "working_set_mb": 216.2,
+          "peak_working_set_mb": 224.3,
+          "footprint_mb": 50,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 18.7,
+          "cpu_s": 3.76,
+          "working_set_mb": 481.7,
+          "peak_working_set_mb": 482.5,
+          "footprint_mb": 1290,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 57,
+          "cpu_s": 11.445,
+          "working_set_mb": 3142.8,
+          "peak_working_set_mb": 3204,
+          "footprint_mb": 2442,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 75.9,
+          "cpu_s": 15.238,
+          "working_set_mb": 3888.2,
+          "footprint_mb": 3789.1
+        },
+        "main_process_cpu_percent_node": 0.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.081,
+      "backend": {
+        "api": "WebGPU",
+        "renderer": "apple metal-3 0x0000 Apple M2",
+        "antialias": true,
+        "samples": 4,
+        "timestampQuery": true,
+        "transientAttachment": true,
+        "features": [
+          "bgra8unorm-storage",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroups",
+          "texture-compression-astc",
+          "texture-compression-astc-sliced-3d",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-compression-etc2",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ]
+      },
+      "frames": 422,
+      "fps": 21.015,
+      "drain_ms": 80.2,
+      "frame_ms": {
+        "mean": 47.466,
+        "p50": 47.6,
+        "p95": 49.6,
+        "p99": 50.2,
+        "max": 50.9,
+        "n": 421
+      },
+      "js_ms": {
+        "mean": 14.674,
+        "p50": 14.2,
+        "p95": 17.6,
+        "p99": 25.2,
+        "max": 38.5,
+        "n": 422
+      },
+      "render_ms": {
+        "mean": 12.805,
+        "p50": 12.5,
+        "p95": 14.2,
+        "p99": 23.6,
+        "max": 34.3,
+        "n": 422
+      },
+      "update_ms": {
+        "mean": 1.869,
+        "p50": 1.6,
+        "p95": 3.7,
+        "p99": 6.7,
+        "max": 6.9,
+        "n": 422
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 49.633,
+        "p50": 49.96,
+        "p95": 51.392,
+        "p99": 51.758,
+        "max": 97.8,
+        "n": 212
+      },
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws": {
+        "mean": 1653.796,
+        "p50": 1648,
+        "p95": 1687,
+        "p99": 1699,
+        "max": 1714,
+        "n": 422
+      },
+      "triangles": 5816485,
+      "render_calls_per_frame": 2,
+      "raf_ticks": 1399739,
+      "waited_ticks": 1399317,
+      "gpu_wait_ms_per_frame": 32.652,
+      "issues": {
+        "errors": [
+          {
+            "count": 10,
+            "message": "THREE.NodeBuilder: Material \"ShaderMaterial\" is not compatible."
+          },
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "boot_frames": 48,
+      "boot_s": 4.3,
+      "census": {
+        "objects": 25428,
+        "meshes": 15068,
+        "visible_meshes": 2419,
+        "instanced": 962,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 476,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 249,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 392,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2760,
+          "objects_plain": 99
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 113,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 0,
+      "compat": {
+        "new WebGLRenderer() -> WebGPURenderer": 1
+      },
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 2,
+          "message": "THREE.NodeBuilder: Material \"ShaderMaterial\" is not compatible."
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+        },
+        {
+          "count": 1,
+          "message": "Calling [RenderPassEncoder (unlabeled)].Draw with a vertex count of 0 is unusual."
+        },
+        {
+          "count": 1,
+          "message": "Calling [RenderPassEncoder (unlabeled)].Draw with an index count of 0 is unusual."
+        }
+      ]
+    },
+    {
+      "tag": "bench-world-webgpu-1280x800",
+      "label": "",
+      "variant": "webgpu",
+      "scene": "world",
+      "px": "1280x800",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "640x400"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-world-webgpu-1280x800-shot.png",
+      "processes": {
+        "wall_s": 20.08,
+        "main": {
+          "cpu_percent": 0,
+          "cpu_s": 0.008,
+          "working_set_mb": 185.8,
+          "peak_working_set_mb": 222.6,
+          "footprint_mb": 51,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 21.8,
+          "cpu_s": 4.384,
+          "working_set_mb": 621.5,
+          "peak_working_set_mb": 669.9,
+          "footprint_mb": 1423,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 42.2,
+          "peak_working_set_mb": 47.6,
+          "footprint_mb": 7.1,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 63.1,
+          "cpu_s": 12.661,
+          "working_set_mb": 2576.1,
+          "peak_working_set_mb": 2651.8,
+          "footprint_mb": 2260,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 84.9,
+          "cpu_s": 17.053,
+          "working_set_mb": 3425.6,
+          "footprint_mb": 3741.1
+        },
+        "main_process_cpu_percent_node": 0.1
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.077,
+      "backend": {
+        "api": "WebGPU",
+        "renderer": "apple metal-3 0x0000 Apple M2",
+        "antialias": false,
+        "samples": 0,
+        "timestampQuery": true,
+        "transientAttachment": true,
+        "features": [
+          "bgra8unorm-storage",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroups",
+          "texture-compression-astc",
+          "texture-compression-astc-sliced-3d",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-compression-etc2",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ]
+      },
+      "frames": 507,
+      "fps": 25.253,
+      "drain_ms": 65.6,
+      "frame_ms": {
+        "mean": 39.519,
+        "p50": 39.5,
+        "p95": 41.3,
+        "p99": 41.9,
+        "max": 43.3,
+        "n": 506
+      },
+      "js_ms": {
+        "mean": 14.206,
+        "p50": 13.7,
+        "p95": 17.9,
+        "p99": 23.3,
+        "max": 38.2,
+        "n": 507
+      },
+      "render_ms": {
+        "mean": 12.436,
+        "p50": 12.2,
+        "p95": 13.8,
+        "p99": 21.8,
+        "max": 34.1,
+        "n": 507
+      },
+      "update_ms": {
+        "mean": 1.77,
+        "p50": 1.5,
+        "p95": 3.7,
+        "p99": 6.5,
+        "max": 8.2,
+        "n": 507
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 37.261,
+        "p50": 37.501,
+        "p95": 38.51,
+        "p99": 38.796,
+        "max": 39.12,
+        "n": 254
+      },
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws": {
+        "mean": 1638.059,
+        "p50": 1637,
+        "p95": 1660,
+        "p99": 1665,
+        "max": 1668,
+        "n": 507
+      },
+      "triangles": 5768970,
+      "render_calls_per_frame": 2,
+      "raf_ticks": 1411693,
+      "waited_ticks": 1411186,
+      "gpu_wait_ms_per_frame": 25.199,
+      "issues": {
+        "errors": [
+          {
+            "count": 10,
+            "message": "THREE.NodeBuilder: Material \"ShaderMaterial\" is not compatible."
+          },
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "boot_frames": 195,
+      "boot_s": 9.1,
+      "census": {
+        "objects": 25427,
+        "meshes": 15067,
+        "visible_meshes": 2433,
+        "instanced": 961,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 476,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 249,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 392,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2774,
+          "objects_plain": 99
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 113,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 0,
+      "compat": {
+        "new WebGLRenderer() -> WebGPURenderer": 1
+      },
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 2,
+          "message": "THREE.NodeBuilder: Material \"ShaderMaterial\" is not compatible."
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+        },
+        {
+          "count": 1,
+          "message": "Calling [RenderPassEncoder (unlabeled)].Draw with a vertex count of 0 is unusual."
+        },
+        {
+          "count": 1,
+          "message": "Calling [RenderPassEncoder (unlabeled)].Draw with an index count of 0 is unusual."
+        }
+      ]
+    },
+    {
+      "tag": "bench-world-webgpu-2560x1600",
+      "label": "",
+      "variant": "webgpu",
+      "scene": "world",
+      "px": "2560x1600",
+      "aa": false,
+      "vsync": false,
+      "electron": "45.3.2",
+      "chrome": "156.0.8078.100",
+      "platform": "darwin arm64",
+      "isolated": true,
+      "requests": {
+        "local": 123,
+        "missing": 0,
+        "remote": 33
+      },
+      "display": {
+        "scaleFactor": 2,
+        "size": {
+          "width": 1470,
+          "height": 956
+        },
+        "refresh": 60.00239944458008,
+        "window_points": "1280x800"
+      },
+      "gpu_feature_status": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "shot": "bench-world-webgpu-2560x1600-shot.png",
+      "processes": {
+        "wall_s": 20.13,
+        "main": {
+          "cpu_percent": 0.1,
+          "cpu_s": 0.027,
+          "working_set_mb": 228.3,
+          "peak_working_set_mb": 250.4,
+          "footprint_mb": 56,
+          "processes": 1
+        },
+        "gpu": {
+          "cpu_percent": 10.4,
+          "cpu_s": 2.101,
+          "working_set_mb": 396.8,
+          "peak_working_set_mb": 422.3,
+          "footprint_mb": 1389,
+          "processes": 1
+        },
+        "other": {
+          "cpu_percent": 0,
+          "cpu_s": 0,
+          "working_set_mb": 47.5,
+          "peak_working_set_mb": 47.5,
+          "footprint_mb": 7,
+          "processes": 1
+        },
+        "page": {
+          "cpu_percent": 43.2,
+          "cpu_s": 8.703,
+          "working_set_mb": 2614.8,
+          "peak_working_set_mb": 2614.8,
+          "footprint_mb": 2090,
+          "processes": 1
+        },
+        "total": {
+          "cpu_percent": 53.7,
+          "cpu_s": 10.831,
+          "working_set_mb": 3287.4,
+          "footprint_mb": 3542
+        },
+        "main_process_cpu_percent_node": 0.2
+      },
+      "pace": "gpu",
+      "warmup_s": 10,
+      "measure_s": 20.131,
+      "backend": {
+        "api": "WebGPU",
+        "renderer": "apple metal-3 0x0000 Apple M2",
+        "antialias": false,
+        "samples": 0,
+        "timestampQuery": true,
+        "transientAttachment": true,
+        "features": [
+          "bgra8unorm-storage",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroups",
+          "texture-compression-astc",
+          "texture-compression-astc-sliced-3d",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-compression-etc2",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ]
+      },
+      "frames": 205,
+      "fps": 10.183,
+      "drain_ms": 131.2,
+      "frame_ms": {
+        "mean": 97.727,
+        "p50": 97.8,
+        "p95": 101.4,
+        "p99": 103.6,
+        "max": 105.3,
+        "n": 204
+      },
+      "js_ms": {
+        "mean": 16.236,
+        "p50": 16,
+        "p95": 18.2,
+        "p99": 21.2,
+        "max": 21.6,
+        "n": 205
+      },
+      "render_ms": {
+        "mean": 14.141,
+        "p50": 14,
+        "p95": 15.3,
+        "p99": 16.1,
+        "max": 18.2,
+        "n": 205
+      },
+      "update_ms": {
+        "mean": 2.095,
+        "p50": 1.8,
+        "p95": 4.3,
+        "p99": 7.5,
+        "max": 7.6,
+        "n": 205
+      },
+      "flush_ms": null,
+      "gpu_ms": {
+        "mean": 120.495,
+        "p50": 120.024,
+        "p95": 124.33,
+        "p99": 126.547,
+        "max": 128.874,
+        "n": 103
+      },
+      "gpu_source": "WebGPU timestamp-query (three trackTimestamp: sum of render passes)",
+      "draws": {
+        "mean": 1714.161,
+        "p50": 1720,
+        "p95": 1760,
+        "p99": 1774,
+        "max": 1783,
+        "n": 205
+      },
+      "triangles": 5710759,
+      "render_calls_per_frame": 2,
+      "raf_ticks": 1470686,
+      "waited_ticks": 1470481,
+      "gpu_wait_ms_per_frame": 81.015,
+      "issues": {
+        "errors": [
+          {
+            "count": 10,
+            "message": "THREE.NodeBuilder: Material \"ShaderMaterial\" is not compatible."
+          },
+          {
+            "count": 1,
+            "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+          }
+        ],
+        "warnings": [
+          {
+            "count": 1,
+            "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+          }
+        ],
+        "gpu": []
+      },
+      "net": {
+        "inflight": 0,
+        "done": 189,
+        "failed": 33
+      },
+      "boot_frames": 12,
+      "boot_s": 4.1,
+      "census": {
+        "objects": 25426,
+        "meshes": 15066,
+        "visible_meshes": 2399,
+        "instanced": 960,
+        "skinned": 270,
+        "batched": 50,
+        "sprites": 52,
+        "lights": 38,
+        "materials": 469,
+        "material_types": {
+          "ShaderMaterial": 6,
+          "MeshBasicMaterial": 34,
+          "LineBasicMaterial": 2,
+          "MeshStandardMaterial": 242,
+          "MeshPhysicalMaterial": 142,
+          "SpriteMaterial": 43
+        },
+        "glsl": {
+          "shader_material": 6,
+          "on_before_compile": 385,
+          "plain": 78,
+          "objects_shader_material": 13,
+          "objects_on_before_compile": 2742,
+          "objects_plain": 97
+        },
+        "glsl_materials": {
+          "MeshStandardMaterial+onBeforeCompile: (unnamed)": 106,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+          "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+          "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+          "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+          "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+          "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+          "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+          "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+          "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+          "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+          "ShaderMaterial: (unnamed)": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+          "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+          "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+          "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+          "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+          "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+          "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+          "ShaderMaterial: SkyShader": 1,
+          "MeshStandardMaterial+onBeforeCompile: river": 1,
+          "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+          "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+          "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+          "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+          "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+        }
+      },
+      "programs": 0,
+      "compat": {
+        "new WebGLRenderer() -> WebGPURenderer": 1
+      },
+      "ok": true,
+      "console_top": [
+        {
+          "count": 3,
+          "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+        },
+        {
+          "count": 2,
+          "message": "THREE.NodeBuilder: Material \"ShaderMaterial\" is not compatible."
+        },
+        {
+          "count": 1,
+          "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+        },
+        {
+          "count": 1,
+          "message": "Uncaught (in promise) WrongDocumentError: The root document of this element is not valid for pointer lock."
+        },
+        {
+          "count": 1,
+          "message": "Calling [RenderPassEncoder (unlabeled)].Draw with a vertex count of 0 is unusual."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+[page] [boot] modules loaded 0s
+[page] [boot] quality applied 0s
+[page] [boot] pbr 0.05s
+[page] [boot] manifest 0.07s
+[page] [boot] museum data 0.07s
+[page] [boot] rebuilt index 0.08s
+[page] [boot] ready 0.08s
+[page] [boot] level build start 0.08s
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] [seamless] built {"kind":"nyc","seed":20261105,"name":"Manhattan"} in 0.0 ms
+[page] [boot] level built 0.08s
+[page] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch
+[page] [boot] programs compiled (51) 0.12s
+[page] [boot] first frame (73 programs, 1055 calls, 0 ms) 0.13s
+[page] [bench] world started after 7 frames, 3.8 s; fetch {"inflight":4,"done":69,"failed":19}
+[page] Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock.
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 486 ms
+[bench-main] result {"tag":"bench-world-webgl-2560x1600","fps":2.945,"frame_ms":{"mean":333.19,"p50":338,"p95":345.9,"p99":351.5,"max":351.5,"n":60},"js_ms":17.7,"render_ms":15.8,"gpu_ms":452.221,"draws":3076,"cpu":37.4,"backend":"WebGL2"}
+[bench-main] DONE bench-world-webgl-2560x1600 (exit 0)

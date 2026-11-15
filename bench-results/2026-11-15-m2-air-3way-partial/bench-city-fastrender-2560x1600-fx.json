@@ -1,0 +1,207 @@
+{
+  "tag": "bench-city-fastrender-2560x1600-fx",
+  "label": "MetalFX-spatial-from-0.5x-per-axis",
+  "variant": "fastrender",
+  "scene": "city",
+  "px": "2560x1600",
+  "aa": false,
+  "vsync": false,
+  "electron": "45.3.2",
+  "chrome": "156.0.8078.100",
+  "platform": "darwin arm64",
+  "isolated": true,
+  "requests": {
+    "local": 0,
+    "missing": 0,
+    "remote": 0
+  },
+  "display": {
+    "scaleFactor": 2,
+    "size": {
+      "width": 1470,
+      "height": 956
+    },
+    "refresh": 60.00239944458008,
+    "window_points": "1280x800"
+  },
+  "gpu_feature_status": {
+    "2d_canvas": "disabled_software",
+    "direct_rendering_display_compositor": "disabled_off_ok",
+    "gpu_compositing": "disabled_software",
+    "multiple_raster_threads": "enabled_on",
+    "opengl": "disabled_off",
+    "rasterization": "disabled_software",
+    "raw_draw": "disabled_off_ok",
+    "skia_graphite": "disabled_off",
+    "trees_in_viz": "disabled_off",
+    "video_decode": "disabled_software",
+    "video_encode": "disabled_software",
+    "webgl": "disabled_off",
+    "webgpu": "disabled_off",
+    "webnn": "disabled_off"
+  },
+  "renderer_options": {
+    "scale": 0.5,
+    "upscale": "metalfx",
+    "vsync": 0
+  },
+  "shm": "/frb-69907",
+  "shot": "bench-city-fastrender-2560x1600-fx-shot.png",
+  "processes": {
+    "wall_s": 20.01,
+    "main": {
+      "cpu_percent": 6.3,
+      "cpu_s": 1.263,
+      "working_set_mb": 242.4,
+      "peak_working_set_mb": 246.4,
+      "footprint_mb": 235,
+      "processes": 1
+    },
+    "gpu": {
+      "cpu_percent": 0,
+      "cpu_s": 0,
+      "working_set_mb": 66.2,
+      "peak_working_set_mb": 66.3,
+      "footprint_mb": 12,
+      "processes": 1
+    },
+    "other": {
+      "cpu_percent": 0,
+      "cpu_s": 0,
+      "working_set_mb": 47.4,
+      "peak_working_set_mb": 47.5,
+      "footprint_mb": 7,
+      "processes": 1
+    },
+    "page": {
+      "cpu_percent": 51.6,
+      "cpu_s": 10.325,
+      "working_set_mb": 432.7,
+      "peak_working_set_mb": 432.7,
+      "footprint_mb": 273,
+      "processes": 1
+    },
+    "total": {
+      "cpu_percent": 57.9,
+      "cpu_s": 11.588,
+      "working_set_mb": 788.7,
+      "footprint_mb": 527
+    },
+    "main_process_cpu_percent_node": 6.3
+  },
+  "pace": "gpu",
+  "warmup_s": 10,
+  "measure_s": 20.006,
+  "backend": {
+    "api": "Metal (fastrender)",
+    "renderer": "fastrender render thread, main process",
+    "antialias": false,
+    "samples": 1,
+    "drawingBuffer": "2560x1600"
+  },
+  "frames": 4110,
+  "fps": 205.433,
+  "drain_ms": 5.2,
+  "frame_ms": {
+    "mean": 4.867,
+    "p50": 4.9,
+    "p95": 7.3,
+    "p99": 10.4,
+    "max": 34.4,
+    "n": 4109
+  },
+  "js_ms": {
+    "mean": 0.127,
+    "p50": 0.1,
+    "p95": 0.2,
+    "p99": 0.3,
+    "max": 0.4,
+    "n": 4110
+  },
+  "render_ms": {
+    "mean": 0.118,
+    "p50": 0.1,
+    "p95": 0.2,
+    "p99": 0.3,
+    "max": 0.4,
+    "n": 4110
+  },
+  "update_ms": {
+    "mean": 0.01,
+    "p50": 0,
+    "p95": 0.1,
+    "p99": 0.1,
+    "max": 0.2,
+    "n": 4110
+  },
+  "flush_ms": {
+    "mean": 0.015,
+    "p50": 0,
+    "p95": 0.1,
+    "p99": 0.1,
+    "max": 0.1,
+    "n": 4110
+  },
+  "gpu_ms": {
+    "mean": 3.524,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null,
+    "n": 4110
+  },
+  "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+  "draws": {
+    "mean": 160.732,
+    "p50": 180,
+    "p95": 290,
+    "p99": 311,
+    "max": 318,
+    "n": 4110
+  },
+  "triangles": 222638,
+  "render_calls_per_frame": 1,
+  "raf_ticks": 1066899,
+  "waited_ticks": 1062789,
+  "gpu_wait_ms_per_frame": 4.736,
+  "issues": {
+    "errors": [],
+    "warnings": [],
+    "gpu": []
+  },
+  "net": {
+    "inflight": 0,
+    "done": 0,
+    "failed": 0
+  },
+  "native": {
+    "rendered": 4110,
+    "skipped": 0,
+    "rendered_fps": 205.433,
+    "render_thread_cpu_ms": 4.574,
+    "draws": 155,
+    "programs": 5,
+    "gpu_errors": 0,
+    "drawable": "2560x1600",
+    "xlat": {
+      "count": 5,
+      "avg_ms": 0.034
+    },
+    "images": {
+      "calls": 0,
+      "cached": 0,
+      "failed": 0,
+      "ms": 0,
+      "bytes": 0,
+      "maxMs": 0
+    }
+  },
+  "unsupported": {},
+  "city": {
+    "buildings": 494,
+    "windows": 18395
+  },
+  "compile_ms": 10.5,
+  "ok": true,
+  "console_top": []
+}

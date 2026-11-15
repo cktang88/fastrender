@@ -1,0 +1,268 @@
+
+== fetching cktang88/3d-world-objects @ 073aa9e + patches -> ~/github/fastrender/host/electron/.bench/3d-world-objects
+
+== npm ci + addon (cargo, release)
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/ansi@2.1.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/checkbox@5.3.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/confirm@6.4.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/core@12.1.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/editor@5.4.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/expand@5.2.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/external-editor@3.1.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/figures@2.1.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/input@5.2.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/number@4.3.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/password@5.3.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/prompts@8.8.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/rawlist@5.4.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/search@4.4.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/select@5.3.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@inquirer/type@4.3.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: '@napi-rs/lzma@1.5.3',
+npm warn EBADENGINE   required: { node: '^22.20 || ^24.12 || >=25' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: 'mute-stream@4.0.0',
+npm warn EBADENGINE   required: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' },
+npm warn EBADENGINE   current: { node: 'v23.6.1', npm: '11.13.0' }
+npm warn EBADENGINE }
+
+added 80 packages, and audited 81 packages in 1s
+
+found 0 vulnerabilities
+
+> fastrender-electron@0.1.0 build
+> napi build --release --platform --manifest-path native/Cargo.toml --output-dir native
+
+   Compiling libc v0.2.191
+   Compiling unicode-ident v1.0.27
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling bitflags v2.13.2
+   Compiling objc2-encode v4.1.0
+   Compiling objc2 v0.6.5
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.15
+   Compiling wasm-bindgen-shared v0.2.104
+   Compiling cfg-if v1.0.5
+   Compiling objc-sys v0.3.5
+   Compiling autocfg v1.5.1
+   Compiling rustversion v1.0.23
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-utils v0.8.23
+   Compiling memchr v2.8.3
+   Compiling simd-adler32 v0.3.10
+   Compiling pin-project-lite v0.2.17
+   Compiling glob v0.3.4
+   Compiling crc32fast v1.5.5
+   Compiling crossbeam-epoch v0.9.21
+   Compiling bumpalo v3.20.4
+   Compiling adler2 v2.0.1
+   Compiling syn v3.0.10
+   Compiling syn v2.0.119
+   Compiling log v0.4.35
+   Compiling jobserver v0.1.35
+   Compiling objc2 v0.5.3
+   Compiling block2 v0.6.2
+   Compiling dispatch2 v0.3.1
+   Compiling cc v1.11.2
+   Compiling futures-sink v0.3.34
+   Compiling core-foundation-sys v0.8.7
+   Compiling crossbeam-deque v0.8.8
+   Compiling futures-core v0.3.34
+   Compiling objc2-core-foundation v0.3.2
+   Compiling serde_core v1.0.229
+   Compiling napi-build v2.6.0
+   Compiling futures-channel v0.3.34
+   Compiling core-foundation v0.9.4
+   Compiling block2 v0.5.1
+   Compiling wasm-bindgen v0.2.104
+   Compiling miniz_oxide v0.9.1
+   Compiling zmij v1.0.23
+   Compiling thiserror v1.0.69
+   Compiling futures-task v0.3.34
+   Compiling cfg_aliases v0.2.2
+   Compiling wasm-bindgen-backend v0.2.104
+   Compiling bitflags v1.3.2
+   Compiling foreign-types-shared v0.3.1
+   Compiling glslang-sys v0.9.2+e1b562a
+   Compiling spirv-cross-sys v0.7.4+aa217ae
+   Compiling slab v0.4.12
+   Compiling thiserror v2.0.21
+   Compiling futures-io v0.3.34
+   Compiling rayon-core v1.13.0
+   Compiling dispatch v0.2.0
+   Compiling objc2-foundation v0.3.2
+   Compiling wasm-bindgen-macro-support v0.2.104
+   Compiling bytemuck v1.25.2
+   Compiling thiserror-impl v1.0.69
+   Compiling num-derive v0.4.2
+   Compiling objc2-foundation v0.2.2
+   Compiling objc2-core-video v0.3.2
+   Compiling futures-macro v0.3.34
+   Compiling foreign-types-macros v0.2.4
+   Compiling wasm-bindgen-macro v0.2.104
+   Compiling thiserror-impl v2.0.21
+   Compiling flate2 v1.1.11
+   Compiling futures-util v0.3.34
+   Compiling foreign-types v0.5.0
+   Compiling core-graphics-types v0.1.3
+   Compiling winit v0.30.13
+   Compiling miniz_oxide v0.8.9
+   Compiling fdeflate v0.3.7
+   Compiling napi-sys v3.4.1
+   Compiling zune-core v0.5.3
+   Compiling rustc-hash v2.1.3
+   Compiling serde_json v1.0.154
+   Compiling tracing-core v0.1.36
+   Compiling byteorder-lite v0.1.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling once_cell v1.21.4
+   Compiling serde v1.0.229
+   Compiling pxfm v0.1.30
+   Compiling quick-error v2.0.1
+   Compiling convert_case v0.12.0
+   Compiling image-webp v0.2.4
+   Compiling futures-executor v0.3.34
+   Compiling tracing v0.1.44
+   Compiling zune-jpeg v0.5.15
+   Compiling objc2-app-kit v0.2.2
+   Compiling png v0.18.1
+   Compiling moxcms v0.8.1
+   Compiling core-graphics v0.23.2
+   Compiling serde_derive v1.0.229
+   Compiling spirv-cross2-derive v0.1.0
+   Compiling objc2-core-text v0.3.2
+   Compiling napi v3.16.2
+   Compiling libloading v0.9.1
+   Compiling spirv v0.4.0+sdk-1.4.341.0
+   Compiling itoa v1.0.19
+   Compiling smol_str v0.2.2
+   Compiling dpi v0.1.2
+   Compiling raw-window-handle v0.6.2
+   Compiling semver v1.0.28
+   Compiling cursor-icon v1.2.0
+   Compiling either v1.19.0
+   Compiling fastrender v0.1.0 (~/github/fastrender)
+   Compiling rayon v1.12.0
+   Compiling napi-derive-backend v7.0.1
+   Compiling objc2-metal v0.3.2
+   Compiling objc2-core-image v0.3.2
+   Compiling objc2-cloud-kit v0.3.2
+   Compiling objc2-core-data v0.3.2
+   Compiling image v0.25.10
+   Compiling voxel-core v0.1.0 (https://github.com/cktang88/voxel-castle-defense?rev=9c77553beb8543b42382b2bb70b964806e852178#9c77553b)
+   Compiling futures v0.3.34
+   Compiling fastrender-electron v0.1.0 (~/github/fastrender/host/electron/native)
+   Compiling ctor v1.0.14
+   Compiling glam v0.34.3
+   Compiling nohash-hasher v0.2.0
+   Compiling objc2-core-graphics v0.3.2
+   Compiling objc2-metal-fx v0.3.2
+   Compiling napi-derive v3.7.1
+   Compiling objc2-quartz-core v0.3.2
+   Compiling objc2-app-kit v0.3.2
+   Compiling spirv-cross2 v0.7.2
+   Compiling glslang v0.9.1
+warning: fastrender@0.1.0: built-in shaders not precompiled (the renderer compiles them at launch): error: error: cannot execute tool 'metal' due to missing Metal Toolchain; use: xcodebuild -downloadComponent MetalToolchain
+    Finished `release` profile [optimized] target(s) in 1m 09s
+
+== bundles
+bundled game/dist/bench-city-webgl.js
+bundled ~/github/fastrender/host/electron/.bench/3d-world-objects/src/main.ts -> game/dist/bench-world-webgl.js
+bundled game/dist/bench-city-webgpu.js
+bundled ~/github/fastrender/host/electron/.bench/3d-world-objects/src/main.ts -> game/dist/bench-world-webgpu.js
+bundled game/dist/bench-city-fastrender.js
+bundled ~/github/fastrender/host/electron/.bench/3d-world-objects/src/main.ts -> game/dist/bench-world-fastrender.js
+
+== runs: vsync off (uncapped), 10 s warmup + 20 s measured each
+ 1  bench-empty-webgl-1280x800                   190.8 fps  frame p50 0.8 ms  JS 0.1 ms  GPU 0.292 ms  CPU 37.4%  [WebGL2]
+ 2  bench-empty-webgpu-1280x800                  154.3 fps  frame p50 1.5 ms  JS 0.3 ms  GPU n/a ms  CPU 51.2%  [WebGPU]
+ 3  bench-empty-fastrender-1280x800              465.0 fps  frame p50 2 ms  JS 0 ms  GPU 0.093 ms  CPU 65.5%  [Metal (fastrender)]
+ 4  bench-empty-webgl-2560x1600                  169.2 fps  frame p50 1.3 ms  JS 0.1 ms  GPU 0.823 ms  CPU 41.3%  [WebGL2]
+ 5  bench-empty-webgpu-2560x1600                 156.4 fps  frame p50 2.4 ms  JS 0.2 ms  GPU n/a ms  CPU 54.8%  [WebGPU]
+ 6  bench-empty-fastrender-2560x1600             372.9 fps  frame p50 2.7 ms  JS 0 ms  GPU 0.308 ms  CPU 71.3%  [Metal (fastrender)]
+ 7  bench-city-webgl-1280x800                    156.8 fps  frame p50 4.4 ms  JS 0.6 ms  GPU 4.185 ms  CPU 46.7%  [WebGL2]
+ 8  bench-city-webgpu-1280x800                   151.9 fps  frame p50 3.8 ms  JS 0.9 ms  GPU 4.762 ms  CPU 55.3%  [WebGPU]
+ 9  bench-city-fastrender-1280x800               382.3 fps  frame p50 2.1 ms  JS 0.1 ms  GPU 1.882 ms  CPU 67.9%  [Metal (fastrender)]
+10  bench-city-fastrender-1280x800-fx            354.1 fps  frame p50 2.2 ms  JS 0.1 ms  GPU 1.825 ms  CPU 70.5%  [Metal (fastrender)]
+11  bench-city-webgl-2560x1600                   155.0 fps  frame p50 5.8 ms  JS 0.4 ms  GPU 7.472 ms  CPU 51.6%  [WebGL2]
+12  bench-city-webgpu-2560x1600                  148.8 fps  frame p50 5.5 ms  JS 0.7 ms  GPU 7.826 ms  CPU 61.6%  [WebGPU]
+13  bench-city-fastrender-2560x1600              220.2 fps  frame p50 4.5 ms  JS 0.1 ms  GPU 3.509 ms  CPU 60.1%  [Metal (fastrender)]
+14  bench-city-fastrender-2560x1600-fx           205.4 fps  frame p50 4.9 ms  JS 0.1 ms  GPU 3.524 ms  CPU 57.9%  [Metal (fastrender)]
+15  bench-world-webgl-1280x800                   7.6 fps  frame p50 132.4 ms  JS 18 ms  GPU 156.445 ms  CPU 51.2%  [WebGL2]
+16  bench-world-webgpu-1280x800                  25.3 fps  frame p50 39.5 ms  JS 13.7 ms  GPU 37.261 ms  CPU 84.9%  [WebGPU]
+17  bench-world-fastrender-1280x800              17.6 fps  frame p50 56.2 ms  JS 8.3 ms  GPU 56.874 ms  CPU 49.3%  [Metal (fastrender)]
+18  bench-world-webgl-1280x800-aa                6.7 fps  frame p50 150.8 ms  JS 18.2 ms  GPU 176.333 ms  CPU 48.6%  [WebGL2]
+19  bench-world-webgpu-1280x800-aa               21.0 fps  frame p50 47.6 ms  JS 14.2 ms  GPU 49.633 ms  CPU 75.9%  [WebGPU]
+20  bench-world-fastrender-1280x800-fx           33.4 fps  frame p50 29.6 ms  JS 7.4 ms  GPU 29.964 ms  CPU 63.8%  [Metal (fastrender)]
+21  bench-world-webgl-2560x1600                  2.9 fps  frame p50 338 ms  JS 17.7 ms  GPU 452.221 ms  CPU 37.4%  [WebGL2]
+22  bench-world-webgpu-2560x1600                 10.2 fps  frame p50 97.8 ms  JS 16 ms  GPU 120.495 ms  CPU 53.7%  [WebGPU]
+23  bench-world-fastrender-2560x1600             6.3 fps  frame p50 157.3 ms  JS 9 ms  GPU 157.678 ms  CPU 34.4%  [Metal (fastrender)]
+24  bench-world-webgl-2560x1600-aa               

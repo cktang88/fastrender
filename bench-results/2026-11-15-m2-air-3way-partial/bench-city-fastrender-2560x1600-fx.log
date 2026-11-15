@@ -1,0 +1,8 @@
+[page] [bench] city: 494 buildings, 18395 instanced windows
+[fastrender] renderer 2560x1600 three forward memoryless scale=0.50 up=metalfx shadow=cached lights=64 cull=gpu props=150000 on Apple M2
+[fastrender] shot ~/github/fastrender/host/electron/bench-out/bench-city-fastrender-2560x1600-fx-shot.png
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 5 ms
+[bench-main] result {"tag":"bench-city-fastrender-2560x1600-fx","fps":205.433,"frame_ms":{"mean":4.867,"p50":4.9,"p95":7.3,"p99":10.4,"max":34.4,"n":4109},"js_ms":0.1,"render_ms":0.1,"gpu_ms":3.524,"draws":180,"cpu":57.9,"backend":"Metal (fastrender)"}
+[fastrender] frame loop: frames in flight 1.33 avg, 2 max (limit 2); slot wait 0.437 ms avg, 6.40 max, 1150 of 5954 frames > 1 ms; drawable wait 4.217 ms avg, 34.23 max; fence: completion handler; render thread QoS Some(UserInteractive); framebufferOnly false
+[bench-main] DONE bench-city-fastrender-2560x1600-fx (exit 0)
