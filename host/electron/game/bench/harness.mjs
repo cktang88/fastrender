@@ -300,7 +300,7 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
       r.instance_cull = {
         ms_per_frame: per(a.ms, b.ms), meshes_looked_at: Math.round((b.meshes - a.meshes) / fr), eligible: Math.round((b.eligible - a.eligible) / fr), by_hint: Math.round((b.hinted - a.hinted) / fr),
         instances_tested: Math.round((b.tested - a.tested) / fr), instances_drawn: Math.round((b.drawn - a.drawn) / fr), meshes_drawn_in_part: Math.round((b.swapped - a.swapped) / fr),
-        cache_hits_per_frame: q2((b.cache_hits - a.cache_hits) / fr), uploaded_kb_per_frame: q2(((b.uploaded_floats - a.uploaded_floats) * 4) / 1024 / fr), sphere_rebuilds_per_frame: q2((b.spheres_rebuilt - a.spheres_rebuilt) / fr),
+        cache_hits_per_frame: q2((b.cache_hits - a.cache_hits) / fr), uploaded_kb_per_frame: q2((b.uploaded_bytes - a.uploaded_bytes) / 1024 / fr), sphere_rebuilds_per_frame: q2((b.spheres_rebuilt - a.spheres_rebuilt) / fr),
       };
     }
   }

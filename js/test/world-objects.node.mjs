@@ -468,7 +468,7 @@ const result = {
   camera: W().camera.position.toArray().map((v) => +v.toFixed(2)), player: { pos: W().player.pos.toArray().map((v) => +v.toFixed(2)), yaw: +W().player.yaw.toFixed(3), pitch: +W().player.pitch.toFixed(3) },
 };
 if (stockOpt) {
-  const row = (c) => { const s = c.stats, f = Math.max(1, s.frames); return { ms_per_frame: +(s.ms / f).toFixed(3), instanced_meshes: Math.round(s.meshes / f), eligible: Math.round(s.eligible / f), by_hint: Math.round(s.hinted / f), instances_tested: Math.round(s.tested / f), instances_drawn: Math.round(s.drawn / f), meshes_drawn_in_part: Math.round(s.swapped / f), cache_hits: +(s.cache_hits / f).toFixed(1), uploaded_kb: +((s.uploaded_floats * 4) / 1024 / f).toFixed(1), sphere_rebuilds: +(s.spheres_rebuilt / f).toFixed(1) }; };
+  const row = (c) => { const s = c.stats, f = Math.max(1, s.frames); return { ms_per_frame: +(s.ms / f).toFixed(3), instanced_meshes: Math.round(s.meshes / f), eligible: Math.round(s.eligible / f), by_hint: Math.round(s.hinted / f), instances_tested: Math.round(s.tested / f), instances_drawn: Math.round(s.drawn / f), meshes_drawn_in_part: Math.round(s.swapped / f), cache_hits: +(s.cache_hits / f).toFixed(1), uploaded_kb: +(s.uploaded_bytes / 1024 / f).toFixed(1), sphere_rebuilds: +(s.spheres_rebuilt / f).toFixed(1) }; };
   const t = stockOpt.tris, f = Math.max(1, t.frames);
   result.stockOptInstances = {
     note: 'per frame; JS only (the upload of the compacted instances is extra, in the GL driver). Triangles: of the instanced meshes with >= 8 instances, as three draws them vs with the instances in view',

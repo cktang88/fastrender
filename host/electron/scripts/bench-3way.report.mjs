@@ -217,10 +217,11 @@ for (const k of keys) {
     if (twin && tm !== null && tm > SAME) rec.checks.push(`${v} vs ${twin.variant}: MAE ${tm} (expected the same picture, MAE <= ${SAME})`);
   }
   ladderMd += '\n| step | isolates | fps | GPU ms | frame ms p50 |\n|---|---|---:|---:|---:|\n';
+  const seen = new Set();
   for (let [a, b, what] of STEPS) {
     const A = by[a], B = by[b];
-    if (!A || !B || A === B) continue;
-    if (b === 'best' && hooks.length < 2 && a === 'webgl') continue; // the single hook row's own step says it
+    if (!A || !B || A === B || seen.has(`${A.variant}>${B.variant}`)) continue; // (`best` may be a row a step already names)
+    seen.add(`${A.variant}>${B.variant}`);
     a = a === 'best' ? `best WebGL = ${A.variant}` : a; b = b === 'best' ? `best WebGL = ${B.variant}` : b;
     const g = A.gpu_ms && B.gpu_ms ? `${f(A.gpu_ms.mean)} -> ${f(B.gpu_ms.mean)} (${x(A.gpu_ms.mean, B.gpu_ms.mean)})` : 'n/a';
     ladderMd += `| \`${a}\` -> \`${b}\` | ${what} | ${f(A.fps, 1)} -> ${f(B.fps, 1)} (${x(B.fps, A.fps)}) | ${g} | ${f(A.frame_ms.p50)} -> ${f(B.frame_ms.p50)} (${x(A.frame_ms.p50, B.frame_ms.p50)}) |\n`;

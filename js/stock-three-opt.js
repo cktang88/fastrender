@@ -19,9 +19,11 @@
 //            removal shades one fragment per pixel of plain opaque geometry in any order, but has to shade what is
 //            under a discarding draw when that draw arrives.
 // instances  An InstancedMesh is drawn with only the instances whose bounding sphere touches the camera's frustum:
-//            the visible ones are copied to the front of a second instanceMatrix (/ instanceColor) attribute and
-//            `mesh.count` is set, for the main pass only; the mesh has its own attributes and count again in the
-//            shadow pass and after render() (so shadows, raycasts and the game's setMatrixAt see every instance).
+//            the visible ones are copied to the front of second per-instance attributes (instanceMatrix,
+//            instanceColor, and the geometry's own InstancedBufferAttributes, on a second geometry that shares
+//            everything else) and `mesh.count` is set, for the main pass only; the mesh has its own geometry,
+//            attributes and count again in the shadow pass and after render() (so shadows, raycasts and the game's
+//            setMatrixAt see every instance).
 //            three's WebGL path has no base instance, so unlike the native side (runs of the mesh's own buffer, no
 //            copy: src/bindlist.rs instance_runs) this costs a test per instance, a copy per visible instance and a
 //            buffer upload whenever the camera, the mesh or its matrices moved. Which meshes: the rule of
@@ -75,41 +77,108 @@ export function instanceCullKind(mesh) {
     if (!m) return 0;
     if (m.isShaderMaterial === true && typeof m.vertexShader === 'string' && /gl_InstanceID/.test(m.vertexShader)) return 0;
   }
-  const hint = mesh.userData && mesh.userData.frInstanceCull;
-  if (hint === true || (typeof hint === 'number' && hint > 0)) return 2;
-  if (mesh.frustumCulled !== true) return 0;
   const at = mesh.geometry && mesh.geometry.attributes;
   if (!at) return 0;
-  for (const k in at) if (at[k].isInstancedBufferAttribute === true || (at[k].data && at[k].data.isInstancedInterleavedBuffer === true)) return 0;
+  let perInst = false;
+  for (const k in at) {
+    const a = at[k];
+    // (what the compaction cannot carry: interleaved per-instance data, an attribute that steps every n instances)
+    if (a.data && a.data.isInstancedInterleavedBuffer === true) return 0;
+    if (a.isInstancedBufferAttribute === true) { perInst = true; if (a.meshPerAttribute !== 1) return 0; }
+  }
+  const hint = mesh.userData && mesh.userData.frInstanceCull;
+  if (hint === true || (typeof hint === 'number' && hint > 0)) return 2;
+  if (mesh.frustumCulled !== true || perInst) return 0;
   for (const m of ms) if (m.isShaderMaterial === true || (m.displacementMap !== undefined && m.displacementMap !== null) || hooked(m)) return 0;
   return 1;
 }
 
 const pow2 = (n) => { let c = 16; while (c < n) c *= 2; return c; };
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const perInstance = (a) => a.isInstancedBufferAttribute === true || (a.data !== undefined && a.data.isInstancedInterleavedBuffer === true);
 
 /**
- * Per-instance frustum culling by compaction. prepare(list, camera, sidesOnly) swaps the compacted attributes in for
- * every mesh of `list` that has instances out of view; original() / compact() switch all of them (shadow pass);
- * restore() ends the frame. `cache`: keep a mesh's result while its matrix x the camera's, its instance matrices and
- * its count are what they were (a camera that stands still costs nothing; a moving one pays every frame).
+ * Per-instance frustum culling by compaction. prepare(list, camera, sidesOnly) puts, for every mesh of `list` that
+ * has instances out of view, a second geometry + instanceMatrix / instanceColor in place whose per-instance
+ * attributes hold only the instances in view; original() / compact() switch all of them (shadow pass); restore() ends
+ * the frame. `cache`: keep a mesh's result while its matrix x the camera's, its per-instance attributes and its
+ * count are what they were (a camera that stands still costs nothing; a moving one pays every frame).
+ *
+ * The second geometry shares the index and every per-vertex attribute with the mesh's own (the same objects, so
+ * the same GL buffers); only the per-instance attributes are its own. It also carries the compacted instanceMatrix /
+ * instanceColor as attributes no program reads, so that disposing it frees them (three keeps no other handle).
  */
 export function instanceCuller({ cache = true, now = () => 0 } = {}) {
   const state = new WeakMap();
-  const pool = new Map(); // capacity -> [{ dst, cdst }]: attributes of disposed meshes (their GL buffers are reused)
-  const active = [];
-  const stats = { frames: 0, meshes: 0, eligible: 0, hinted: 0, swapped: 0, tested: 0, drawn: 0, whole: 0, cache_hits: 0, uploaded_floats: 0, spheres_rebuilt: 0, ms: 0, last: { eligible: 0, hinted: 0, tested: 0, drawn: 0, swapped: 0, ms: 0 } };
+  const active = []; // mesh, st, n, instanceMatrix, instanceColor, geometry
+  const stats = { frames: 0, meshes: 0, eligible: 0, hinted: 0, swapped: 0, tested: 0, drawn: 0, whole: 0, cache_hits: 0, uploaded_bytes: 0, spheres_rebuilt: 0, geometries_built: 0, ms: 0, last: { eligible: 0, hinted: 0, tested: 0, drawn: 0, swapped: 0, ms: 0 } };
   const P = new Float64Array(24), M = new Float64Array(16);
   let idx = new Uint32Array(1024);
+
+  /** frees what the second geometry owns; the shared index / per-vertex attributes are taken off it first */
+  function drop(st) {
+    const g = st.g2;
+    if (!g) return;
+    for (const k in g.attributes) if (!st.mine.has(g.attributes[k])) delete g.attributes[k];
+    g.index = null; g.morphAttributes = {};
+    g.dispose();
+    st.g2 = null; st.streams.length = 0; st.cap = 0; st.keyed = false;
+  }
 
   function stateOf(mesh) {
     let st = state.get(mesh);
     if (st === undefined) {
-      st = { kind: -1, mat: null, geo: null, src: null, sv: -1, n: -1, spheres: null, dst: null, cdst: null, cap: 0, vis: -1, key: new Float64Array(16), keyed: false, cv: -2, csrc: null };
+      st = { kind: -1, mat: null, geo: null, sv: -1, n: -1, im: null, spheres: null, g2: null, streams: [], mine: new Set(), dstM: null, dstC: null, cap: 0, attrs: 0, vis: -1, whole: false, key: new Float64Array(16), keyed: false };
       state.set(mesh, st);
-      mesh.addEventListener('dispose', () => { if (st.dst) { const a = pool.get(st.cap) || []; a.push({ dst: st.dst, cdst: st.cdst }); pool.set(st.cap, a); st.dst = st.cdst = null; st.cap = 0; st.keyed = false; } });
+      mesh.addEventListener('dispose', () => drop(st));
     }
-    if (st.mat !== mesh.material || st.geo !== mesh.geometry || st.kind < 0) { st.kind = instanceCullKind(mesh); st.mat = mesh.material; st.geo = mesh.geometry; st.sv = -1; st.keyed = false; }
+    if (st.mat !== mesh.material || st.geo !== mesh.geometry || st.kind < 0) { st.kind = instanceCullKind(mesh); st.mat = mesh.material; st.geo = mesh.geometry; st.sv = -1; st.keyed = false; drop(st); }
     return st;
+  }
+
+  /** is the second geometry still the mesh's own, with the per-instance attributes replaced? */
+  function current(st, mesh, col, n) {
+    const g = st.g2, geo = mesh.geometry;
+    if (!g || st.cap < n || g.index !== geo.index || g.morphAttributes !== geo.morphAttributes) return false;
+    // streams: instanceMatrix, instanceColor (if any), then the geometry's per-instance attributes in its own order
+    const ss = st.streams, hasColor = ss.length > 1 && ss[1].color;
+    if (ss[0].src !== mesh.instanceMatrix || (col !== null) !== hasColor || (hasColor && ss[1].src !== col)) return false;
+    let k = 0, s = hasColor ? 2 : 1;
+    for (const name in geo.attributes) {
+      const a = geo.attributes[name];
+      k++;
+      if (perInstance(a)) { const e = st.streams[s++]; if (!e || e.src !== a) return false; } else if (g.attributes[name] !== a) return false;
+    }
+    return k === st.attrs && s === st.streams.length;
+  }
+
+  function build(st, mesh, col, n) {
+    drop(st);
+    const geo = mesh.geometry, cap = pow2(n);
+    let p = geo; // BufferGeometry itself, not a subclass whose constructor would build a shape
+    while (p && !own(p, 'setIndex')) p = Object.getPrototypeOf(p);
+    const g = new p.constructor();
+    g.name = geo.name; g.index = geo.index; g.morphAttributes = geo.morphAttributes; g.morphTargetsRelative = geo.morphTargetsRelative;
+    g.groups = geo.groups; g.drawRange = geo.drawRange; g.userData = geo.userData;
+    st.mine.clear();
+    const stream = (src, color) => {
+      const dst = new src.constructor(new src.array.constructor(cap * src.itemSize), src.itemSize, src.normalized, 1);
+      if (src.gpuType !== undefined) dst.gpuType = src.gpuType;
+      dst.setUsage(DYNAMIC_DRAW);
+      st.mine.add(dst);
+      const e = { src, dst, size: src.itemSize, v: -1, color: !!color };
+      st.streams.push(e);
+      return dst;
+    };
+    g.attributes.__frInstanceMatrix = st.dstM = stream(mesh.instanceMatrix, false);
+    st.dstC = col ? (g.attributes.__frInstanceColor = stream(col, true)) : null;
+    st.attrs = 0;
+    for (const name in geo.attributes) { const a = geo.attributes[name]; st.attrs++; g.attributes[name] = perInstance(a) ? stream(a, false) : a; }
+    st.g2 = g; st.cap = cap;
+    stats.geometries_built++;
+    // an attribute with fewer items than the mesh has instances cannot be compacted: the mesh is drawn whole
+    for (const e of st.streams) if (e.src.array.length < n * e.size) { drop(st); st.kind = 0; return false; }
+    return true;
   }
 
   /** object-space bounding sphere of every instance (src/bindlist.rs instance_spheres) */
@@ -135,31 +204,32 @@ export function instanceCuller({ cache = true, now = () => 0 } = {}) {
     const st = stateOf(mesh);
     const n = mesh.count;
     if (st.kind === 0 || n < INSTANCE_CULL_MIN) return;
-    const src = mesh.instanceMatrix, col = mesh.instanceColor || null;
+    const src = mesh.instanceMatrix, col = mesh.instanceColor || null, geo = mesh.geometry;
     if (src.array.length < n * 16) return;
     stats.last.eligible++; if (st.kind === 2) stats.last.hinted++;
     // projection x view x the mesh's matrixWorld: the frustum's planes in the mesh's own space
     const w = mesh.matrixWorld.elements;
     for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) M[c * 4 + r] = pv[r] * w[c * 4] + pv[4 + r] * w[c * 4 + 1] + pv[8 + r] * w[c * 4 + 2] + pv[12 + r] * w[c * 4 + 3];
-    const cv = col ? col.version : -1;
-    let same = cache && st.keyed && st.sv === src.version && st.n === n && st.src === src && st.csrc === col && st.cv === cv;
+    const built = current(st, mesh, col, n);
+    // nothing moved since the last result: all in view (`whole`: only the matrices decide that), or in part
+    let same = cache && st.keyed && st.n === n && (st.whole ? st.sv === src.version && st.im === src : built);
+    if (same && !st.whole) { const ss = st.streams; for (let i = 0; i < ss.length; i++) if (ss[i].v !== ss[i].src.version) { same = false; break; } }
     if (same) { const k = st.key; for (let i = 0; i < 16; i++) if (k[i] !== M[i]) { same = false; break; } }
     stats.last.tested += n;
     if (!same) {
-      if (st.sv !== src.version || st.n !== n || st.src !== src) spheres(mesh, st, n);
+      if (st.sv !== src.version || st.n !== n || st.im !== src) { spheres(mesh, st, n); st.sv = src.version; st.im = src; }
       // planes (three's Frustum.setFromProjectionMatrix): right, left, bottom, top, far, near; inside: n.p + d >= 0
       const np = sidesOnly ? 4 : 6;
       for (let p = 0; p < np; p++) {
         const ax = p >> 1, sg = p & 1 ? 1 : -1;
-        let x = M[3] + sg * M[ax], y = M[7] + sg * M[4 + ax], z = M[11] + sg * M[8 + ax], d = M[15] + sg * M[12 + ax];
+        const x = M[3] + sg * M[ax], y = M[7] + sg * M[4 + ax], z = M[11] + sg * M[8 + ax], d = M[15] + sg * M[12 + ax];
         const l = Math.hypot(x, y, z) || 1;
         P[p * 4] = x / l; P[p * 4 + 1] = y / l; P[p * 4 + 2] = z / l; P[p * 4 + 3] = d / l;
       }
-      // a three build from before the reference rule: the bounding sphere three culls the whole mesh with must be the
-      // one of ALL instances, so it is made before the attributes are swapped
+      // the bounding sphere three culls the whole mesh with must be the one of ALL instances: made before the swap
       if (mesh.boundingSphere === null && typeof mesh.computeBoundingSphere === 'function') mesh.computeBoundingSphere();
-      const s = st.spheres, a = src.array;
-      // first pass: which instances (nothing is allocated or copied for a mesh that is all in view)
+      const s = st.spheres;
+      // first pass: which instances (nothing is built or copied for a mesh that is all in view)
       if (idx.length < n) idx = new Uint32Array(pow2(n));
       let vis = 0;
       for (let i = 0, k = 0; i < n; i++, k += 4) {
@@ -168,35 +238,27 @@ export function instanceCuller({ cache = true, now = () => 0 } = {}) {
         for (let p = 0; p < np * 4; p += 4) if (P[p] * x + P[p + 1] * y + P[p + 2] * z + P[p + 3] < nr) { inside = false; break; }
         if (inside) idx[vis++] = i;
       }
-      let o = 0, co = 0;
+      st.vis = vis; st.n = n; st.whole = vis >= n; st.key.set(M); st.keyed = true;
       if (vis < n) {
-        if (st.cap < n) {
-          const cap = pow2(n), free = pool.get(cap);
-          const got = free && free.length ? free.pop() : null;
-          st.dst = got ? got.dst : new src.constructor(new Float32Array(cap * 16), 16);
-          st.dst.setUsage(DYNAMIC_DRAW);
-          st.cdst = got ? got.cdst : null;
-          st.cap = cap;
+        if (!built && !build(st, mesh, col, n)) { st.vis = n; st.whole = true; stats.last.eligible--; stats.last.tested -= n; return; }
+        const ss = st.streams;
+        for (let q = 0; q < ss.length; q++) {
+          const e = ss[q], a = e.src.array, d = e.dst.array, size = e.size;
+          let o = 0;
+          if (size === 16) for (let v = 0; v < vis; v++, o += 16) { const b = idx[v] * 16; for (let j = 0; j < 16; j++) d[o + j] = a[b + j]; }
+          else for (let v = 0; v < vis; v++, o += size) { const b = idx[v] * size; for (let j = 0; j < size; j++) d[o + j] = a[b + j]; }
+          // (the range covers everything this frame draws; a hit of the cache leaves a pending upload alone)
+          e.dst.clearUpdateRanges(); e.dst.addUpdateRange(0, Math.max(size, o)); e.dst.needsUpdate = true;
+          e.v = e.src.version;
+          stats.uploaded_bytes += o * d.BYTES_PER_ELEMENT;
         }
-        if (col && (!st.cdst || st.cdst.itemSize !== col.itemSize || st.cdst.array.constructor !== col.array.constructor)) { st.cdst = new col.constructor(new col.array.constructor(st.cap * col.itemSize), col.itemSize); st.cdst.setUsage(DYNAMIC_DRAW); }
-        const d = st.dst.array, ca = col ? col.array : null, cd = col ? st.cdst.array : null, cs = col ? col.itemSize : 0;
-        for (let v = 0; v < vis; v++) {
-          const b = idx[v] * 16;
-          for (let j = 0; j < 16; j++) d[o + j] = a[b + j];
-          o += 16;
-          if (cs) { const cb = idx[v] * cs; for (let j = 0; j < cs; j++) cd[co + j] = ca[cb + j]; co += cs; }
-        }
-        // (the range covers everything this frame draws; a hit of the cache leaves a pending upload alone)
-        st.dst.clearUpdateRanges(); st.dst.addUpdateRange(0, Math.max(16, o)); st.dst.needsUpdate = true;
-        if (cs) { st.cdst.clearUpdateRanges(); st.cdst.addUpdateRange(0, Math.max(cs, co)); st.cdst.needsUpdate = true; }
-        stats.uploaded_floats += o + co;
       }
-      st.vis = vis; st.sv = src.version; st.n = n; st.src = src; st.csrc = col; st.cv = cv; st.key.set(M); st.keyed = true;
     } else stats.cache_hits++;
     stats.last.drawn += st.vis;
     if (st.vis >= n) { stats.whole++; return; }
-    active.push(mesh, src, col, n, st);
-    mesh.instanceMatrix = st.dst; if (col) mesh.instanceColor = st.cdst; mesh.count = st.vis;
+    st.g2.boundingBox = geo.boundingBox; st.g2.boundingSphere = geo.boundingSphere;
+    active.push(mesh, st, n, src, col, geo);
+    mesh.instanceMatrix = st.dstM; if (col) mesh.instanceColor = st.dstC; mesh.geometry = st.g2; mesh.count = st.vis;
     stats.last.swapped++;
   }
 
@@ -214,9 +276,9 @@ export function instanceCuller({ cache = true, now = () => 0 } = {}) {
       stats.frames++; stats.meshes += list.length; stats.eligible += stats.last.eligible; stats.hinted += stats.last.hinted; stats.tested += stats.last.tested; stats.drawn += stats.last.drawn; stats.swapped += stats.last.swapped;
       stats.last.ms = ms; stats.ms += ms;
     },
-    /** true if any mesh was switched */
-    original() { for (let i = 0; i < active.length; i += 5) { const m = active[i]; m.instanceMatrix = active[i + 1]; if (active[i + 2]) m.instanceColor = active[i + 2]; m.count = active[i + 3]; } return active.length > 0; },
-    compact() { for (let i = 0; i < active.length; i += 5) { const m = active[i], st = active[i + 4]; m.instanceMatrix = st.dst; if (active[i + 2]) m.instanceColor = st.cdst; m.count = st.vis; } return active.length > 0; },
+    /** every mesh its own again (the shadow pass); true if any was switched */
+    original() { for (let i = 0; i < active.length; i += 6) { const m = active[i]; m.instanceMatrix = active[i + 3]; if (active[i + 4]) m.instanceColor = active[i + 4]; m.geometry = active[i + 5]; m.count = active[i + 2]; } return active.length > 0; },
+    compact() { for (let i = 0; i < active.length; i += 6) { const m = active[i], st = active[i + 1]; m.instanceMatrix = st.dstM; if (active[i + 4]) m.instanceColor = st.dstC; m.geometry = st.g2; m.count = st.vis; } return active.length > 0; },
     restore() { this.original(); active.length = 0; },
   };
 }
@@ -327,5 +389,20 @@ export function installStockOpt(renderer, opts = {}) {
       depth--;
     }
   };
+  // compile() / compileAsync() (three's compileAsync goes through this.compile) pick the light counts their programs
+  // are built for: without this a game's start-up precompile builds the variants with the dark lights in, and the
+  // first render() builds them all again
+  if (opts.dark && typeof renderer.compile === 'function') {
+    const compile = renderer.compile;
+    renderer.compile = function (scene, ...rest) {
+      const n = hid.length;
+      const from = rest[1] && rest[1].isObject3D === true ? rest[1] : scene; // (scene, camera, targetScene): the lights are targetScene's
+      if (depth === 0 && from && from.isObject3D === true) walk(from);
+      try { return compile.call(this, scene, ...rest); } finally {
+        for (let i = n; i < hid.length; i++) hid[i].layers.mask = masks[i];
+        hid.length = n; masks.length = n; inst.length = 0;
+      }
+    };
+  }
   return stats;
 }

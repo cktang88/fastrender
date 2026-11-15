@@ -61,9 +61,12 @@ fastrender this step was within noise on the Air (9.73 vs 9.33 ms main pass: 89 
 is on the WebGL side so that the gap does not contain it.
 
 **`instances`.** For each visible `InstancedMesh` that qualifies, the instances whose bounding sphere touches the
-camera's frustum are copied to the front of a second `instanceMatrix` (and `instanceColor`) attribute and
-`mesh.count` is set, between three's matrix update and its draw collection (`scene.onBeforeRender`). The mesh has
-its own attributes and count back for the shadow pass (a caster outside the camera's frustum still throws a shadow
+camera's frustum are copied to the front of second per-instance attributes and `mesh.count` is set, between
+three's matrix update and its draw collection (`scene.onBeforeRender`). "Per-instance attributes" are
+`instanceMatrix`, `instanceColor` and the geometry's own `InstancedBufferAttribute`s (this game's windows carry
+`aSize`, `aInfo`, `aRoom`: 163k of the 165k instances that qualify), so the mesh also gets a second geometry that
+shares the index and every per-vertex attribute with its own. The mesh has
+its own geometry, attributes and count back for the shadow pass (a caster outside the camera's frustum still throws a shadow
 into it) and after `render()`, so raycasts and the game's `setMatrixAt` see every instance.
 Which meshes: the rule of `bindlist::instance_split_allowed`, read from the material instead of the compiled
 program. The game's hint `userData.frInstanceCull` (patch 0003) qualifies a mesh; without it the mesh must be
@@ -76,14 +79,14 @@ Linux box of this session, street view, 337 instanced meshes, 117 qualify):
 
 | | JS per frame | instances tested -> drawn | instanced triangles | uploaded per frame |
 |---|--:|--:|--:|--:|
-| camera standing still (results kept while camera, mesh and matrices are unchanged; 26 meshes the game rewrites every frame are redone) | 0.7 ms | 164,643 -> 36,142 | 3.01 M -> 1.11 M | 37 KB |
-| every mesh every frame (a moving camera) | 4.2 ms | same | same | 2.5 MB |
+| camera standing still (results kept while camera, mesh and attributes are unchanged; 26 meshes the game rewrites every frame are redone) | 0.9-1.2 ms | 164,643 -> 36,142 | 3.01 M -> 1.11 M | 43 KB |
+| every mesh every frame (a moving camera) | 4.3-5.1 ms | same | same | 3.2 MB |
 | finding the instanced meshes (scene walk) | 0.7 ms | | | |
 
 fastrender's native version does the same test on the render thread and draws runs of the mesh's own buffer: no
 copy, no upload, no JS. **The benchmark's camera stands still**, so the `webgl-opt-inst` row pays the first line;
-`--opt dark,discard,instances,nocache` on a `webgl` run prices the second. Whether 0.7-4.2 ms of JS and up to
-2.5 MB of buffer upload per frame is a net win depends on what 1.9 M fewer triangles are worth to ANGLE on that GPU
+`--opt dark,discard,instances,nocache` on a `webgl` run prices the second. Whether 1-5 ms of JS and up to
+3.2 MB of buffer upload per frame is a net win depends on what 1.9 M fewer triangles are worth to ANGLE on that GPU
 (on fastrender: about 2.4 ms of an 11.7 ms main pass), which only the Air run says. Hence its own row; `webgl-opt`
 holds the methods that cost nothing per frame.
 

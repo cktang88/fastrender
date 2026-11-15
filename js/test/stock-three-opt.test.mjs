@@ -26,6 +26,13 @@ for (let i = 0; i < N; i++) {
   mesh.setMatrixAt(i, m.compose(p, q, s)); mesh.setColorAt(i, new THREE.Color(rnd(), rnd(), rnd()));
 }
 assert.equal(instanceCullKind(mesh), 1, 'a plain InstancedMesh qualifies by the rule');
+// a per-instance attribute of the geometry (the game's window sizes): only with the game's hint, and compacted too
+const aSize = new THREE.InstancedBufferAttribute(new Float32Array(N * 2), 2);
+for (let i = 0; i < N * 2; i++) aSize.array[i] = i;
+geo.setAttribute('aSize', aSize);
+assert.equal(instanceCullKind(mesh), 0, 'a per-instance attribute could place the instance: not by the rule');
+mesh.userData.frInstanceCull = true;
+assert.equal(instanceCullKind(mesh), 2);
 const expect = [];
 const sph = new THREE.Sphere();
 for (let i = 0; i < N; i++) {
@@ -35,9 +42,16 @@ for (let i = 0; i < N; i++) {
 }
 assert.ok(expect.length > 50 && expect.length < N - 50, `the test view splits the instances (${expect.length} of ${N})`);
 const own = mesh.instanceMatrix, ownColor = mesh.instanceColor;
+let disposed = 0;
+geo.addEventListener('dispose', () => disposed++);
 const cull = instanceCuller({ cache: true });
 cull.prepare([mesh], cam);
 assert.notEqual(mesh.instanceMatrix, own, 'the compacted attribute is in place for the main pass');
+const g2 = mesh.geometry;
+assert.notEqual(g2, geo, 'so is a second geometry');
+assert.equal(g2.attributes.position, geo.attributes.position, '... that shares the per-vertex attributes');
+assert.equal(g2.index, geo.index);
+assert.notEqual(g2.attributes.aSize, aSize);
 // three's Sphere.applyMatrix4 scales the radius by the matrix's largest axis, as the hook does: the kept set is a
 // superset by at most rounding (float32 spheres), never smaller
 const kept = [];
@@ -47,21 +61,36 @@ assert.ok(kept.length - expect.length <= 3, `kept ${kept.length}, three's frustu
 for (let v = 0; v < kept.length; v++) {
   for (let j = 0; j < 16; j++) assert.equal(mesh.instanceMatrix.array[v * 16 + j], own.array[kept[v] * 16 + j]);
   for (let j = 0; j < 3; j++) assert.equal(mesh.instanceColor.array[v * 3 + j], ownColor.array[kept[v] * 3 + j]);
+  for (let j = 0; j < 2; j++) assert.equal(g2.attributes.aSize.array[v * 2 + j], kept[v] * 2 + j, 'the per-instance attribute follows its instance');
 }
 assert.deepEqual(kept, [...kept].sort((a, b) => a - b), 'instance order is kept');
 cull.original();
-assert.equal(mesh.instanceMatrix, own); assert.equal(mesh.count, N);
+assert.equal(mesh.instanceMatrix, own); assert.equal(mesh.count, N); assert.equal(mesh.geometry, geo);
 cull.compact();
 assert.equal(mesh.count, kept.length);
 cull.restore();
-assert.equal(mesh.instanceMatrix, own); assert.equal(mesh.instanceColor, ownColor); assert.equal(mesh.count, N);
+assert.equal(mesh.instanceMatrix, own); assert.equal(mesh.instanceColor, ownColor); assert.equal(mesh.count, N); assert.equal(mesh.geometry, geo);
 // the cache: nothing moved -> no new upload; an instance written -> recomputed
-const up = cull.stats.uploaded_floats;
+const up = cull.stats.uploaded_bytes;
 cull.prepare([mesh], cam); cull.restore();
-assert.equal(cull.stats.uploaded_floats, up); assert.equal(cull.stats.cache_hits, 1);
+assert.equal(cull.stats.uploaded_bytes, up); assert.equal(cull.stats.cache_hits, 1);
 mesh.setMatrixAt(expect[0], m.makeTranslation(1e6, 0, 0)); mesh.instanceMatrix.needsUpdate = true;
 cull.prepare([mesh], cam);
 assert.equal(mesh.count, kept.length - 1, 'an instance moved out of view is gone after the next prepare');
+cull.restore();
+// a per-instance attribute written by the game -> recomputed; the mesh disposed -> the second geometry goes, without
+// taking the shared attributes (or the game's geometry) with it
+aSize.array[kept[1] * 2] = -5; aSize.needsUpdate = true;
+cull.prepare([mesh], cam);
+assert.equal(mesh.geometry.attributes.aSize.array[0], -5);
+cull.restore();
+let freed = null;
+g2.addEventListener('dispose', () => { freed = Object.keys(g2.attributes).sort(); });
+mesh.dispose();
+assert.deepEqual(freed, ['__frInstanceColor', '__frInstanceMatrix', 'aSize'], 'only what the hook made is released');
+assert.equal(disposed, 0);
+cull.prepare([mesh], cam);
+assert.notEqual(mesh.geometry, g2, 'a mesh used again after dispose gets a new one');
 cull.restore();
 // who qualifies
 const hooked = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial(), 16); hooked.material.onBeforeCompile = () => {};
@@ -88,10 +117,11 @@ assert.equal(materialDiscards(new THREE.MeshStandardMaterial(), () => 'void main
 const scene = new THREE.Scene();
 const lamp = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
 off.add(lamp); scene.add(lit, off, black, sun, mesh);
-let during = null, sortFn = null;
+let during = null, sortFn = null, duringCompile = null;
 const fake = {
   sortObjects: true, shadowMap: { render() {} }, info: { render: { frame: 0 } },
   setOpaqueSort(f) { sortFn = f; },
+  compile(sc, camera, target) { duringCompile = [off.layers.mask, black.layers.mask, lit.layers.mask]; },
   render(sc, camera) { sc.onBeforeRender(this, sc, camera, null); this.shadowMap.render(); during = { off: off.layers.mask, black: black.layers.mask, lit: lit.layers.mask, sun: sun.layers.mask, lampVisible: lamp.visible && off.visible, count: mesh.count }; },
 };
 const st = installStockOpt(fake, { dark: true, discard: true, instances: true, now: () => 0 });
@@ -99,6 +129,9 @@ fake.render(scene, cam);
 assert.deepEqual(during, { off: 0, black: 0, lit: 1, sun: 1, lampVisible: true, count: kept.length - 1 });
 assert.deepEqual([off.layers.mask, black.layers.mask, mesh.count], [1, 1, N], 'everything is the game\'s own again after render()');
 assert.equal(st.dark.last, 2);
+fake.compile(new THREE.Group(), cam, scene);
+assert.deepEqual(duringCompile, [0, 0, 1], 'compile() builds its programs for the trimmed light counts (lights of targetScene)');
+assert.deepEqual([off.layers.mask, black.layers.mask], [1, 1]);
 assert.equal(Object.prototype.hasOwnProperty.call(scene, 'onBeforeRender'), false, 'the scene keeps no hook');
 const item = (id, mat, z, renderOrder = 0) => ({ id, material: mat, materialVariant: 0, z, renderOrder, groupOrder: 0 });
 const plainA = new THREE.MeshStandardMaterial(), plainB = new THREE.MeshStandardMaterial(), cut = new THREE.MeshStandardMaterial({ alphaTest: 0.5 });
