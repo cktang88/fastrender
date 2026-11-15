@@ -1431,6 +1431,9 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
             "three frame cost: render() CPU {:.2} ms avg (JS {:.2}, native apply {:.3}, prepare {:.3}, encode {:.3}), GPU {:.2} ms avg, {} draws, programs: {}",
             cpu.avg(), js.avg(), native.2.avg(), native.0.avg(), native.1.avg(), gpu.avg(), r.last_draws, if s.view.v3 { "three" } else { "native" }
         );
+        if s.view.v3 {
+            println!("draws per pass (last frame): {}", s.counts.line());
+        }
         if let Some(st) = s.program_stats() {
             println!("{st}");
         }

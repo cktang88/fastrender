@@ -75,6 +75,10 @@ pub struct Prog {
     pub attrs: Vec<ProgAttr>,
     /// identity across launches (`pipeline_manifest::ProgramInfo::hash`): the stages' MSL and entry points
     hash: pm::Hash,
+    /// the fragment stage can discard (alphaTest, alphaHash, clipping planes, a game's own `discard`): on a TBDR GPU
+    /// such draws defeat hidden-surface removal for what is under them, so the main pass draws them after the
+    /// opaque draws that cannot (docs/notes/gpu-cost.md)
+    pub discard: bool,
 }
 
 /// How each program attribute is fed for a draw, 4 bits per attribute (in `Prog::attrs` order):
@@ -596,9 +600,10 @@ impl Programs {
             &p.fragment_entry,
             attrs.iter().map(|a| Attr { location: a.location, comps: a.comps, cols: a.cols }).collect(),
         );
+        let discard = p.fragment_msl.contains("discard_fragment");
         let hash = self.compiler.add_program(info, Arc::from(p.vertex_msl), Arc::from(p.fragment_msl));
         self.waiting_progs.entry(hash).or_default().push(name);
-        self.progs.insert(id, Prog { key, layout: p.layout, attrs, hash });
+        self.progs.insert(id, Prog { key, layout: p.layout, attrs, hash, discard });
         if self.blocking {
             let t = Instant::now();
             self.compiler.wait_program(hash);

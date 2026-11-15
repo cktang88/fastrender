@@ -714,9 +714,42 @@ pub fn opaque_key(render_order: i32, pipeline: u32, material: u32, geometry: u32
     (render_order, (pipeline as u64) << 32 | material as u64, geometry)
 }
 
+/// Sort key of an opaque draw whose fragment stage can discard: after every `opaque_key` of its renderOrder, nearest
+/// first (`dist2`: squared distance to the camera, >= 0, so its bit pattern orders like the number).
+#[inline]
+pub fn discard_key(render_order: i32, dist2: f32) -> (i32, u64, u32) {
+    (render_order, 1 << 63 | (dist2.max(0.0).to_bits() as u64) << 31, 0)
+}
+
+/// What one prepared v3 pass draws (the last pass prepared: the screen pass of a frame).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PassCounts {
+    /// opaque draws whose fragment stage cannot discard (hidden-surface removal is exact for them)
+    pub opaque: u32,
+    /// opaque draws whose fragment stage can discard (alphaTest...): drawn after `opaque`, nearest first
+    pub discard: u32,
+    pub transparent: u32,
+    /// shadow passes (a 2D map, or one face of a cube) rendered this frame, and the caster draws in them
+    pub shadow_passes: u32,
+    pub shadow_draws: u32,
+}
+impl PassCounts {
+    /// "main 1338 opaque + 89 discard + 44 transparent; shadow 1 passes, 232 draws"
+    pub fn line(&self) -> String {
+        format!("main {} opaque + {} discard + {} transparent; shadow {} passes, {} draws", self.opaque, self.discard, self.transparent, self.shadow_passes, self.shadow_draws)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discarding_draws_sort_after_the_others_nearest_first() {
+        let mut keys = [discard_key(0, 100.0), opaque_key(0, 7, 3, 1), discard_key(0, 4.0), opaque_key(0, u32::MAX >> 1, 9, 9), discard_key(-1, 1.0), opaque_key(1, 0, 0, 0)];
+        keys.sort_unstable();
+        assert_eq!(keys, [discard_key(-1, 1.0), opaque_key(0, 7, 3, 1), opaque_key(0, u32::MAX >> 1, 9, 9), discard_key(0, 4.0), discard_key(0, 100.0), opaque_key(1, 0, 0, 0)]);
+    }
 
     #[test]
     fn id_map_behaves_like_a_map() {

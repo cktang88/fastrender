@@ -303,10 +303,14 @@ pub struct ThreeScene {
     /// per SHADOWS entry: not re-rendered this frame (three's shadow.autoUpdate / needsUpdate): keep the last map
     shadow_keep: Vec<bool>,
     /// FASTRENDER_V3_DEBUG bits (bisecting on CI): 1 shadow slots bind the lit texture, 2 no v3 shadow pass,
-    /// 4 no instanced draws, 8 no transparent draws, 16 neutral textures only, 32 Lambert only, 64 no textures bound
+    /// 4 no instanced draws, 8 no transparent draws, 16 neutral textures only, 32 Lambert only, 64 no textures bound,
+    /// 512 discarding opaque draws stay in state order (not after the others, front to back), 1024 no discarding
+    /// opaque draws (512 / 1024 / 8: GPU cost attribution, host/electron/scripts/gpu-ablate.sh)
     dbg: u32,
     /// FASTRENDER_V3_MAX_DRAWS: draw only the first n v3 draws of the main pass (bisecting)
     max_draws: usize,
+    /// what the last prepared pass draws (v3): see `PassCounts`
+    pub counts: bindlist::PassCounts,
     /// CPU ms of the last prepare() (cull, sort, FrObjects, pipeline lookups) and encode_main()
     pub prepare_ms: f64,
     /// CPU ms update() spent applying this frame's resource messages (uploads / releases; 0 when there were none)
@@ -480,6 +484,7 @@ impl ThreeScene {
             shadow_keep: Vec::new(),
             dbg: std::env::var("FASTRENDER_V3_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             max_draws: std::env::var("FASTRENDER_V3_MAX_DRAWS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
+            counts: bindlist::PassCounts::default(),
             prepare_ms: 0.0,
             apply_ms: 0.0,
             encode_ms: std::cell::Cell::new(0.0),
@@ -752,6 +757,7 @@ impl ThreeScene {
         let mut transparent = std::mem::take(&mut self.scratch_transparent);
         opaque.clear();
         transparent.clear();
+        let mut counts = bindlist::PassCounts::default();
         for i in 0..self.draws.len() {
             let d = self.draws[i];
             if d.count == 0 {
@@ -783,16 +789,37 @@ impl ThreeScene {
                 | if (m.meta.side == 1) != (mirrored != gl_rows) { RASTER_CLOCKWISE } else { 0 }
                 | if m.meta.wireframe { RASTER_WIREFRAME } else { 0 };
             let bias = m.meta.polygon_offset.map_or((0.0, 0.0), |p| (p[0], p[1]));
+            let prog_id = m.meta.program;
             let Some((pipe, plan)) = self.instance_pipeline(dev, d.material, &d, target) else { continue };
+            let discards = self.progs.progs.get(&prog_id).is_some_and(|p| p.discard);
             let rec = Draw3 { i: i as u32, obj: 0, block: block as u32, tex: tex as u32, bind: u32::MAX, pipe, depth, bias, plan, raster };
             // three's painterSortStable / reversePainterSortStable: renderOrder first, then state for opaque draws
             // (pipeline, material instance, geometry: consecutive draws share what is bound), back to front for
             // transparent ones; renderer.sortObjects = false keeps the draw order
             let unsorted = d.flags & flag::UNSORTED != 0;
             if is_transparent {
+                counts.transparent += 1;
                 transparent.push(if unsorted { (0, 0.0, rec) } else { (d.render_order, c.distance_squared(cam), rec) });
             } else {
-                opaque.push((if unsorted { (0, i as u64, 0) } else { bindlist::opaque_key(d.render_order, pipe, d.material, d.geometry) }, i as u32, rec));
+                if discards {
+                    if self.dbg & 1024 != 0 {
+                        continue;
+                    }
+                    counts.discard += 1;
+                } else {
+                    counts.opaque += 1;
+                }
+                // a draw that can discard goes after the opaque draws that cannot, nearest first (within its
+                // renderOrder): Apple's hidden-surface removal shades only the visible fragment of plain opaque
+                // geometry in any order, but has to shade what is under a discarding draw at the time it arrives
+                let key = if unsorted {
+                    (0, i as u64, 0)
+                } else if discards && self.dbg & 512 == 0 {
+                    bindlist::discard_key(d.render_order, c.distance_squared(cam))
+                } else {
+                    bindlist::opaque_key(d.render_order, pipe, d.material, d.geometry)
+                };
+                opaque.push((key, i as u32, rec));
             }
         }
         // equal keys keep the draw order, as three's sort ends with the object id
@@ -819,6 +846,9 @@ impl ThreeScene {
         // FrPass: gl_FragCoord.y = height - Metal's y; render targets store GL-oriented rows (flip 0, mac_targets.rs)
         w.put(self.layout.pass, [viewport_h, if gl_rows { 0.0 } else { 1.0 }, 0.0, 0.0f32]);
         self.prepare_shadows_v3(dev, slot_i);
+        counts.shadow_passes = self.shadow_jobs.len() as u32;
+        counts.shadow_draws = self.shadow_list.len() as u32;
+        self.counts = counts;
         self.shadow_sig = self.shadow_signature();
         self.resolve_binds();
         self.vis3.len()

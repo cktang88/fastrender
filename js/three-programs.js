@@ -662,8 +662,6 @@ export class ThreePrograms {
     this._transmissionRT = { texture: { isFastRenderTransmission: true }, width: 1, height: 1 };
     // dark point / spot lights leave three's light state (see _trimLights); false: every visible light, as WebGLRenderer
     this.trimLights = opts.trimLights !== false && opts.trimLights !== 0;
-    // diagnostics that CHANGE the picture (host/electron/scripts/gpu-ablate.sh, docs/notes/gpu-cost.md); null: none
-    this.ablate = opts.ablate || null;
     this._emptyScene = { isScene: true, fog: null, environment: null };
   }
 
@@ -679,7 +677,6 @@ export class ThreePrograms {
     // matching shadow matrix (CSM games refresh far cascades every few frames; padding lights never)
     let ss = this._sceneStates.get(scene);
     if (ss === undefined) this._sceneStates.set(scene, (ss = { lights: new WebGLLights(this._extensions), key: [], epoch: 0, trim: null }));
-    if (this.ablate !== null) this._ablate(scene, lights);
     this.stats.lightsDropped = this.trimLights ? this._trimLights(lights, ss) : 0;
     const shadows = this.shadows, sm = r.shadowMap;
     const all = sm.enabled && (sm.autoUpdate !== false || sm.needsUpdate === true);
@@ -769,28 +766,6 @@ export class ThreePrograms {
     }
     lights.length = n;
     return drop;
-  }
-
-  /** diagnostics (this.ablate): each one changes the picture; they exist to attribute GPU time (gpu-ablate.sh) */
-  _ablate(scene, lights) {
-    const ab = this.ablate, r = this.facade;
-    if (ab.shadows === 0) r.shadowMap.enabled = false;
-    if (ab.shadowType !== undefined && r.shadowMap.enabled) r.shadowMap.type = ab.shadowType;
-    if (ab.env === 0 && scene.environment) scene.environment = null;
-    let n = 0;
-    for (let i = 0; i < lights.length; i++) {
-      const l = lights[i], local = l.isPointLight === true || l.isSpotLight === true;
-      if (ab.lights === 0 && local) continue;                       // no point / spot light at all
-      if (ab.localShadows === 0 && local && l.castShadow) l.castShadow = false;
-      if (ab.shadowScale !== undefined && l.castShadow && l.shadow) {
-        const s = l.shadow, m = s.mapSize;
-        if (s._frSize === undefined || s._frSet !== m.x) { s._frSize = m.x; s._frSizeY = m.y; }
-        m.x = Math.max(1, Math.floor(s._frSize * ab.shadowScale)); m.y = Math.max(1, Math.floor(s._frSizeY * ab.shadowScale));
-        s._frSet = m.x;
-      }
-      lights[n++] = l;
-    }
-    lights.length = n;
   }
 
   /**

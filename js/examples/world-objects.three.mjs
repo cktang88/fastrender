@@ -10,12 +10,13 @@
 export * from 'three/src/Three.js';
 import { FastRenderer } from '../fastrender-three.js';
 import { MeshBasicMaterial, MeshLambertMaterial } from 'three/src/Three.js';
+import { gpuCensusNextFrame, gpuCensusText } from '../gpu-census.js';
 
 const counts = (globalThis.__worldStats ||= { rtRenders: {}, frames: 0 });
 
 export class WebGLRenderer extends FastRenderer {
   constructor(params = {}) {
-    super({ programs: 'three', host: globalThis.__frHost || globalThis.__fr, canvas: params.canvas || makeCanvas() });
+    super({ programs: 'three', host: globalThis.__frHost || globalThis.__fr, canvas: params.canvas || makeCanvas(), trimLights: ablate.has('alllights') ? false : undefined });
     this.isWebGLRenderer = true;
     this.coordinateSystem = 2000; // WebGLCoordinateSystem
     this.debug = { checkShaderErrors: false, onShaderError: null };
@@ -49,13 +50,20 @@ export class WebGLRenderer extends FastRenderer {
       if (globalThis.__worldTrace) { const st = String(new Error().stack).split('\n').slice(2, 5).map((l) => (/at (?:new )?([\w$.<>]+)/.exec(l) || [])[1]).filter(Boolean); who = st.join(' < '); }
       const k = `${what} (${who})`;
       counts.rtRenders[k] = (counts.rtRenders[k] || 0) + 1;
-    } else { counts.frames++; if (ablate.size && scene.isScene) applyAblate(scene); }
+    } else {
+      counts.frames++;
+      if (ablate.size && scene.isScene) applyAblate(scene);
+      // FASTRENDER_ABLATE (any value, `none` included): what the frame asks of the GPU, once (js/gpu-census.js)
+      if (ablate.size && counts.frames === 100) gpuCensusNextFrame(this, (c) => { for (const l of gpuCensusText(c).split('\n')) console.log('[census] ' + l); });
+    }
     super.render(scene, camera);
   }
 }
 
 // GPU-cost diagnostics (FASTRENDER_ABLATE=a,b,... -> params.ablate). They CHANGE the picture; for attribution only.
-//   lights0       hide lights whose intensity is 0 (three still loops over them in every lit fragment)
+//   alllights     trimLights off: dark point / spot lights stay in three's light state, as under WebGLRenderer (the
+//                 frame before trimLights; every other row runs with them dropped)
+//   lights0       hide lights whose intensity is 0 (the same frame as `none` since trimLights; kept as a cross-check)
 //   nopoint       hide every PointLight / SpotLight (keeps directional, hemisphere, ambient)
 //   nolights      hide every light
 //   notransparent hide meshes whose material is transparent or transmissive
