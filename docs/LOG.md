@@ -2,6 +2,36 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: cluster LOD + GPU culling for static meshes (off by default): 931k -> 138k block triangles at the golden camera, same picture; GPU gain small
+
+docs/notes/clusters.md. Marked static meshes (`userData.frClusters`; patches/0006 marks the game's merged block
+meshes) get a cluster DAG built natively (meshoptimizer `clusterlod`, worker threads, cache by content hash); per
+frame three compute dispatches select the level per cluster (1 px of error at the output height), cull by frustum
+and backface cone, and write a compacted index buffer in a fixed order; three's own programs draw it with an
+indirect indexed draw. Shadows draw the full mesh as before. `FASTRENDER_CLUSTERS=1` switches it on.
+
+Run 43757285875 (5d4cdfa, paravirtual GPU, Metal API validation where noted):
+
+| | |
+|---|---|
+| golden camera, clusters on (API validation, exit 0, 0 GPU errors) | 168 clustered draws, 39,609 clusters tested, **930,946 -> 137,591 triangles** |
+| MAE vs the browser golden: plain / clusters | 6.58 / 6.59 (gate < 10) |
+| MAE clusters vs the plain native frame | 0.05 (0.05 % of pixels differ) |
+| builds (blocking mode) | 203 built + 23 from the cache, 3.15 s of worker time in total, longest 105 ms; arena 38 MB |
+| GPU A/B, 40 frames, interleaved twice: main | 13.77 -> 12.55, 13.02 -> 11.48 ms |
+| the dispatches (they land in the `targets` group) | +1.1 to +1.3 ms |
+| frame | 17.37 -> 17.05, 16.41 -> 15.62 ms |
+| other goldens (clusters off: the default) | unchanged, the run is green |
+
+So 85 % of the block triangles go, the picture does not move, and on this GPU the main pass gains 1.2-1.5 ms while
+the dispatches cost 1.1-1.3 (their cost on a real GPU should be far lower: 40k threads and 0.4 M index writes). The
+Air's own `nofarlod` row (470k far triangles more, main 7.65 vs 7.73 ms) says far triangles are nearly free there,
+so the estimate for the Air is under 1 ms; it stays off by default until `scripts/gpu-ablate.sh` rows `clusters` /
+`clusters-basic` (also at 2560x1600) say otherwise. Linux: `cargo test` 97 pass (12 for clusters: the finest level
+is the mesh, cuts consistent and monotonic, culling only removes, prefix sums), JS tests, the game's `npm run qa`
+268 pass with 0006, both crates type-check for `aarch64-apple-darwin` (meshopt's C++ build script needs
+`scripts/cross-cxx.sh`, wired through `.cargo/config.toml`).
+
 
 
 ## 2026-11-15: binary archive filled an Air's disk (133 GB); root cause: adding to an archive opened from the file; fixed (a05078d, 6a1de62)
