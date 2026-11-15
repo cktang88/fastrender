@@ -111,6 +111,19 @@ regenerated), spawn view (player 49.8, 0, 9, yaw −0.12), three's WebGLRenderer
 uses few frames and reads pixels back in the draw's task (`__worldCapture`, no `preserveDrawingBuffer`). The native
 side runs `--warmup 11 --frames 3`.
 
+### MAE 46.9 -> 6.58 (15 Nov 2026, docs/LOG.md)
+
+| run | change | MAE |
+|---|---|---:|
+| 43707913649 | (state above) | 46.9 |
+| 43709712156 | translator zero-initialises locals (black glass: the window shader read an uninitialised `out` temporary) | 23.5 |
+| 43710967946 | `scene.environmentIntensity` for lit materials without their own envMap (lit surfaces +25/255) | 8.27 |
+| 43711350656 | synchronous WebAssembly in the JSC host (meshopt GLBs: cars, crowd) + idle time between settle frames | **6.58** (gate < 10) |
+
+Per region now: sky 0.0, left facade 1.1, right buildings 9.0, sidewalk 7.8, road + cars 8.2. What is left: canvas
+textures in JSC (tree leaves vanish: alpha-tested canvas atlases; signs; tactile paving; sprite labels), a few car
+details. Sprites, BatchedMesh (three's batching program, colours) and Lines are drawn now.
+
 ### Native on macOS CI (15 Nov 2026)
 
 What it took, in run order (all CI runs on the macos-26 paravirtual GPU, Metal API validation on):

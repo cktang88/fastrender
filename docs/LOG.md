@@ -2,6 +2,47 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: real game MAE 46.9 -> 6.58: zero-initialised locals, environmentIntensity, synchronous WebAssembly in JSC
+
+`cktang88/3d-world-objects` (r187 + patches), native (JavaScriptCore + Metal, macOS CI) vs its browser golden, 1280x800
+spawn view. Each row is one CI run of one commit; MAE per region (mean abs error, 0-255):
+
+| run | change | MAE | left facade | right buildings | sidewalk | road + cars |
+|---|---|---:|---:|---:|---:|---:|
+| 43707913649 | before | 46.9 | 61.5 | 55.0 | 30.1 | 25.3 |
+| 43709712156 | **xlat: zero-initialise locals** | 23.5 | 20.9 | 23.2 | 27.4 | 23.8 |
+| 43710848794 | + review-4 fixes, Sprites / Points / Lines, BatchedMesh batching program | 23.5 | | | | |
+| 43710967946 | **+ scene.environmentIntensity** | 8.27 | 1.1 | 9.1 | 8.4 | 15.1 |
+| 43711350656 | **+ synchronous WebAssembly in the JSC host, idle time between settle frames** | **6.58** | 1.1 | 9.0 | 7.8 | 8.2 |
+
+Root causes (all general; none game-specific):
+1. **Black glass (55 % of the error).** The game's window material (`roomMaterial`, MeshStandardMaterial +
+   onBeforeCompile) calls `roomShade(out float lampGlow)`, which writes `lampGlow` on one path only. glslang copies an
+   `out` argument through an uninitialised temporary; Metal leaves it undefined (garbage, NaN at noon: `NaN * 0`), so
+   every pane was (0,0,0). ANGLE zero-initialises every local of a WebGL shader. Fix: SPIRV-Cross
+   `force_zero_initialized_variables` (src/xlat.rs, translator xlat-7). Found by reading the translated MSL of the one
+   program (node run `--dump-programs` + `fastrender xlat-dump`): `float param; roomShade(param, ...)`.
+2. **Lit surfaces +25/255 too bright ("IBL tint").** WebGLRenderer.setProgram sets `envMapIntensity =
+   scene.environmentIntensity` for Standard / Lambert / Phong materials without their own envMap (r163+); three-programs
+   kept the material's own value (1). The game's offline sky runs at 0.55. PMREM itself was right.
+3. **Cars as stand-ins, no people.** JavaScriptCore settles `WebAssembly.instantiate` through the thread's run loop,
+   which the native host never spins: three's MeshoptDecoder never became ready and no meshopt GLB (cars, crowd)
+   finished loading (85 files fetched vs 123 in node, 25 images decoded vs 101). The JSC host polyfill now compiles
+   synchronously. The driver's virtual timers also get 500 ms of idle per settle frame (the browser golden's timers are
+   real and its SwiftShader frames take seconds).
+
+Also in this round: review-4 C1 (render() from onBeforeRender: the open pass is suspended and resumed after the hook's
+passes; Reflector test), C2 (per-scene WebGLLights + program epoch: a HUD scene every frame now costs 0 program picks;
+the real game at quality=low renders one screen scene, so its JS cost is unchanged: 0.1 picks/frame before and after),
+H1 (material.envMap swaps), H2 (renderOrder sorting, sortObjects=false); Sprites / Points / Lines with three's programs
+and Metal primitives; BatchedMesh with three's batching program, one draw per multi-draw entry with `gl_DrawID` = base
+instance (xlat rule 5d), batch colours, integer textures; `renderer.debugMaterials(re)` / node `--debug-material`.
+Gate tightened to MAE < 10. Other goldens unchanged (three-programs, parity, IBL, bloom: all gates green).
+
+Left (the 6.6): canvas-painted textures have no pixels in JavaScriptCore (75 bindings/frame: tree leaves, which are
+alpha-tested canvas atlases and so vanish, signs, the tactile paving, sprite labels; the Electron host has a real 2D
+canvas), a few car materials, LineLoop closing segments, groupOrder.
+
 ## 2026-11-15: review 4 (independent) of everything since review 3
 
 The JS findings were reproduced with scratch scripts; the native ones are from reading the code.

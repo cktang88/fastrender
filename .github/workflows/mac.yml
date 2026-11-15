@@ -303,13 +303,14 @@ jobs:
           rc4=0; env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 60 > world-objects-cost.txt 2>&1 || rc4=$?
           grep -E "world-objects:|three frame cost|three programs:|fps" world-objects-cost.txt | cut -c1-1500 > world-objects-cost-summary.txt
           bash .github/annotate.sh notice "world-objects per-frame cost, frames 61-90 (exit $rc4)" world-objects-cost-summary.txt 20
-      # gate (15 Nov, r187 + patches): MAE 50.5 in run 43706682669; the rest is mostly render targets the game samples
-      # (black glass), sprites / crowd and tree leaves. A regression guard: tighten as those land.
-      - name: real game 3d-world-objects MAE<60
+      # gate (15 Nov, r187 + patches): MAE 50.5 (run 43706682669) -> 6.58 (run 43711350656: zero-initialised locals,
+      # scene.environmentIntensity, synchronous WebAssembly in JSC). The rest: canvas-painted textures in JSC (tree
+      # leaves, signs, paving), a few car / crowd details. A regression guard: tighten as those land.
+      - name: real game 3d-world-objects MAE<10
         if: ${{ !cancelled() }}
         run: |
           test -f wo-skipped && { echo "game not fetched: skipped"; exit 0; }
-          node -e "const r=JSON.parse(require('fs').readFileSync('world-objects-golden.json','utf8'));console.log('world-objects MAE',r.mae);if(!(r.mae<60))process.exit(1)"
+          node -e "const r=JSON.parse(require('fs').readFileSync('world-objects-golden.json','utf8'));console.log('world-objects MAE',r.mae);if(!(r.mae<10))process.exit(1)"
       - name: real game 3d-world-objects - every program translates (src/xlat.rs) and compiles (Apple metal)
         if: ${{ !cancelled() }}
         continue-on-error: true
