@@ -20,7 +20,8 @@ picture. The loop is general; the scripts are still wired to that game (how to p
   quote or compare against.
 
 Repo background, when a step needs depth: `docs/notes/gpu-cost.md` (GPU side), `docs/notes/three-programs.md`
-("Static transforms", light state), `docs/notes/real-game-3d-world-objects.md` (running a game unchanged),
+("Static transforms", light state), `docs/notes/clusters.md` (cluster LOD, landing in steps), `docs/notes/real-game-3d-world-objects.md` (running a
+game unchanged),
 `docs/LOG.md` (newest first), `bench-results/*/README.md` (hardware runs).
 
 ## Ground rules, and why

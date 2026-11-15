@@ -12,7 +12,7 @@ Ordered by what paid most on the first game. "Effect" names its source: **Air** 
 5. Discarding draws defeat hidden-surface removal
 6. Shader / pipeline compile hitches
 7. Fill-bound at native resolution
-8. Merged static meshes drawn whole (cluster culling, in progress)
+8. Merged static meshes drawn whole (cluster LOD + GPU culling, landing in steps)
 - Checked and not worth it
 - Pitfalls
 
@@ -143,13 +143,23 @@ fog or defines toggled at runtime are the usual source; reduce them in the game 
 **Effect.** Air, before `trimLights`: main 179.7 -> 60.2 ms at 2940x1912 (3.0x), 56.9 -> 30.0 ms GPU at 1280x800.
 Remeasure after the per-fragment fixes; the share that scales with pixels is smaller now.
 
-## 8. Merged static meshes drawn whole (cluster culling, in progress)
+## 8. Merged static meshes drawn whole (cluster LOD + GPU culling, landing in steps)
 
-**Detect.** `--mesh-census`: merged meshes of tens of thousands of triangles that straddle the frustum.
+**Detect.** `--mesh-census`: merged meshes of thousands to tens of thousands of triangles that straddle the
+frustum or sit at one level of detail; `basic` row still most of `main`.
 
-**Status.** A native cluster LOD + GPU cull path is being built; it is not on this branch. Once
-`docs/notes/clusters.md` exists, read it for the switch names and the ablation row and update this entry. Until
-then the options are entry 3, or splitting merged meshes (about 10 us of JS per extra draw).
+**Fix.** `docs/notes/clusters.md` is the design and the source of truth: a cluster DAG built natively with
+meshoptimizer (`src/clusters.rs`), one compute dispatch per frame selects and culls clusters, three's own programs
+draw the result. Opt-in per mesh with `mesh.userData.frClusters = true`; renderer option `clusters`
+(`true` | `'auto'` | `false`).
+
+**Switch.** `FASTRENDER_CLUSTERS=0`; ablation row `noclusters`.
+
+**Status when this was written.** The note, the portable build and the kernel were on the branch; the renderer
+option in `js/fastrender-three.js`, the `noclusters` row in `scripts/gpu-ablate.sh` and the game patch (0006) were
+not. Check each with `grep -rn "frClusters\|noclusters" js scripts patches` before relying on it, and never quote
+an effect: nothing has been measured. Until it is complete the alternatives are entry 3 or splitting merged meshes
+(about 10 us of JS per extra draw).
 
 ## Checked and not worth it (on this game, this GPU)
 
