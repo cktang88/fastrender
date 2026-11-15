@@ -34,7 +34,7 @@ Window keys: `1` forward/deferred · `2` memoryless on/off · `3` MetalFX/biline
 ```bash
 cargo run --release -- run --scene voxel             # the native voxel island
 cargo run --release -- voxel-mesh                    # native meshing benchmark (any OS)
-cargo run --release -- matrix --rounds 3             # A..L, interleaved rounds, median per row
+cargo run --release -- matrix --rounds 3 --seconds 10 --warmup-seconds 2   # A..L on real hardware: time-based, interleaved, median
 ```
 
 Thermal throttling (fanless Air): `cargo run --release -- bench --frames 100000 --log-every 10`

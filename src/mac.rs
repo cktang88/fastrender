@@ -639,6 +639,7 @@ pub struct Renderer {
     /// GPU ms per completed command buffer (start..end; consecutive frames overlap on Apple GPUs,
     /// so treat this as a relative cost, and wall-clock throughput as the frame cost)
     gpu_times: Arc<Mutex<Vec<f64>>>,
+    last_gpu_end: Arc<Mutex<f64>>,
     frame: u64,
     shadow_center: Option<Vec3>,
     shadow_vp: Mat4,
@@ -676,6 +677,7 @@ impl Renderer {
             in_flight,
             sem: Semaphore::new(in_flight),
             gpu_times: Arc::new(Mutex::new(Vec::new())),
+            last_gpu_end: Arc::new(Mutex::new(0.0)),
             frame: 0,
             shadow_center: None,
             shadow_vp: Mat4::IDENTITY,
@@ -737,7 +739,13 @@ impl Renderer {
     /// targets + scaler (size/path/memoryless/upscale/scale), or nothing (cull/shadow knobs).
     pub fn set_config(&mut self, cfg: Config) -> Result<(), String> {
         let cfg = Self::effective(cfg, self.caps)?;
-        let content_changed = cfg.scene != self.cfg.scene || cfg.props != self.cfg.props || cfg.lights != self.cfg.lights || cfg.seed != self.cfg.seed || cfg.script != self.cfg.script;
+        // scripted scenes own their lights: changing the light count must not reload (and reset) the game
+        let scripted = matches!(cfg.scene, SceneKind::Script | SceneKind::Three);
+        let content_changed = cfg.scene != self.cfg.scene
+            || cfg.props != self.cfg.props
+            || (cfg.lights != self.cfg.lights && !scripted)
+            || cfg.seed != self.cfg.seed
+            || cfg.script != self.cfg.script;
         let out = (cfg.width as usize, cfg.height as usize);
         let targets_changed = !self.targets.matches(&cfg, out, cfg.scale);
         if content_changed || targets_changed {
@@ -922,10 +930,16 @@ impl Renderer {
         }
         let sem = self.sem.clone();
         let times = self.gpu_times.clone();
+        let last_end = self.last_gpu_end.clone();
         let handler = RcBlock::new(move |cb: NonNull<CmdBuf>| {
             let cb = unsafe { cb.as_ref() };
             if cb.status() == MTLCommandBufferStatus::Completed {
-                times.lock().unwrap().push((cb.GPUEndTime() - cb.GPUStartTime()) * 1000.0);
+                // this frame's own GPU time: from when it could start (after the previous frame
+                // ended) to its end, so cross-frame overlap and stalls don't inflate it
+                let mut prev = last_end.lock().unwrap();
+                let (start, end) = (cb.GPUStartTime(), cb.GPUEndTime());
+                times.lock().unwrap().push((end - start.max(*prev)).max(0.0) * 1000.0);
+                *prev = end;
             } else if let Some(e) = cb.error() {
                 eprintln!("GPU error: {}", e.localizedDescription());
             }
@@ -1201,16 +1215,28 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     }
     r.wait_idle();
     r.take_gpu_times();
+    // warm up for at least `warmup_s` too: DVFS needs a couple of seconds to settle on an Air
+    let warm = Instant::now();
+    let mut extra = 0;
+    while warm.elapsed().as_secs_f32() < cfg.warmup_s {
+        r.render(at(cfg.warmup + extra), || None);
+        extra += 1;
+    }
+    r.wait_idle();
+    r.take_gpu_times();
     let start = Instant::now();
     let mut last_log = Instant::now();
     let mut logged = 0usize;
     let mut gpu = Stats::default();
     let mut js = Stats::default();
-    for i in 0..cfg.frames {
-        r.render(at(cfg.warmup + i), || None);
+    let mut i = 0u32;
+    // run for `frames` frames, and at least `seconds` seconds
+    while i < cfg.frames || start.elapsed().as_secs_f32() < cfg.seconds {
+        i += 1;
+        r.render(at(cfg.warmup + extra + i), || None);
         if let Some(ms) = r.script_ms() { js.push(ms); }
         if cfg.log_every_s > 0.0 && last_log.elapsed().as_secs_f32() >= cfg.log_every_s {
-            let done = i as usize + 1;
+            let done = i as usize;
             println!("  t={:>6.0}s  {:>6.1} fps", start.elapsed().as_secs_f32(), (done - logged) as f32 / last_log.elapsed().as_secs_f32());
             logged = done;
             last_log = Instant::now();
@@ -1229,7 +1255,7 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     }
     let label = if label.contains('=') { r.cfg.label() } else { format!("{label} [{}]", r.cfg.label()) };
     let js_ms = if js.samples.is_empty() { None } else { Some(js.avg()) };
-    BenchResult { label, frames: cfg.frames as usize, fps: cfg.frames as f64 / wall, gpu_avg: gpu.avg(), gpu_p99: gpu.pct(99.0), js_ms, skipped: None }
+    BenchResult { label, frames: i as usize, fps: i as f64 / wall, gpu_avg: gpu.avg(), gpu_p99: gpu.pct(99.0), js_ms, skipped: None }
 }
 
 /// Run every matrix row `rounds` times, interleaved (A..L, A..L, ...) so heat-soak on a fanless
@@ -1274,12 +1300,13 @@ pub fn print_results(device: &str, results: &[BenchResult]) {
         .iter()
         .map(|r| {
             format!(
-                "{{\"label\":{:?},\"frames\":{},\"fps\":{:.2},\"gpu_avg\":{:.3},\"gpu_p99\":{:.3},\"skipped\":{}}}",
+                "{{\"label\":{:?},\"frames\":{},\"fps\":{:.2},\"gpu_avg\":{:.3},\"gpu_p99\":{:.3},\"js_ms\":{},\"skipped\":{}}}",
                 r.label,
                 r.frames,
                 r.fps,
                 r.gpu_avg,
                 r.gpu_p99,
+                r.js_ms.map(|v| format!("{v:.3}")).unwrap_or("null".into()),
                 r.skipped.as_ref().map(|s| format!("{s:?}")).unwrap_or("null".into())
             )
         })

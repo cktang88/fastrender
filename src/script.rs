@@ -57,11 +57,11 @@ pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
     let mut out = Frame::default();
     let mut w = 2;
     while w < end {
-        let (op, n) = (words[w], words[w + 1] as usize);
-        let p = &words[w + 2..(w + 2 + n).min(end)];
-        if p.len() != n {
-            return Err(format!("op {op} at word {w} runs past the end"));
+        if w + 2 > end {
+            return Err(format!("truncated command header at word {w}"));
         }
+        let (op, n) = (words[w], words[w + 1] as usize);
+        let p = words.get(w + 2..w + 2 + n).filter(|_| w + 2 + n <= end).ok_or_else(|| format!("op {op} at word {w} runs past the end"))?;
         match op {
             OP_CAMERA if n >= 9 => {
                 out.camera = Camera { eye: [f(p[0]), f(p[1]), f(p[2])], target: [f(p[3]), f(p[4]), f(p[5])], fovy_deg: f(p[6]), near: f(p[7]), far: f(p[8]) };
@@ -138,6 +138,8 @@ mod tests {
     #[test]
     fn rejects_malformed() {
         assert!(decode(&[0, 0]).is_err());
+        assert!(decode(&[MAGIC, 3, 5]).is_err(), "truncated header must not panic");
+        assert!(decode(&[MAGIC, 4, 5, 1000]).is_err(), "payload past the end must not panic");
         assert!(decode(&stream(&[(OP_BOXES, vec![3, 0, 0])])).unwrap_err().contains("boxes"));
         let mut s = stream(&[(OP_SUN, vec![0, 0, 0, 0])]);
         s[1] = 999_999;

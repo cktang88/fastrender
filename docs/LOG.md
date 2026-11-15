@@ -41,9 +41,11 @@ Short entries, newest first: what was tested, how, what came out.
   | Linux VM (Xeon) | 4 | 85 ms | 0.08 ms |
   | CI macOS runner | 3 | 176 ms | 0.17 ms |
 
-  For reference, the game's docs quote 0.5 ms per chunk for the WASM mesher in workers. The native per-chunk speed is
-  similar; the gain comes from real threads with shared memory and no message passing. An Air's 4 performance + 4 efficiency
-  cores should land between the two VM rows (unmeasured).
+  For reference, the game's docs quote 0.5 ms per chunk for the WASM mesher in workers. **Correction (review 2):**
+  "ms/chunk" above divides by all 1024 chunks, and 600 of them are empty early-outs. Per *non-empty* chunk on one thread
+  it is 291/424 ≈ **0.69 ms**, which is not faster than the WASM figure. The only native gain here is real threads with
+  shared memory, and the figures leave out concatenation and GPU upload. (The user has since said the voxel game already
+  runs fast, so this path is parked.)
 - **Voxel render on the CI Mac:** the selftest frame has real content, with 99 chunk draws after culling.
 - **JS bridge:** `node js/test/shim.test.mjs` passes. The command stream tiles exactly, box matrices are orthonormal
   with the right half extents, and node takes about 1 ms per frame for 500 boxes including warm-up. JavaScriptCore numbers are

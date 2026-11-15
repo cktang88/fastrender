@@ -53,6 +53,10 @@ pub struct Config {
     pub props: u32,
     pub frames: u32,
     pub warmup: u32,
+    /// bench: also run at least this many seconds (time-based runs for real hardware)
+    pub seconds: f32,
+    /// bench: also warm up at least this many seconds (DVFS settling)
+    pub warmup_s: f32,
     pub vsync: bool,
     /// dynamic resolution target in ms (0 = off), windowed mode only
     pub dynres_ms: f32,
@@ -85,6 +89,8 @@ impl Default for Config {
             props: 150_000,
             frames: 300,
             warmup: 30,
+            seconds: 0.0,
+            warmup_s: 0.0,
             vsync: true,
             dynres_ms: 0.0,
             log_every_s: 0.0,
@@ -138,6 +144,8 @@ impl Config {
                 "props" => self.props = num(v)? as u32,
                 "frames" => self.frames = num(v)? as u32,
                 "warmup" => self.warmup = num(v)? as u32,
+                "seconds" => self.seconds = num(v)? as f32,
+                "warmup-seconds" => self.warmup_s = num(v)? as f32,
                 "vsync" => self.vsync = num(v)? != 0.0,
                 "dynres" => self.dynres_ms = num(v)? as f32,
                 "log-every" => self.log_every_s = num(v)? as f32,

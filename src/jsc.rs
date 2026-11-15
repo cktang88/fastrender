@@ -166,8 +166,10 @@ const PRELUDE: &str = "__fr.upload = function (k, id, meta) { var a = [k, id, JS
 pub struct ScriptHost {
     ctx: JSGlobalContextRef,
     frame_fn: JSObjectRef,
-    /// the command buffer JS writes into; must outlive `ctx` (released first in Drop)
-    buf: Box<[u32]>,
+    /// the command buffer JS writes into (raw allocation: JS writes it, Rust only reads it through
+    /// raw pointers, never through a &mut borrow); freed in Drop after the context is released
+    buf: *mut u32,
+    words: usize,
     /// wall time of the last `frame()` call (JS work + command encoding)
     pub last_js_ms: f64,
 }
@@ -177,12 +179,13 @@ impl ScriptHost {
     pub fn new(shim: &str, game: &str, game_name: &str, params_json: &str, words: usize) -> Result<Self, String> {
         unsafe {
             let ctx = JSGlobalContextCreate(null_mut());
-            let mut host = ScriptHost { ctx, frame_fn: null_mut(), buf: vec![0u32; words].into_boxed_slice(), last_js_ms: 0.0 };
+            let buf = Box::into_raw(vec![0u32; words].into_boxed_slice()) as *mut u32;
+            let mut host = ScriptHost { ctx, frame_fn: null_mut(), buf, words, last_js_ms: 0.0 };
             let global = JSContextGetGlobalObject(ctx);
             // __fr = { cmd: ArrayBuffer(over host.buf), log, params }
             let fr = JSObjectMake(ctx, null_mut(), null_mut());
             let mut exc: JSValueRef = null();
-            let ab = JSObjectMakeArrayBufferWithBytesNoCopy(ctx, host.buf.as_mut_ptr() as *mut c_void, host.buf.len() * 4, no_dealloc, null_mut(), &mut exc);
+            let ab = JSObjectMakeArrayBufferWithBytesNoCopy(ctx, host.buf as *mut c_void, host.words * 4, no_dealloc, null_mut(), &mut exc);
             if ab.is_null() {
                 return Err(format!("ArrayBuffer: {}", describe_exception(ctx, exc)));
             }
@@ -235,7 +238,7 @@ impl ScriptHost {
     pub fn frame(&mut self, t: f64, dt: f64) -> Result<&[u32], String> {
         let start = Instant::now();
         unsafe {
-            self.buf[0] = 0; // so a frame that forgets renderer.render() is caught by the decoder
+            self.buf.write_volatile(0); // so a frame that forgets renderer.render() is caught by the decoder
             let args = [JSValueMakeNumber(self.ctx, t), JSValueMakeNumber(self.ctx, dt)];
             let mut exc: JSValueRef = null();
             JSObjectCallAsFunction(self.ctx, self.frame_fn, null_mut(), 2, args.as_ptr(), &mut exc);
@@ -244,7 +247,8 @@ impl ScriptHost {
             }
         }
         self.last_js_ms = start.elapsed().as_secs_f64() * 1000.0;
-        Ok(&self.buf)
+        // SAFETY: JS is not running (single-threaded host); the slice lives until the next frame()
+        Ok(unsafe { std::slice::from_raw_parts(self.buf, self.words) })
     }
 }
 
@@ -255,6 +259,7 @@ impl Drop for ScriptHost {
                 JSValueUnprotect(self.ctx, self.frame_fn as JSValueRef);
             }
             JSGlobalContextRelease(self.ctx);
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(self.buf, self.words)));
         }
     }
 }
