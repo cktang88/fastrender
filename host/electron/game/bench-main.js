@@ -44,6 +44,7 @@ if (!['webgl', 'webgpu', 'fastrender'].includes(variant) || !['city', 'empty', '
 
 const sw = (s, v) => app.commandLine.appendSwitch(s, v);
 for (const s of ['disable-renderer-backgrounding', 'disable-background-timer-throttling', 'disable-backgrounding-occluded-windows', 'ignore-gpu-blocklist', 'disable-gpu-watchdog']) sw(s);
+sw('disable-features', 'CalculateNativeWinOcclusion'); // a window larger than the screen (CI) must keep rendering
 if (!vsync) { sw('disable-gpu-vsync'); sw('disable-frame-rate-limit'); }
 if (variant === 'webgpu') {
   // timestamp-query at full precision needs the developer features; "unsafe" = the origin-trial gate, not validation
@@ -81,7 +82,7 @@ const cssFile = bundle.replace(/\.js$/, '.css');
 function page() {
   const css = fs.existsSync(cssFile) ? '<link rel="stylesheet" href="/__fr/game.css">' : '';
   // fastrender: the page is transparent over the Metal view (game/fr.css); the others draw into their own canvas
-  const fr = variant === 'fastrender' ? '<link rel="stylesheet" href="/__fr/fr.css">' : '<style>html,body{margin:0;overflow:hidden;background:#000}</style>';
+  const fr = variant === 'fastrender' ? '<link rel="stylesheet" href="/__fr/fr.css">' : '<style>html,body{margin:0;overflow:hidden;background:#000}html.fr-hide-ui body>*:not(#app){visibility:hidden!important}html.fr-hide-ui #app>*:not(canvas){visibility:hidden!important}</style>';
   const inject = `${css}${fr}<script src="/__fr/game.js"></script>`;
   if (scene === 'world') {
     const html = fs.readFileSync(htmlPath, 'utf8');
@@ -121,7 +122,7 @@ const mb = (kb) => +(kb / 1024).toFixed(1);
 /** phys_footprint per pid (macOS `top`: includes Metal / IOSurface memory, which the resident set does not) */
 async function footprints(pids) {
   if (process.platform !== 'darwin') return {};
-  const out = await run('/usr/bin/top', ['-l', '1', '-stats', 'pid,mem', ...pids.flatMap((p) => ['-pid', String(p)])]);
+  const out = await run('/usr/bin/top', ['-l', '1', '-stats', 'pid,mem']);
   const r = {};
   for (const line of out.split('\n')) {
     const m = /^\s*(\d+)\s+(\d+(?:\.\d+)?)([KMG])/.exec(line);

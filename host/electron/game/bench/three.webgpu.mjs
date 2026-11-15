@@ -78,6 +78,8 @@ export function benchBackend(r) {
     antialias: r.samples > 1,
     samples: r.samples,
     timestampQuery: !!(b.device && b.device.features && b.device.features.has('timestamp-query')),
+    // memoryless attachments (MTLStorageModeMemoryless on Apple GPUs): in the API this Chromium ships?
+    transientAttachment: typeof GPUTextureUsage !== 'undefined' && GPUTextureUsage.TRANSIENT_ATTACHMENT !== undefined,
     features: b.device && b.device.features ? [...b.device.features].sort() : [],
   };
 }

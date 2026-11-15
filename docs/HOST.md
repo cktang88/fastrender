@@ -137,6 +137,65 @@ job: the JavaScriptCore host (`fastrender bench --three`) and Electron (V8) on t
   (43710494452, before flush mode) aborted on `setVertexBuffer offset(65536) must be < [buffer length](65536)`;
   it has not recurred since (flush mode sends whole frames, not each partial render).
 
+### 3-way benchmark: three WebGLRenderer vs three WebGPURenderer vs fastrender (one command)
+
+"Why not just use three's WebGPURenderer?" is answered by measuring, in the same Electron app and Chromium, the same
+scene on (A) stock `WebGLRenderer` (ANGLE -> Metal), (B) stock `WebGPURenderer` (`three/webgpu`, Dawn -> Metal) and
+(C) fastrender (this host). Analysis and the numbers so far: `docs/research/webgpu-vs-fastrender.md`.
+
+**On your Mac (the numbers that count; CI's GPU is paravirtual):**
+
+```bash
+host/electron/scripts/bench-3way.sh          # ~25 min; writes host/electron/bench-out/bench-3way.md + .json
+host/electron/scripts/bench-3way.sh --quick  # ~6 min: 3 s warmup + 8 s measured, 1280x800 only
+host/electron/scripts/bench-3way.sh --power  # + GPU power / active residency per run (sudo powermetrics; run `sudo -v` first)
+```
+
+Needs Xcode command line tools, Rust and Node 20+. It builds the addon (`npm run build`) and the bundles, fetches
+cktang88/3d-world-objects at the commit `patches/` apply to (or `--world <checkout with the patches applied>`), then
+runs every variant in turn: plug the Mac in, close other apps, do not touch the always-on-top window. Send back
+`bench-out/bench-3way.md` (and `.json`: every run's raw record).
+
+| Piece | File |
+|---|---|
+| Electron main: one window per run, Chromium flags, process CPU / memory sampling, screenshot | `game/bench-main.js` (+ `game/bench-preload.js`) |
+| Page: measurement loop, GPU timers, issue log | `game/bench/harness.mjs`, `game/bench/host.mjs` |
+| Scenes: three-city + the empty-frame baseline; the real game (its unchanged `src/main.ts`, the goldens' driver) | `game/bench/city.entry.mjs`, `game/bench/world.entry.mjs` |
+| `three` per variant (the only thing that differs between the three bundles of a scene) | `game/bench/three.{webgl,webgpu,fastrender}.mjs` |
+| Bundler, report (markdown + JSON, CI annotations), the one-command driver | `scripts/bench-3way.bundle.mjs`, `scripts/bench-3way.report.mjs`, `scripts/bench-3way.sh` |
+
+What a run is (`npx electron game/bench-main.js --variant webgl|webgpu|fastrender --scene empty|city|world --px 1280x800`):
+
+- **Same pixels.** `--px` is the colour buffer in device pixels for every variant: the window is `px / scaleFactor`
+  points, A and B run at pixel ratio = scale factor, C at render scale 1 (drawable = layer bounds x contentsScale,
+  bilinear path, no MetalFX). Nobody up- or downscales. Sizes: 1280x800 and 2560x1600.
+- **Same work per frame.** Each display frame advances the scene by exactly 1/60 s (the city's `update(t)`; the game
+  under the goldens' deterministic driver: seeded `Math.random`, virtual clock; `&nodyn` turns its dynamic resolution
+  off). Frame N is the same frame in every variant. The game runs `quality=low` (the tier it picks on a base M2):
+  one direct `renderer.render`, no composer.
+- **MSAA off by default**, because fastrender has none: the game asks for `antialias: true`, so its as-shipped cost
+  is measured in extra rows (`aa`, A and B only).
+- **Uncapped** (`--vsync 0`, default): Chromium `--disable-gpu-vsync --disable-frame-rate-limit`; fastrender
+  `{"vsync": 0}` = `CAMetalLayer.displaySyncEnabled = false`. fastrender's page is paced by back-pressure (a new frame
+  only when the render thread took the previous one), like a swap chain. A second pass runs with vsync **on**: CPU %
+  and GPU ms at the display's rate (what the battery sees).
+- **Warmup 10 s, measured 20 s** (after the game's boot: world started, 10 settle frames, fetches done).
+- **Per frame:** rAF delta (p50 / p95 / p99), JS ms split into game update and `renderer.render` (+ FastRenderer's
+  flush), draw calls, GPU ms (A: `EXT_disjoint_timer_query_webgl2` if ANGLE exposes it; B: WebGPU `timestamp-query`
+  through three's `trackTimestamp`, with `--enable-webgpu-developer-features`; C: Metal command-buffer GPU time).
+- **Per process** (`app.getAppMetrics`, start and end of the window): CPU % of a core and memory for the main process
+  (C's render thread lives here), Chromium's GPU process (A/B translate and submit here) and the page; `top`'s
+  footprint where available (it includes Metal memory, the resident set does not). **CPU ms/frame** = all processes'
+  CPU time / frames: the renderer cost that does not depend on the GPU.
+- **B with an unchanged WebGL game:** `new THREE.WebGLRenderer()` returns an initialised `WebGPURenderer`; the
+  WebGL-only exports resolve, GLSL does not run. The run records what broke: materials by kind (plain /
+  `onBeforeCompile` / `ShaderMaterial`), console errors, WebGPU validation errors, the missing renderer surface, and
+  the screenshot's MAE against A's. Nothing is ported to TSL.
+
+CI: job `bench-3way` in `.github/workflows/mac.yml` (separate job, `continue-on-error`) runs `--quick` at both sizes
+and prints the table to the job summary and as annotations. **The runner's GPU is paravirtual: its fps and GPU ms say
+nothing about an Air.** Its JS ms and CPU ms/frame columns are still informative.
+
 ## Spike (Nov 2026)
 
 Code: `host/electron/` (Electron 45.3.2 / Chromium 156 / Node 24, napi-rs 3: `napi` 3.16, `@napi-rs/cli` 3.10.12).

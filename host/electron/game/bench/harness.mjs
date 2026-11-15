@@ -139,7 +139,11 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
   // a few frames, then the screenshot (A/B: capturePage in main; C: the drawable, read back by the render thread)
   for (let i = 0; i < 5; i++) { await new Promise(realRaf); if (native && i === 4) native.shot('shot'); frame(); if (host) host.flush(); }
   if (native) { const t0 = realNow(); while (native.stats().lastFrameSeq < host.lastSeq && realNow() - t0 < 120000) await sleep(20); }
+  // the game's DOM HUD is not part of the comparison (C's shot is the drawable: no DOM in it)
+  const hide = cfg.scene === 'world' && !native;
+  if (hide) { document.documentElement.classList.add('fr-hide-ui'); await new Promise(realRaf); await new Promise(realRaf); }
   await ack('capture', {});
+  if (hide) document.documentElement.classList.remove('fr-hide-ui');
 
   log(`warmup ${cfg.warmup} s`);
   await run(cfg.warmup, frame, renderer, acc, timer);

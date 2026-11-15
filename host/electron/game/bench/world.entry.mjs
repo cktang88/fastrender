@@ -44,7 +44,7 @@ function census(scene) {
     const patched = m.onBeforeCompile !== Material.prototype.onBeforeCompile;
     const k = m.isShaderMaterial ? 'shader_material' : patched ? 'on_before_compile' : 'plain';
     custom[k]++; custom[`objects_${k}`] += visible;
-    if (k !== 'plain') { const nm = `${m.type}${m.isShaderMaterial ? '' : '+onBeforeCompile'}: ${String(m.name || '(unnamed)').replace(/[#\d.]+/g, '').trim() || '(unnamed)'}`; names[nm] = (names[nm] || 0) + 1; }
+    if (k !== 'plain') { const nm = `${m.type}${m.isShaderMaterial ? '' : '+onBeforeCompile'}: ${String(m.name || '(unnamed)').replace(/#[0-9a-f]{3,8}\b/gi, '').replace(/[\d.=]+/g, '').replace(/\s+/g, ' ').trim() || '(unnamed)'}`; names[nm] = (names[nm] || 0) + 1; }
   }
   return { ...c, materials: mats.size, material_types: by, glsl: custom, glsl_materials: Object.fromEntries(Object.entries(names).sort((a, b) => b[1] - a[1]).slice(0, 40)) };
 }

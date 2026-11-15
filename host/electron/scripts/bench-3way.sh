@@ -24,6 +24,7 @@ el="$(cd "$here/.." && pwd)"
 repo="$(cd "$el/../.." && pwd)"
 world=""; out="$el/bench-out"; sizes="1280x800 2560x1600"; scenes="empty city world"; variants="webgl webgpu fastrender"
 warmup=10; measure=20; vsync_pass=1; build=1; power=0; note=""
+electron="${BENCH_ELECTRON:-npx electron}"   # testing elsewhere: BENCH_ELECTRON="xvfb-run -a npx electron --no-sandbox"
 while [ $# -gt 0 ]; do
   case "$1" in
     --world) world="$2"; shift 2;;
@@ -88,10 +89,10 @@ one() { # one <scene> <variant> <px> <aa> <vsync>
   if [ "$power" = 1 ]; then sudo -n powermetrics --samplers gpu_power,cpu_power -i 1000 > "$out/$tag-power.txt" 2>/dev/null & pm=$!; fi
   if [ "$scene" = world ]; then
     # shellcheck disable=SC2086
-    npx electron game/bench-main.js $args --html "$world/index.html" --assets "$world/public" > "$out/$tag.log" 2>&1
+    $electron game/bench-main.js $args --html "$world/index.html" --assets "$world/public" > "$out/$tag.log" 2>&1
   else
     # shellcheck disable=SC2086
-    npx electron game/bench-main.js $args > "$out/$tag.log" 2>&1
+    $electron game/bench-main.js $args > "$out/$tag.log" 2>&1
   fi
   [ -n "$pm" ] && { sudo -n kill "$pm" 2>/dev/null; wait "$pm" 2>/dev/null; }
   node -e 'const fs=require("fs");let r={};try{r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
