@@ -3,6 +3,65 @@
 Short entries, newest first: what was tested, how, what came out.
 
 
+## 2026-11-15: review fixes: light-count steps no longer empty the lit scene, shadow maps per light, instance culling only where bounds are known; nothing run on a Mac
+
+A review of the day's work (trimLights, instance culling, async compile, render targets, patches/0004) found eight
+problems. All are fixed; what each needed:
+
+1. **trimLights x async compile: the lit scene vanished when a light count stepped.** three compiles the light
+   counts into every lit program, so a step gives every lit material instance another program in one frame, and the
+   main pass skipped every draw whose pipeline was compiling. Two layers:
+   - **Native net** (`src/mac_programs.rs` `require` / `wait_required`, `bindlist::main_draw_waits`): a main-pass
+     pipeline that takes the place of one the instance was on screen with (same streams and target, carried over by
+     `Mat3State::prev` when the instance is uploaded again) is waited for instead of skipped. All of a pass's are
+     requested first and waited for together, so the wait is the longest build on the workers, not the sum. First
+     appearances are skipped as before.
+   - **`lightHold`** (`js/three-programs.js` `_holdLights` / `_prewarm`, JavaScriptCore host): the change itself is
+     put off. The list keeps the counts it had (the lights that were on stay on; one that just lit up waits) while
+     the programs of the new counts are picked and translated two per frame and announced to the native side
+     (MATERIAL `{prewarm, token}`, docs/PROTOCOL.md), which queues their pipelines without drawing with them.
+     `host.prewarmPending(token)` says when they are built; the change then goes through with nothing left to
+     translate or compile. After 180 frames it goes through anyway (the net above catches the rest). Counts that
+     were on screen before are never put off. Off in blocking mode (goldens, bench: unchanged frame sequence), with
+     hosts that cannot answer (Electron: the game process cannot ask the render thread; a counter in the shared
+     header would do), with `lightHold: false` / `host.params.lightHold = 0`.
+   - Node, real game (`world-objects.node.mjs --light-hold`, a point light switched on by hand): 65 programs
+     picked ahead over 33 frames, 238 instance notes, 0 programs translated in the frame the change goes through.
+     Before, that frame translated all 65 (4-5 ms each in the native host: ~0.3 s of JS in one frame) and then
+     drew nothing lit until their pipelines were built.
+   - Not done: the same for light kinds that are not trimmed (a directional light added), and for Electron.
+2. **Automatic per-instance culling was stricter than three for stages that move vertices.** It now needs MATERIAL
+   meta `vertexCustom` false: no ShaderMaterial, no displacement map, no `onBeforeCompile` that rewrote the vertex
+   shader (compared before / after the hook; a fragment-only hook does not count). Others need
+   `userData.frInstanceCull`. Rule: `bindlist::instance_split_allowed`. Node census of the game: 1.76 M triangles in
+   view, unchanged (its hooks on instanced meshes are fragment-only; with every hook counted it was 1.94 M).
+3. **A kept shadow map could become another light's.** trimLights moves three's light indices and the native store
+   was keyed by (kind, index). SHADOWS records carry the shadow's own id (29 words, `light.shadow._frId`); maps are
+   kept per id (`three::shadow_map_slot`), (kind, index) only says which sampler a map is bound to this frame. A
+   light that leaves the list keeps its map; a new light takes over the oldest only when more than 8 are idle.
+4. **A post-processing output pass was skipped while its pipeline compiled** (black screen with the offscreen
+   passes rendered). A screen draw that samples a render target, or is its pass's only draw, is waited for.
+5. **`rt.init` / `depth_init` were set before the encoder existed**: now after `render_pass` succeeded.
+6. **patches/0004, chunkLod.ts**: three's Raycaster tests hidden objects, so a ray hit both versions of a merged
+   mesh; the hidden one has a no-op `raycast` (`setShown`).
+7. **patches/0004, vehicleFleet.ts**: `e.distant` was only written on the far level; `fleetDistant(level, d, was,
+   has)` decides it every frame.
+8. **gl_InstanceID**: the comment in `mac_programs.rs` was wrong. glslang's relaxed Vulkan rules turn it into
+   gl_InstanceIndex, SPIRV-Cross emits `[[instance_id]]` without subtracting the base instance, Metal counts from
+   the base instance: a run would see the instance's own index (`mac_bind.rs` had it right). Such draws stay whole
+   for another reason: a stage that looks things up per instance may place the instance with them.
+
+- **Verified**: `cargo test` 85 pass (new: `bindlist` instance-split and wait rules, `three::shadow_map_slot`,
+  `pipeline_manifest::prewarm_answers`); `DOCS_RS=1 cargo check --release --target aarch64-apple-darwin` clean;
+  `npm test` in js/ (r187 + r170; new sections 13b SHADOWS ids, 13c lightHold, vertexCustom in 14); the game with
+  0001-0005 applied on a fresh copy (`world-game.sh`): `tsc` no new errors, `npm run qa` 268 passed
+  (`tests/chunk-lod.test.ts` covers 6 and 7); the node run of the game: same draws and triangles.
+- **Not verified** (no Mac here): everything in `src/mac_*.rs` and `src/jsc.rs` beyond type-checking: the waits, the
+  shadow-map store, the prewarm notes and `__fr.prewarmPending`; how long a first light step holds or waits on the
+  Air; the goldens (blocking mode: no hold, no skipped draw, same programs; the SHADOWS record changed on both
+  sides at once, so no change is expected).
+
+
 ## 2026-11-15: real game, static subtrees in the game (patches/0005): render() JS 13-14 -> 7.3-8.8 ms in node, exact; Air not run
 
 Details: docs/notes/three-programs.md ("Static transforms").

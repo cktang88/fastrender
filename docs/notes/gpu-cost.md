@@ -101,6 +101,9 @@ Items 1-3 keep the picture; item 4 moves far geometry by about a pixel or less (
    **Cost to know about:** the first time a place switches lights on (entering a shop), its lit programs are new
    variants: one translate + pipeline compile each, where the game's padding had none. WP3's async compile and the
    persisted manifest are what hide that; it is the price of not paying 27 BRDFs per pixel everywhere else.
+   (After review: async compile did not hide it, it skipped every lit draw for those frames. Now the change is put
+   off while the new variants are translated and compiled in the background, `lightHold`, and the main pass waits
+   for a pipeline that replaces one on screen; docs/LOG.md "review fixes", docs/PROTOCOL.md "Prewarm notes".)
    Side effect: `render()` JS in node 20.5 -> 13.3 ms median (27 fewer light structs packed per lit program per frame).
 2. **Instanced draws draw the instances in view** (`src/bindlist.rs` `instance_spheres` / `planes_to_object` /
    `instance_runs`, `prepare_one_v3`). 3.68 M of the frame's 5.07 M triangles are InstancedMesh (268 draws, 180k
