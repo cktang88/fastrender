@@ -2249,6 +2249,39 @@ mod tests {
         assert!(body(&translate_half(&v, &f, half::Mode::Lit).unwrap().fragment_msl, "D_GGX").contains("half"));
     }
 
+    /// `XLAT_HALF_CENSUS=1 cargo test half_census -- --nocapture`: float ALU components per function and mode (the
+    /// table of docs/notes/half-precision.md).
+    #[test]
+    fn half_census() {
+        let show = std::env::var_os("XLAT_HALF_CENSUS").is_some();
+        for name in ["physical-instanced", "city-00-MeshStandardMaterial"] {
+            let (_, v, f) = programs().into_iter().find(|p| p.0 == name).unwrap();
+            let (vn, fn_) = (split_sampler_arrays(&normalize_glsl(&v)), split_sampler_arrays(&normalize_glsl(&f)));
+            let (_, fw) = glsl::compile(&vn, &fn_).unwrap();
+            let base = half::alu_census(&fw).unwrap();
+            let total: u32 = base.iter().map(|f| f.1).sum();
+            assert!(total > 100 && base.iter().all(|f| f.2 == 0), "{name}");
+            let mut rows: Vec<String> = base.iter().map(|f| format!("{:36} {:5}", f.0, f.1)).collect();
+            for mode in [half::Mode::Brdf, half::Mode::Lit, half::Mode::All] {
+                let (w, _) = half::apply(&fw, mode).unwrap().unwrap();
+                let c = half::alu_census(&w).unwrap();
+                // the pass moves work between widths, it adds none
+                assert_eq!(c.iter().map(|f| f.1 + f.2).sum::<u32>(), total, "{name} {}", mode.name());
+                assert_eq!(c.len(), rows.len());
+                for (row, f) in rows.iter_mut().zip(&c) {
+                    row.push_str(&format!(" {:5}", f.2));
+                }
+                if mode == half::Mode::All {
+                    assert!(c.iter().map(|f| f.2).sum::<u32>() * 10 > total * 8, "{name}: `all` leaves most ALU 32-bit");
+                }
+            }
+            if show {
+                println!("## {name}: function, float ALU components: total | half in brdf | lit | all");
+                rows.iter().filter(|r| !r.contains("     0     0     0     0")).for_each(|r| println!("{r}"));
+            }
+        }
+    }
+
     #[test]
     fn translate_reports_errors() {
         let e = translate("#version 300 es\nvoid main() { gl_Position = vec4(nope); }", "#version 300 es\nvoid main() {}").unwrap_err();
