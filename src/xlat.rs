@@ -25,6 +25,7 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
+use crate::xlat_half as half;
 use spirv_cross2::compile::msl::{BindTarget, CompilerOptions as MslOptions, ConstexprSampler, MslVersion, ResourceBinding, SamplerCompareFunc, SamplerFilter};
 use spirv_cross2::reflect::{ArrayDimension, DecorationValue, ScalarKind, TypeInner};
 use spirv_cross2::spirv::{Decoration, ExecutionModel};
@@ -1059,11 +1060,39 @@ fn init_translator() {
 /// Translates one three.js program (raw three GLSL ES 3.00, or already [`normalize_glsl`]ed: normalising is
 /// idempotent) to MSL + layout.
 pub fn translate(vertex: &str, fragment: &str) -> Result<Program, String> {
-    let (vn, fn_) = (normalize_glsl(vertex), normalize_glsl(fragment));
-    translate_normalized(&vn, &fn_)
+    translate_half(vertex, fragment, half::mode())
 }
 
-fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String> {
+/// [`translate`] with an explicit half-precision mode (src/xlat_half.rs; the process default is `half::mode()`).
+pub fn translate_half(vertex: &str, fragment: &str, mode: half::Mode) -> Result<Program, String> {
+    let (vn, fn_) = (normalize_glsl(vertex), normalize_glsl(fragment));
+    translate_normalized(&vn, &fn_, mode)
+}
+
+/// The fragment module with the functions `mode` selects computed in 16-bit float (src/xlat_half.rs). A module the
+/// pass cannot handle stays as it is (reported once per message): half is an optimisation, never a failure.
+fn half_fragment(words: Vec<u32>, mode: half::Mode) -> Vec<u32> {
+    match half::apply(&words, mode) {
+        Ok(Some((w, stats))) => {
+            if std::env::var_os("FASTRENDER_LOG_HALF").is_some() {
+                eprintln!("half({}): {} results, {} conversions, functions {:?}", mode.name(), stats.half_results, stats.conversions, stats.functions);
+            }
+            w
+        }
+        Ok(None) => words,
+        Err(e) => {
+            static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.contains(&e) {
+                eprintln!("xlat: {e}; this program stays 32-bit");
+                seen.push(e);
+            }
+            words
+        }
+    }
+}
+
+fn translate_normalized(vertex: &str, fragment: &str, mode: half::Mode) -> Result<Program, String> {
     let (vertex, fragment) = (split_sampler_arrays(vertex), split_sampler_arrays(fragment));
     let (vw, fw) = glsl::compile(&vertex, &fragment)?;
     let vi = reflect(&vw, ExecutionModel::Vertex)?;
@@ -1134,6 +1163,7 @@ fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String>
 
     let varyings = stage_outputs(&vw)?;
     let vertex_msl = to_msl(&vw, ExecutionModel::Vertex, VERTEX_ENTRY, &textures, &fixed, &[])?;
+    let fw = half_fragment(fw, mode);
     let fragment_msl = to_msl(&fw, ExecutionModel::Fragment, FRAGMENT_ENTRY, &textures, &fixed, &varyings)?;
     Ok(Program {
         vertex_msl,
@@ -1215,7 +1245,14 @@ fn hash3(parts: &[&[u8]]) -> [u64; 3] {
 /// The 128-bit cache key and an independent 64-bit check for one program: [`TRANSLATOR_VERSION`], [`MSL_OPTIONS`]
 /// and both sources as given (raw).
 fn source_key(vertex: &str, fragment: &str) -> (u128, u64) {
-    let [a, b, c] = hash3(&[TRANSLATOR_VERSION.as_bytes(), MSL_OPTIONS.as_bytes(), vertex.as_bytes(), fragment.as_bytes()]);
+    // the half-precision mode is a fifth part only when it is on: the keys of the default output do not move
+    let mode = half::mode();
+    let tag = format!("half={} {}", mode.name(), half::VERSION);
+    let mut parts = vec![TRANSLATOR_VERSION.as_bytes(), MSL_OPTIONS.as_bytes(), vertex.as_bytes(), fragment.as_bytes()];
+    if mode != half::Mode::Off {
+        parts.push(tag.as_bytes());
+    }
+    let [a, b, c] = hash3(&parts);
     ((a as u128) << 64 | b as u128, c)
 }
 
@@ -1571,6 +1608,9 @@ pub fn dump(input: &Path, out: &Path) -> Result<(), String> {
     let t = std::time::Instant::now();
     init_translator();
     println!("one-time glslang init (warm_up): {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    if half::mode() != half::Mode::Off {
+        println!("half precision: {} ({})", half::mode().name(), half::VERSION);
+    }
     let mut failed = 0;
     for name in &names {
         let read = |ext: &str| std::fs::read_to_string(input.join(format!("{name}.{ext}.glsl"))).map_err(|e| e.to_string());
@@ -2160,6 +2200,53 @@ mod tests {
         let f = "#version 300 es\nprecision highp float;\nout vec4 o;\nuniform float k;\nvoid g(out float x) { if (k > 1.0) x = 1.0; }\nvoid main() { float y = 0.0; g(y); o = vec4(y); }";
         let p = translate(v, f).unwrap();
         assert!(p.fragment_msl.contains("= {};"), "{}", p.fragment_msl);
+    }
+
+    /// src/xlat_half.rs on every fixture program, in every mode: the module still validates (`spirv-val`, when it is
+    /// installed), still becomes MSL, the layout does not move, and the selected functions really are half.
+    #[test]
+    fn half_modes() {
+        let val = std::process::Command::new("spirv-val").arg("--version").output().is_ok();
+        let dump = std::env::var_os("XLAT_HALF_DUMP").map(PathBuf::from);
+        for (name, v, f) in programs() {
+            let base = translate_half(&v, &f, half::Mode::Off).unwrap();
+            let (vn, fn_) = (split_sampler_arrays(&normalize_glsl(&v)), split_sampler_arrays(&normalize_glsl(&f)));
+            let (_, fw) = glsl::compile(&vn, &fn_).unwrap();
+            for mode in [half::Mode::Brdf, half::Mode::Lit, half::Mode::All] {
+                let applied = half::apply(&fw, mode).unwrap_or_else(|e| panic!("{name} {}: {e}", mode.name()));
+                if let Some((w, stats)) = &applied {
+                    if val {
+                        let path = std::env::temp_dir().join(format!("fr-half-{}-{name}-{}.spv", std::process::id(), mode.name()));
+                        std::fs::write(&path, w.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+                        let o = std::process::Command::new("spirv-val").arg(&path).output().unwrap();
+                        let _ = std::fs::remove_file(&path);
+                        assert!(o.status.success(), "{name} {}: spirv-val: {}", mode.name(), String::from_utf8_lossy(&o.stderr));
+                    }
+                    assert!(stats.half_results > 0 && !stats.functions.is_empty(), "{name} {}", mode.name());
+                }
+                let p = translate_half(&v, &f, mode).unwrap();
+                assert_eq!(p.layout, base.layout, "{name} {}", mode.name());
+                assert_eq!(p.vertex_msl, base.vertex_msl, "{name} {}", mode.name());
+                assert_eq!(applied.is_some(), p.fragment_msl != base.fragment_msl, "{name} {}", mode.name());
+                assert_eq!(applied.is_some(), p.fragment_msl.contains("half"), "{name} {}", mode.name());
+                if let Some(d) = &dump {
+                    std::fs::create_dir_all(d).unwrap();
+                    std::fs::write(d.join(format!("{name}.{}.frag.metal", mode.name())), &p.fragment_msl).unwrap();
+                    std::fs::write(d.join(format!("{name}.off.frag.metal")), &base.fragment_msl).unwrap();
+                }
+            }
+        }
+        // the physical program: Fresnel and visibility are half in `brdf`; the light loop's caller is not
+        let (_, v, f) = programs().into_iter().find(|p| p.0 == "physical-instanced").unwrap();
+        let p = translate_half(&v, &f, half::Mode::Brdf).unwrap();
+        let body = |msl: &str, func: &str| {
+            let at = msl.find(&format!(" {func}(")).unwrap_or_else(|| panic!("{func} not in the MSL"));
+            msl[at..at + msl[at..].find("\n}\n").unwrap()].to_string()
+        };
+        let v_ggx = body(&p.fragment_msl, "V_GGX_SmithCorrelated");
+        assert!(v_ggx.contains("half a2") && v_ggx.contains("sqrt("), "{v_ggx}");
+        assert!(!body(&p.fragment_msl, "D_GGX").contains("half"));
+        assert!(body(&translate_half(&v, &f, half::Mode::Lit).unwrap().fragment_msl, "D_GGX").contains("half"));
     }
 
     #[test]

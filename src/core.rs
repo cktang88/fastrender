@@ -192,6 +192,8 @@ impl Config {
                 "time" => self.fixed_t = Some(num(v)? as f32),
                 "programs" => self.programs = match v.as_str() { "three" | "native" => v.clone(), _ => return Err(format!("bad --programs {v} (three|native)")) },
                 "gpu-passes" => self.gpu_passes = num(v)? != 0.0,
+                // WP10 (src/xlat_half.rs): a translator setting, process-wide; the shader cache keys include it
+                "half" => crate::xlat_half::set_mode(crate::xlat_half::Mode::parse(v)?),
                 "backend" => self.backend = crate::gpu::BackendChoice::parse(v)?,
                 "fence" => self.fence = match v.as_str() { "cpu" | "semaphore" => Fence::Cpu, "event" => Fence::Event, _ => return Err(format!("bad --fence {v} (cpu|event)")) },
                 "thermal" => self.thermal = num(v)? != 0.0,

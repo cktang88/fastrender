@@ -10,11 +10,12 @@ const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
   voxel-mesh  generate a 512x128x512 island and greedy-mesh it natively (any OS)
   selftest stage-by-stage render diagnostics (writes selftest-*.png)
   jsbench <bundle.js> [--warmup n] [--frames n] [--params json]  a three.js bundle's JS alone in JavaScriptCore (no Metal): ms/frame
-  xlat-dump <dir> <out>  translate every NAME.vert.glsl/NAME.frag.glsl three.js program in <dir> to MSL (any OS)
+  xlat-dump <dir> <out> [--half m]  translate every NAME.vert.glsl/NAME.frag.glsl three.js program in <dir> to MSL (any OS)
 options: --scene city|voxel|script|three --script game.js (props = box count) --three bundle.js (real three.js game) --programs three|native --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|temporal|bilinear
          --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
          --warmup n --seconds s --warmup-seconds s --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n
          --gpu-passes 0|1 (per-pass GPU ms: targets, shadow, main, upscale) --fence cpu|event (frames-in-flight fence: completion handler | MTLSharedEvent)
+         --half off|brdf|lit|all (three's lighting functions in 16-bit float, an experiment: docs/notes/half-precision.md; env FASTRENDER_HALF; default off)
          --backend metal4|metal3|auto (default auto = Metal 3 until the Metal 4 backend is verified on hardware; metal4 falls back to Metal 3 where unsupported; env FASTRENDER_BACKEND)
          --thermal 0|1 (follow thermal state / Low Power Mode, default 1) --display-link 0|1 (run: CAMetalDisplayLink pacing, default 1) --run-seconds s (run: exit after s, print the frame-loop report)";
 
@@ -37,9 +38,18 @@ fn main() {
     };
     if mode == "xlat-dump" {
         let (Some(input), Some(out)) = (rest.first(), rest.get(1)) else {
-            eprintln!("usage: fastrender xlat-dump <dir> <out>");
+            eprintln!("usage: fastrender xlat-dump <dir> <out> [--half off|brdf|lit|all]");
             std::process::exit(2);
         };
+        if let Some(m) = rest.iter().position(|a| a == "--half").and_then(|i| rest.get(i + 1)) {
+            match fastrender::xlat_half::Mode::parse(m) {
+                Ok(m) => fastrender::xlat_half::set_mode(m),
+                Err(e) => {
+                    eprintln!("xlat-dump: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
         if let Err(e) = xlat::dump(std::path::Path::new(input), std::path::Path::new(out)) {
             eprintln!("xlat-dump: {e}");
             std::process::exit(1);
@@ -63,6 +73,9 @@ fn main() {
     if let Err(e) = cfg.apply_args(rest) {
         eprintln!("{e}\n\n{USAGE}");
         std::process::exit(2);
+    }
+    if fastrender::xlat_half::mode() != fastrender::xlat_half::Mode::Off {
+        println!("half precision: {} (three's fragment programs; src/xlat_half.rs)", fastrender::xlat_half::mode().name());
     }
     run(&mode, cfg);
 }

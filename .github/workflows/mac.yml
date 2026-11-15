@@ -397,6 +397,20 @@ jobs:
           bash .github/annotate.sh notice "world-objects programs (xlat + metal)" wo-xlat-summary.txt 32
           cat wo-xlat-summary.txt >> "$GITHUB_STEP_SUMMARY"
           ! grep -q "^FAIL\|^METAL FAIL" wo-xlat.txt
+      # WP10 (docs/notes/half-precision.md): three's lighting functions in 16-bit float, off by default. Per mode
+      # (--half brdf|lit|all): every fragment program compiles with Apple's compiler, golden MAE, GPU ms (paravirtual).
+      - name: half precision (WP10) - compile, goldens, GPU ms per mode
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          rc=0; bash .github/half-precision.sh > half-precision.log 2>&1 || rc=$?
+          head -40 half-precision.txt > half-precision-1.txt; tail -n +41 half-precision.txt > half-precision-2.txt
+          bash .github/annotate.sh notice "half precision 1/2 (${{ matrix.os }}, exit $rc)" half-precision-1.txt 40
+          bash .github/annotate.sh notice "half precision 2/2 (${{ matrix.os }}, exit $rc)" half-precision-2.txt 40
+          [ -s half-metal-errors.txt ] && bash .github/annotate.sh error "half precision: Apple metal errors" half-metal-errors.txt 40
+          { echo '### half precision (WP10)'; echo '```'; cat half-precision.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$rc" = 0 ]
       # Electron host with the REAL renderer (docs/HOST.md "Electron host"): the game runs in the renderer process (V8, real
       # DOM / 2D canvas), the addon's main-process render thread runs fastrender's Metal renderer under the web contents.
       # Screenshot = screencapture of the window (the Metal layer is not in capturePage), diffed like the JSC goldens.
@@ -478,6 +492,8 @@ jobs:
             electron-*.json
             electron-*.log
             frame-loop*.txt
+            half-precision*.txt
+            half-metal*.txt
             frame-loop.log
 
   # Why is the real game's JS 3-4x slower in the JavaScriptCore host than in Electron / node on this runner? The JS
