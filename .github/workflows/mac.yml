@@ -5,10 +5,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26]
+        # Verified 2026-11-15 against actions/runner-images: macos-26 (= macos-latest, macOS 26.7.2) ships Xcode 26.0.1-26.6;
+        # there is no macos-27 label yet, the macOS 27.0.1 image is the public-preview `xcode-27` label (Xcode 27.0-27.2).
+        include:
+          - os: macos-26
+            xcode: "26.6"
+            experimental: false
+          - os: xcode-27
+            xcode: "27.2"
+            experimental: true   # preview image: never fails the workflow
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26   # latest LTS ("Lithium")
+      - name: toolchain (Xcode ${{ matrix.xcode }}, Rust from rust-toolchain.toml)
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${{ matrix.xcode }}.app"
+          xcodebuild -version; xcrun --sdk macosx --show-sdk-version
+          rustup toolchain install   # the channel + target pinned in rust-toolchain.toml
+          rustc --version; cargo --version; node --version
       - run: sw_vers; sysctl -n machdep.cpu.brand_string
       - name: unit tests (portable core) + JS tests (real three.js)
         run: |
@@ -27,7 +45,16 @@ jobs:
           ./target/release/fastrender xlat-dump tests/fixtures/xlat/programs xlat-out
           for f in xlat-out/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /tmp/x.air || exit 1; echo "ok $f"; done
       - name: probe
-        run: ./target/release/fastrender probe
+        run: |
+          ./target/release/fastrender probe | tee probe.txt
+          bash .github/annotate.sh notice "probe (${{ matrix.os }})" probe.txt 30
+      - name: Metal 4 probe, forced object creation (informational)
+        continue-on-error: true
+        run: |
+          FASTRENDER_PROBE_MTL4_FORCE=1 ./target/release/fastrender probe > probe-metal4-forced.txt 2>&1 || echo "probe exited $?" >> probe-metal4-forced.txt
+          grep -E "^metal4|exited" probe-metal4-forced.txt > probe-metal4.txt || true
+          cat probe-metal4.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          bash .github/annotate.sh notice "Metal 4 probe, forced (${{ matrix.os }})" probe-metal4.txt 20
       # three.js's own programs (programs: 'three', protocol v3). Step names say what passed: the jobs API shows
       # each step's conclusion without needing the logs.
       - name: xlat programs compile (every three-city program, Apple metal compiler)
@@ -371,7 +398,7 @@ jobs:
           node -e "const r=JSON.parse(require('fs').readFileSync('electron-city-golden.json','utf8'));console.log('electron three-city MAE',r.mae);if(!(r.mae<1.0))process.exit(1)"
           test -d ../3d-world-objects || { echo "no game checkout: world gate skipped"; exit 0; }
           node -e "const r=JSON.parse(require('fs').readFileSync('electron-world-golden.json','utf8'));console.log('electron world-objects MAE',r.mae);if(!(r.mae<10))process.exit(1)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: results-${{ matrix.os }}

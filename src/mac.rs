@@ -139,6 +139,7 @@ pub fn probe() {
         Ok(p) => println!("pipelines: ok (deferred: {})", p.gbuffer[0].is_some()),
         Err(e) => println!("pipelines: ERROR {e}"),
     }
+    crate::mac_metal4_probe::probe(&d);
 }
 
 /// The ACES + gamma curve of the shader, so the forward clear colour matches the deferred sky.

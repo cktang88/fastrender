@@ -1,0 +1,157 @@
+name: Build and Test Metal 4 Renderer
+# Answers "which runner has Metal 4?" and keeps the Metal 4 toolchain path (MSL 4.x offline compile, MTL4 object
+# creation, MetalFX for Metal 4) tested while the Metal 4 backend is being written
+# (docs/research/perf-audit-2026-11.md, wave 2). Separate from mac.yml, which stays the required Metal 3 pipeline.
+#
+# The `compile` job gates; every `execute` job is continue-on-error. Runner labels, verified 2026-11-15 against actions/runner-images:
+#   macos-26          macOS 26.7.2, Xcode 26.0.1-26.6, standard (paravirtual GPU)
+#   macos-26-xlarge   same image on an M-series larger runner (paid: needs larger runners enabled on the plan)
+#   macos-15-xlarge   macOS 15, Xcode 16.x: no Metal 4 SDK, kept as the "before" data point
+#   xcode-27          macOS 27.0.1 + Xcode 27.0-27.2, public preview (there is no macos-27 label yet)
+#   xcode-27-xlarge   the same on a larger runner (paid)
+#   self-hosted       [self-hosted, macOS, ARM64], only when the repository variable METAL4_SELF_HOSTED is 'true'
+# A job that stays "queued" means the label is not available to this repository (plan without larger runners, or
+# no self-hosted runner online). It never fails the workflow; cancel the run to clear it.
+on:
+  push:
+    branches: [claude/focused-keller-jtmxe0]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: metal4-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          SELF_HOSTED: ${{ vars.METAL4_SELF_HOSTED }}
+        run: |
+          m='[{"name":"macos-26","runs_on":"macos-26"},{"name":"macos-26-xlarge","runs_on":"macos-26-xlarge"},{"name":"macos-15-xlarge","runs_on":"macos-15-xlarge"},{"name":"xcode-27","runs_on":"xcode-27"},{"name":"xcode-27-xlarge","runs_on":"xcode-27-xlarge"}'
+          if [ "$SELF_HOSTED" = "true" ]; then m="$m"',{"name":"self-hosted","runs_on":["self-hosted","macOS","ARM64"]}'; fi
+          echo "matrix={\"include\":$m]}" >> "$GITHUB_OUTPUT"
+  # COMPILE lane, gating: hosted macos-26 has the Metal 4 SDK and compiler whatever its GPU supports (this is what
+  # other projects' "Metal 4 CI" does, e.g. imgui builds its Metal 4 examples there and runs nothing).
+  compile:
+    name: compile (macos-26, MSL 4.0 + Metal 4 code paths)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: toolchain (newest installed Xcode, Rust from rust-toolchain.toml)
+        run: |
+          xc=$(ls -d /Applications/Xcode*.app | grep -vi beta | sort -V | tail -1)
+          echo "selecting $xc"; sudo xcode-select -s "$xc"
+          xcodebuild -version; echo "macOS SDK $(xcrun --sdk macosx --show-sdk-version)"
+          rustup toolchain install
+          rustc --version
+      - name: native shaders compile with -std=metal4.0 and link (metallib)
+        run: |
+          xcrun -sdk macosx metal -std=metal4.0 -c shaders/fastrender.metal -o fr.air
+          xcrun -sdk macosx metallib fr.air -o fr.metallib
+          ls -la fr.metallib
+      - name: build (includes the Metal 4 code paths)
+        run: cargo build --release
+      - name: every translated program compiles with -std=metal4.0 and links
+        run: |
+          ./target/release/fastrender xlat-dump tests/fixtures/xlat/programs xlat-out
+          n=0
+          for f in xlat-out/*.metal js/shader-port/samples/*.metal; do
+            xcrun -sdk macosx metal -std=metal4.0 -c "$f" -o x.air && xcrun -sdk macosx metallib x.air -o x.metallib || { echo "::error title=MSL 4.0::$f"; exit 1; }
+            n=$((n+1))
+          done
+          echo "::notice title=MSL 4.0 compile::$n translated programs + shaders/fastrender.metal compile with -std=metal4.0 and link"
+  # EXECUTE lane, never gating: what each runner's GPU really does with Metal 4.
+  metal4:
+    needs: plan
+    name: execute (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runs_on }}
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26   # latest LTS
+      - name: select the newest installed Xcode
+        run: |
+          # Apple's names: Xcode 26 / macOS 26 SDK is the first with Metal 4, Xcode 27 / macOS 27 SDK adds MSL 4.1
+          xc=$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          [ -n "$xc" ] || xc=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "selecting $xc"; sudo xcode-select -s "$xc"
+          { sw_vers; sysctl -n machdep.cpu.brand_string; xcodebuild -version; echo "macOS SDK $(xcrun --sdk macosx --show-sdk-version)"; } | tee toolchain.txt
+          bash .github/annotate.sh notice "toolchain (${{ matrix.name }})" toolchain.txt 12
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: |
+          command -v rustup >/dev/null || { curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none; echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"; export PATH="$HOME/.cargo/bin:$PATH"; }
+          rustup toolchain install
+          rustc --version; cargo --version
+      - name: offline shader compile, newest MSL the SDK accepts (metal -> metallib)
+        run: |
+          # Xcode 26+ ships the Metal compiler as a downloadable component; a no-op where it is already installed
+          xcrun -sdk macosx metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain || true
+          std=""
+          for v in metal4.1 metal4.0 metal3.2 metal3.1 metal3.0; do
+            if xcrun -sdk macosx metal -std=$v -c shaders/fastrender.metal -o fr.air 2> metal-$v.log; then std=$v; break; fi
+            echo "::warning title=MSL (${{ matrix.name }})::-std=$v not accepted: $(head -c 300 metal-$v.log | tr '\n' ' ')"
+          done
+          [ -n "$std" ] || { echo "no MSL version compiled shaders/fastrender.metal"; exit 1; }
+          xcrun -sdk macosx metallib fr.air -o fr.metallib
+          ls -la fr.air fr.metallib
+          echo "MSL_STD=$std" >> "$GITHUB_ENV"
+          echo "msl: shaders/fastrender.metal compiles with -std=$std (the translator still emits MSL 3.0 source)" | tee msl.txt
+          bash .github/annotate.sh notice "MSL (${{ matrix.name }})" msl.txt 5
+      - name: build
+        run: cargo build --release
+      - name: translated three.js programs compile with the same MSL version
+        run: |
+          ./target/release/fastrender xlat-dump tests/fixtures/xlat/programs xlat-out
+          n=0; for f in xlat-out/*.metal; do xcrun -sdk macosx metal -std=$MSL_STD -c "$f" -o x.air || exit 1; n=$((n+1)); done
+          xcrun -sdk macosx metallib x.air -o x.metallib
+          echo "$n translated programs compile with -std=$MSL_STD"
+      - name: probe (device, Metal 4 family, MTL4 queue / compiler / residency set, MetalFX for Metal 4)
+        id: probe
+        run: |
+          ./target/release/fastrender probe 2>&1 | tee probe-${{ matrix.name }}.txt
+          # creation attempted even without the family: tells "API present but unsupported" from "works"
+          FASTRENDER_PROBE_MTL4_FORCE=1 ./target/release/fastrender probe > probe-forced.txt 2>&1 || echo "forced probe exited $?" >> probe-forced.txt
+          { echo "--- forced object creation"; grep -E "^metal4 (new|frame)|exited" probe-forced.txt || echo "(nothing created)"; } | tee -a probe-${{ matrix.name }}.txt
+          { echo "### ${{ matrix.name }}"; echo '```'; cat toolchain.txt msl.txt probe-${{ matrix.name }}.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          bash .github/annotate.sh notice "Metal 4 probe (${{ matrix.name }})" probe-${{ matrix.name }}.txt 30
+          if grep -q "^metal4 supportsFamily(Metal4): true" probe-${{ matrix.name }}.txt; then echo "metal4=true" >> "$GITHUB_OUTPUT"; else echo "metal4=false" >> "$GITHUB_OUTPUT"; fi
+      - name: unit tests (headless)
+        run: cargo test --release
+      - name: selftests (Metal 3 path, Metal API validation)
+        env:
+          MTL_DEBUG_LAYER: "1"
+        run: |
+          set -o pipefail
+          ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000 | tee selftest.txt
+          ./target/release/fastrender selftest --path forward --upscale metalfx --scale 0.5 --size 640x400 --props 20000 | tee -a selftest.txt
+          bash .github/annotate.sh notice "selftest (${{ matrix.name }})" selftest.txt 12
+      # TODO(M-0, docs/research/perf-audit-2026-11.md): when the Metal 4 backend exists, replace the notice below
+      # with the selftests and goldens run as `fastrender selftest --backend metal4 ...` under MTL_DEBUG_LAYER=1.
+      - name: Metal 4 backend selftests + goldens (pending the backend)
+        if: steps.probe.outputs.metal4 == 'true'
+        run: echo "::notice title=Metal 4 backend (${{ matrix.name }})::this runner has the Metal 4 family; --backend metal4 does not exist yet, selftests ran on the Metal 3 path"
+      - name: no Metal 4 on this runner
+        if: steps.probe.outputs.metal4 != 'true'
+        run: echo "::notice title=Metal 4 backend (${{ matrix.name }})::no Metal 4 family on this runner, Metal 4 selftests skipped"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: metal4-probe-${{ matrix.name }}
+          path: |
+            probe-*.txt
+            toolchain.txt
+            msl.txt
+            selftest.txt
+            metal-*.log
+            fr.metallib

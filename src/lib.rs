@@ -25,4 +25,6 @@ pub mod mac_programs;
 #[cfg(target_os = "macos")]
 pub mod mac; // + its child module mac_fx.rs (MetalFX, internal-resolution targets)
 #[cfg(target_os = "macos")]
+pub mod mac_metal4_probe; // `fastrender probe`: what of Metal 4 this device really has
+#[cfg(target_os = "macos")]
 pub mod app;

@@ -12,9 +12,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 napi = { version = "3.16.2", default-features = false, features = ["napi9"] }
-napi-derive = "3.5"
-libc = "0.2"
-serde_json = "1"
+napi-derive = "3.7.1"
+libc = "0.2.191"
+serde_json = "1.0.154"
 # the renderer, protocol decoder and GLSL -> MSL translator (src/lib.rs of the main crate)
 fastrender = { path = "../../.." }
 
@@ -29,7 +29,7 @@ objc2-metal = "0.3.2"
 objc2-quartz-core = "0.3.2"
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.6.0"
 
 # glslang + SPIRV-Cross (C++, built by the -sys crates) optimised in debug/test builds too, as in the main crate
 [profile.dev.package.glslang-sys]
