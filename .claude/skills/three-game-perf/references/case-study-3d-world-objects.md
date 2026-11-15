@@ -11,10 +11,16 @@ The numbers behind the playbook, each with its harness and source. Street view, 
 | Per-pass split, 2940x1912 | `fastrender bench` | `a91eff3` | main 179.67 of 179.85 ms, shadow 0.19; at 0.5x + MetalFX main 60.19 | `bench-results/2026-11-15-m2-air-per-pass` |
 | After `trimLights` | `scripts/gpu-ablate.sh` | `a0816db` | main 12.46, frame 13.74 ms; `basic` 8.93 (geometry floor ~70 %) | `bench-results/2026-11-15-gpu-ablate-Mac14,2-at-a0816db` |
 | + instance culling, discard order | `scripts/gpu-ablate.sh` | `14f7b17` | `alllights` main 42.88 -> `none` 9.33, frame 11.04 ms, 61.5 fps offscreen | `bench-results/2026-11-15-gpu-ablate-Mac14,2-at-14f7b17` |
+| + patches 0004 (far LODs), 0005 (static freeze), review fixes | `scripts/gpu-ablate.sh` | `a05078d` | `none` main 7.73, frame 9.11 ms, JS 10.16 ms (JSC), 77 fps offscreen; `nostatic` JS 13.79; `nofarlod` 7.65 (= none) | `bench-results/2026-11-15-gpu-ablate-Mac14,2-at-a05078d` |
+| Native size 2560x1600 | `scripts/gpu-ablate.sh 2560x1600` | `9fb9e86` | `none` main 9.91 (1.3x the 1280x800 cost for 4x pixels; `alllights` 113.66 = 2.8x); `nofarlod` 11.17; `clusters` 9.12 | `bench-results/2026-11-15-gpu-ablate-Mac14,2-2560x1600-at-9fb9e86` |
+| Like-for-like in the real app | Electron 3-way, `--scenes world --variants "webgl fastrender"` | `9fb9e86` | **fastrender 110 fps (frame 7.5 ms, JS 5.0, GPU 8.3) vs WebGL 7.6 fps (GPU 158) at 1280x800; 108.9 vs 3.0 fps at 2560x1600**; MetalFX 0.5x barely helps (8.4 -> 7.6 ms) | `bench-results/2026-11-15-m2-air-world-native-at-9fb9e86` |
 
-The 56.9 ms (Electron, V8, on screen) and the 11.0 ms (CLI, JavaScriptCore, offscreen) are different harnesses:
-the like-for-like pair is `alllights` vs `none` in one ablation run (42.88 -> 9.33 ms main, 4.6x). The Electron
-3-way bench has not been rerun on the fixed code.
+Like-for-like pairs: `alllights` vs `none` in one ablation run (42.88 -> 9.33 ms main at `14f7b17`), and the two
+Electron 3-way runs (`e0fc63d` 17.6 fps -> `9fb9e86` 110 fps, same harness, same game copy). Game patches are applied
+to the one game copy every variant bundles, so WebGL ran 0004/0005 too (its JS ~18 -> 15.8 ms; GPU unchanged ~158):
+the WebGL-vs-fastrender gap is renderer-side. A ladder that splits it (`webgl`, `webgl-opt` with every
+WebGL-applicable trick, `fastrender-bare`, `fastrender`) is being added to bench-3way; check
+`docs/research/` for its results before quoting the split.
 
 ## Ablation at `14f7b17` (ms avg, Air)
 
@@ -31,8 +37,17 @@ the like-for-like pair is `alllights` vs `none` in one ablation run (42.88 -> 9.
 | `notransparent` / `noenv` / `nomaps` | ~1.7 | 8.62 / 8.63 / 8.74 | each under 0.75 ms |
 | `basic` | 3.23 | 5.87 | unlit floor: geometry + fill |
 
-Rows `nofarlod` and `nostatic` (patches 0004, 0005) did not exist at that commit: far LODs and the static freeze
-have node numbers only.
+Rows `nofarlod` and `nostatic` did not exist at that commit; see the `a05078d` and `9fb9e86` runs above.
+
+## What later Air runs taught
+
+- **Triangles sent are not GPU ms.** Patch 0004 cut sent triangles 5.05 -> 3.92 M with no change at 1280x800
+  (`nofarlod` 7.65 vs `none` 7.73, inside the ±0.3 ms noise: `lights0`, identical to `none`, read 7.59). At
+  2560x1600 it is worth ~1.3 ms. Off-screen and occluded far triangles are cheap on Apple's TBDR GPUs.
+- **The static freeze is a CPU win on hardware:** JS 13.79 -> 10.16 ms per frame (JavaScriptCore); the frame was
+  CPU-bound by then, so fps followed (60 -> 77 offscreen).
+- **Once per-fragment waste is gone the frame stops scaling with pixels:** 1.3x main for 4x pixels, so MetalFX
+  render scale stops paying. What remains is per-draw / per-vertex work (~2,000 draws) and JS.
 
 ## What the frame asked for (node census)
 
@@ -54,8 +69,10 @@ have node numbers only.
 
 ## Open at the time of writing
 
-- No hardware run of the far LODs, the static freeze, or half precision.
-- Screenshot MAE against WebGL was 11.66 on the Air vs 2.96 on CI; not investigated.
+- No hardware run of half precision (`scripts/half-ab.sh`).
+- The WebGL-applicable / native-only split (bench ladder) not yet run on hardware.
+- Screenshot MAE against WebGL is 11.7 on the Air (unchanged by all the fixes) vs 3.01 on CI: people and cars in
+  motion between captures plus a slight even brightness offset; not investigated further.
 - Remaining triangles, largest first: merged block meshes within 70 m (438k), window parts (331k), far crowd (137k).
 - The disk-full archive bug seen in the `14f7b17` run is fixed in `a05078d`.
 

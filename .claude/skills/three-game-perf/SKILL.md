@@ -38,6 +38,9 @@ game unchanged),
   bisected. A fix nobody can switch off cannot be measured later.
 - **Never compare across harnesses.** Electron (V8) and `fastrender bench` (JavaScriptCore, offscreen) differ in JS
   cost and presentation. A before/after pair comes from one script, one machine, one build.
+- **Separate generic wins from native ones.** Game patches and tricks any three renderer can use (hiding dark
+  lights, discard ordering via `setOpaqueSort`) must also be applied to the WebGL baseline (`webgl-opt` bench row),
+  so the reported gap is only Metal + native-only tricks. The user asks exactly this.
 - **Unmeasured is labelled unmeasured.** Write "node estimate", "CI ratio" or "not run on hardware" next to such a
   number, in notes and in the reply to the user.
 
@@ -143,5 +146,7 @@ For a game patch also `git am` every patch on a fresh checkout (`world-game.sh` 
   interleaved before believing either.
 - fps moves but GPU ms does not: wall-clock fps of an offscreen run is noisy; compare GPU ms.
 - A fix measured in node shows nothing on the Air: it targeted a bucket that is not the frame. Go back to step 2.
+  Example: far LODs cut sent triangles 22 % and saved 0 ms at 1280x800, because off-screen/occluded triangles are
+  cheap on a TBDR GPU; per-draw work and JS were the real remainder.
 - The picture changed: stop and diff against the golden (`node js/golden/diff.mjs a.png b.png diff.png`) before
   measuring anything else.

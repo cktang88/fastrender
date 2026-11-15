@@ -77,7 +77,9 @@ built incrementally in idle frames. The hidden twin needs a no-op `raycast` (thr
 
 **Switch.** Game global (`__chunkLod.on`), row `nofarlod`.
 
-**Effect.** node: triangles in view 2.25 -> 1.75 M. Not measured on hardware yet. Not exact: shapes move by up to
+**Effect.** node: triangles in view 2.25 -> 1.75 M. Air: nothing at 1280x800 (`nofarlod` 7.65 vs `none` 7.73 ms
+main, within noise), ~1.3 ms at 2560x1600 (11.17 vs 9.91). Lesson: far triangles that are off-screen or occluded
+cost little on a TBDR GPU; check the view's distance mix before expecting a win. Not exact: shapes move by up to
 the error bound; parts thinner than it vanish in the twin. The golden gate (MAE < 10) covers it.
 
 ## 4. Matrix walk over static objects (JS)
@@ -100,7 +102,8 @@ shows up to N-1 frames late unless the game calls `renderer.transformsChanged(ob
 **Switch.** Game: `__staticFreeze.on` / `?static=0`, row `nostatic`, `--ab game:__staticFreeze.on`.
 Renderer: the option itself, `--ab staticSubtrees`.
 
-**Effect.** node: `scene.updateMatrixWorld` 4.2-4.6 -> 0.75-1.0 ms, `render()` 13-14 -> 7.3-8.8 ms (patch);
+**Effect.** Air (JavaScriptCore CLI): JS per frame 13.79 -> 10.16 ms (`nostatic` vs `none`, `a05078d`).
+node: `scene.updateMatrixWorld` 4.2-4.6 -> 0.75-1.0 ms, `render()` 13-14 -> 7.3-8.8 ms (patch);
 `staticSubtrees` N=4: 12.7 -> 9.1 ms. Verify exactness with `--matrix-check N --walk vx,vz` (0 differing).
 
 ## 5. Discarding draws defeat hidden-surface removal
@@ -141,7 +144,8 @@ fog or defines toggled at runtime are the usual source; reduce them in the game 
 (renderer config). Not the same picture: report it as a separate row, never as like-for-like.
 
 **Effect.** Air, before `trimLights`: main 179.7 -> 60.2 ms at 2940x1912 (3.0x), 56.9 -> 30.0 ms GPU at 1280x800.
-Remeasure after the per-fragment fixes; the share that scales with pixels is smaller now.
+After the per-fragment fixes (Electron, `9fb9e86`): 8.4 -> 7.6 ms frame at 2560x1600 with MetalFX 0.5x, i.e. small;
+the frame no longer scales with pixels (1.3x main for 4x pixels). Keep it for heavier scenes or larger displays.
 
 ## 8. Merged static meshes drawn whole (cluster LOD + GPU culling, landing in steps)
 
@@ -153,13 +157,13 @@ meshoptimizer (`src/clusters.rs`), one compute dispatch per frame selects and cu
 draw the result. Opt-in per mesh with `mesh.userData.frClusters = true`; renderer option `clusters`
 (`true` | `'auto'` | `false`).
 
-**Switch.** `FASTRENDER_CLUSTERS=0`; ablation row `noclusters`.
+**Switch.** Off by default. `FASTRENDER_CLUSTERS=1` (or renderer option `clusters: true | 'auto'`); ablation rows
+`clusters` and `clusters-basic` in `scripts/gpu-ablate.sh` (compare with `none` / `basic`). Game side:
+`patches/3d-world-objects-0006-cluster-marks.patch` marks the merged block meshes and leaves their 0004 twins off
+when `globalThis.__frClusters` is set.
 
-**Status when this was written.** The note, the portable build and the kernel were on the branch; the renderer
-option in `js/fastrender-three.js`, the `noclusters` row in `scripts/gpu-ablate.sh` and the game patch (0006) were
-not. Check each with `grep -rn "frClusters\|noclusters" js scripts patches` before relying on it, and never quote
-an effect: nothing has been measured. Until it is complete the alternatives are entry 3 or splitting merged meshes
-(about 10 us of JS per extra draw).
+**Effect.** Air, 2560x1600 (`9fb9e86`): main 9.91 -> 9.12 ms (~0.8 ms). Small because triangle count is not the
+limit (see entry 3). Still in progress; check `docs/notes/clusters.md` for its current state.
 
 ## Checked and not worth it (on this game, this GPU)
 
