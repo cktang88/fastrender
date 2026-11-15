@@ -23,6 +23,11 @@ Bytes = V8 heap growth plus what GCs collected (`v8.GCProfiler`); the rest is th
 matrix math and does not grow with draws. JSC is bun's JavaScriptCore on Linux, the same engine family as the macOS
 host but not the host itself (`cargo run --release -- bench` needs Metal).
 
+On the real host (macOS CI, JavaScriptCore inside `fastrender bench --three js/dist/three-city.js`, 288 draws, 10
+material instances), JS per `render()`: golden step 4.06 → **1.98 ms**, API-validation runs 3.31–3.37 → **2.02–2.07 ms**,
+MetalFX run 3.53 → **2.71 ms** (runs 43694580347 → 43695176292; same commit otherwise). Golden MAE unchanged: three's
+programs 0.97, parity 0.84, parity VSM 0.96.
+
 What changed (details in `docs/notes/three-programs.md`, "Per-frame cost"):
 - garbage: draws written straight into the command buffer; field-wise geometry / instance / pipeline-state checks
   instead of key strings; a reused walk stack; scratch arrays never cleared with `length = 0` (V8 drops the backing
