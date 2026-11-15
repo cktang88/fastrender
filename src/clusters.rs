@@ -640,6 +640,26 @@ mod tests {
         draw_rec(&planes, &rows, eye, &proj, height, px, cone).expect("record")
     }
 
+    /// `cargo test --release clusters::tests::build_cost -- --ignored --nocapture`: what a merged block mesh costs
+    #[test]
+    #[ignore]
+    fn build_cost() {
+        let input = boxes(2800); // 33.6k triangles of separate flat-shaded boxes
+        let t0 = std::time::Instant::now();
+        let m = build(&input).expect("build");
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let mut out = Vec::new();
+        let per: Vec<String> = [20.0f32, 70.0, 150.0, 400.0]
+            .iter()
+            .map(|&dist| {
+                out.clear();
+                select(&m, &lod_only(camera(Vec3::new(40.0, 10.0, -dist), Vec3::new(40.0, 10.0, 0.0), 800.0, 1.0, false)), &mut out);
+                format!("{dist} m: {}", out.len() / 3)
+            })
+            .collect();
+        println!("{} triangles -> {} clusters, {} levels, {} KB, {ms:.1} ms; triangles drawn at 1 px of 800: {}", input.triangles(), m.clusters.len(), m.levels, m.bytes() >> 10, per.join(", "));
+    }
+
     /// no frustum, no cone: only the level of detail
     fn lod_only(mut d: DrawRec) -> DrawRec {
         d.planes = [[0.0, 0.0, 0.0, 1.0]; 6];
