@@ -488,6 +488,42 @@ pub fn apply(words: &[u32], mode: Mode) -> Result<Option<(Vec<u32>, Stats)>, Str
     Ok(Some((module, cx.stats)))
 }
 
+/// Per function of a module: (GLSL name, 32-bit, 16-bit) counts of float ALU results (arithmetic, GLSL.std.450
+/// maths, dot / matrix products), each weighted by the number of float components. Static, not weighted by loops.
+pub fn alu_census(words: &[u32]) -> Result<Vec<(String, u32, u32)>, String> {
+    let mut width: HashMap<u32, (u32, u32)> = HashMap::new(); // type -> (bits, components)
+    let mut names: HashMap<u32, String> = HashMap::new();
+    let mut out: Vec<(String, u32, u32)> = Vec::new();
+    for (at, n) in instructions(words)? {
+        let w = &words[at..at + n];
+        match w[0] & 0xffff {
+            5 => {
+                names.insert(w[1], literal_string(&w[2..]));
+            }
+            22 => {
+                width.insert(w[1], (w[2], 1));
+            }
+            23 | 24 => {
+                if let Some((bits, c)) = width.get(&w[2]).copied() {
+                    width.insert(w[1], (bits, c * w[3]));
+                }
+            }
+            54 => out.push((names.get(&w[2]).map(|s| s.split('(').next().unwrap_or("").to_string()).unwrap_or_default(), 0, 0)),
+            12 | 127 | 129 | 131 | 133 | 136 | 140..=148 => {
+                if let (Some((bits, c)), Some(f)) = (width.get(&w[1]), out.last_mut()) {
+                    if *bits == 16 {
+                        f.2 += c
+                    } else {
+                        f.1 += c
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 fn function(words: &[u32], insts: &[(usize, usize)], cx: &mut Cx, glsl_set: Option<u32>, out: &mut Vec<u32>) -> Result<(), String> {
     // 1. which local variables can be half: float based, and only loaded / stored, directly or through one chain
     let mut vars: HashSet<u32> = HashSet::new();
