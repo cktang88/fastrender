@@ -1,76 +1,146 @@
 ---
 name: three-game-perf
-description: Profile and optimize a three.js game running on fastrender (native Metal on Apple Silicon) — find what costs ms per frame (GPU main/shadow passes, JS), attribute it with ablations, then apply the proven fixes (dark-light trimming, instance culling hints, far LODs, static-subtree freezing, discard ordering) as renderer options or game patches, verified against golden screenshots. Use when asked to speed up, profile, or port-and-optimize a three.js game, or when a game is slow on a base M-series Mac.
+description: Measures, attributes and fixes frame-time problems of three.js games and scenes running on fastrender (this repo's native Metal renderer for Apple Silicon) - per-pass GPU ms, feature ablations, JS profiling, then proven fixes (dark-light trimming, per-instance culling, far LODs, static-subtree freezing, discard ordering, async shader compile, MetalFX render scale), each checked against golden screenshots. Use whenever work in this repo touches performance - low fps, slow or long frames, frame time, lag, stutter, hitches, shader-compile stalls, profiling, benchmarking, optimizing, "why is it slow", GPU-bound or JS/CPU-bound frames, draw calls, triangle counts, overdraw, lights, shadows, updateMatrixWorld cost, WebGL vs WebGPU vs Metal comparisons, M1/M2/M3 MacBook Air targets - and when porting or bundling a three.js game to fastrender, reading bench-results/, adding an ablation row or bench flag, or asking the user for a hardware run, even if the word "performance" is never used.
 ---
 
 # Optimizing a three.js game on fastrender
 
-This is the playbook that took the real game (3d-world-objects, a Manhattan city) on an M2 Air from 17.6 fps
-(57 ms GPU) to ~60 fps (11 ms GPU, same picture). Follow the order: measure, attribute, fix the biggest cost, re-measure.
-Background: `docs/notes/gpu-cost.md`, `docs/notes/three-programs.md`, `docs/LOG.md`, `bench-results/*/README.md`.
+A loop: **measure -> attribute -> fix the largest bucket -> verify -> record**. It took the first real game
+(cktang88/3d-world-objects, a Manhattan street scene) on a base M2 Air from a 43 ms main pass to 9 ms with the same
+picture. The loop is general; the scripts are still wired to that game (how to point them at another one is in
+`references/harness.md`).
 
-## Rules
-- **Only real hardware numbers decide.** CI's macOS runners are a paravirtual GPU: use them for goldens, Metal
-  validation and in-process A/B ratios, never for absolute ms. Ask the user to run the one-command scripts on their
-  Mac and push `bench-results/`.
-- **Work on the biggest item first.** A 0.3 ms CPU win is noise when the GPU takes 50 ms. Say which bucket (GPU main,
-  GPU shadow, JS, native encode, compile hitches) the fix targets and how many ms it is.
-- **Same picture.** Prefer exact transformations (bit-identical output). Anything else must stay within the golden
-  gates (real game MAE < 10 vs browser three; city < 1.0) and be switchable off.
-- **Every fix gets an off switch and an ablation row**, so one hardware run shows its effect.
-- Game repos are often read-only: game changes ship as `git format-patch` files in `patches/<game>-NNNN-*.patch`,
-  applied in order by `host/electron/scripts/world-game.sh`; verify with `git am` on a fresh checkout + the game's
-  own `tsc` and tests, and document each in `patches/README.md`.
+## Reference files (read the one the step needs)
 
-## 1. Measure (on the user's Mac)
-- Three-way (WebGL vs WebGPU vs fastrender) in Electron: `host/electron/scripts/bench-3way.sh` (`--scenes world
-  --variants "webgl fastrender" --sizes 1280x800 --no-vsync-pass` for a short run). Check screenshot MAE in the report:
-  a variant with a large MAE (e.g. WebGPURenderer dropping `onBeforeCompile`/ShaderMaterials) is not comparable.
-- Per-pass GPU ms: any `fastrender bench --three <bundle> ... --gpu-passes 1` → `gpu passes (targets, shadow, main,
-  upscale)`; `three frame cost` gives JS / native apply / prepare / encode.
-- One-time setup on the Mac: `xcodebuild -downloadComponent MetalToolchain` (precompiled built-in shaders).
+- `references/harness.md` - every command and flag: bundling a game, the node harness, the native bench, the
+  Electron 3-way bench, the ablation script, patches for read-only game repos, setting up a new game.
+- `references/fix-catalogue.md` - per problem: how to detect it in any game, the fix, its off switch, what it
+  bought, plus what was checked and rejected and the pitfalls hit on the way.
+- `references/case-study-3d-world-objects.md` - the measured numbers with harness, commit and source file, to
+  quote or compare against.
 
-## 2. Attribute
-- `scripts/gpu-ablate.sh [WxH]`: one row per switched-off feature (`FASTRENDER_ABLATE`, applied in
-  `js/examples/world-objects.three.mjs`): `alllights lights0 nopoint nolights notransparent noenv nomaps lambert basic`,
-  fix rows (`nostatic nofarlod noclusters`) and debug masks (`none@N`). Read each row's `main` against `none`;
-  `basic` (unlit) is the geometry/raster floor. Add rows for new fixes there; don't write a second script.
-- Without a Mac, in node (V8; ratios only): `node js/test/world-objects.node.mjs <game dir>` with `--profile` (top JS
-  functions), `--matrix-stats`, `--mesh-census 30` (triangles by mesh/material/distance, instances in view),
-  `--ab <renderer prop | game:<global>.<key>>` (in-run A/B), `--matrix-check N`, `--walk vx,vz`, `--ablate`.
-  `js/gpu-census.js` prints lights in three's light state, shadow passes, lines of `main()` per lit program.
-- Typical findings, in the order they paid off: hidden per-fragment cost (lights), triangles drawn off-screen or too
-  detailed, JS matrix walks over static objects, compile hitches.
+Repo background, when a step needs depth: `docs/notes/gpu-cost.md` (GPU side), `docs/notes/three-programs.md`
+("Static transforms", light state), `docs/notes/real-game-3d-world-objects.md` (running a game unchanged),
+`docs/LOG.md` (newest first), `bench-results/*/README.md` (hardware runs).
 
-## 3. Proven fixes (check each against the game)
-| Problem | Fix | Where | Effect on the M2 Air game |
-|---|---|---|---|
-| Games pad the light list with intensity-0 lights to keep shader variants fixed; three unrolls a full BRDF per light for every lit fragment | `trimLights` (default on): point/spot lights with colour×intensity 0 leave the light state; counts step 0 1 2 3 4 6 8 12 16…; `lightHold` compiles the next variant in the background before switching | `js/three-programs.js` | main 42.9 → 9.3 ms (exact) |
-| InstancedMesh drawn whole when most instances are off-screen | per-instance frustum culling as runs of consecutive instances + base instance; auto only for non-displacing vertex stages; games vouch for others with `mesh.userData.frInstanceCull = true \| radius` | `src/mac_three.rs`, `bindlist::instance_split_allowed`, game patch | ~2.4 ms main |
-| Distant meshes far too detailed (cars, merged blocks) | LOD twins built at load with meshoptimizer (error ≤ 6–7 cm), hysteresis on switch distance; hidden twin gets a no-op `raycast` | game patch (0004) | triangles in view 2.25 → 1.75 M |
-| Static geometry in merged meshes drawn whole | native cluster LOD + GPU cull (`userData.frClusters`) | `docs/notes/clusters.md` | in progress |
-| `updateMatrixWorld` over tens of thousands of objects that never move (often ~half of JS) | game patch freezing placed static subtrees (own `updateMatrixWorld`, `Object3D.add` wrap marks dirty, audit net); renderer opt-in `staticSubtrees` (≤ N-1 frames delay) where a patch isn't possible | game patch (0005), `js/fastrender-three.js` | render() JS 13–14 → 7–9 ms (node) |
-| Discarding (alphaTest) opaque draws break TBDR hidden-surface removal | draw them last, nearest first | sort key in `src/bindlist.rs` | small |
-| Shader compile stalls at launch / first view | async compile off the render thread, pipeline manifest + binary archive for the next launch | `src/pipeline_manifest.rs`, `src/mac_programs.rs` | warm first frame ~4x sooner |
-| Fill-bound at native resolution | render scale 0.5 + MetalFX (`--scale 0.5 --upscale metalfx`) | renderer config | main ~3x less |
+## Ground rules, and why
 
-Checked and usually NOT worth it on M2: half precision in shaders (`--half`, no measurable win), Metal 4 encode path
-(~0.3 ms CPU), depth prepass (few discard draws), shadow work when maps are cached.
+- **Only the user's Mac gives absolute ms.** This session runs on Linux; CI's macOS runners have a paravirtual GPU
+  (the real game's shadow passes: 4-5 ms there, 0.2-1.7 ms on the Air). Use node for counts and JS ratios, CI for
+  goldens, Metal validation and in-process A/B ratios, and the user's Mac for everything quoted in ms.
+- **Largest bucket first.** Name the bucket (GPU main, GPU shadow, JS, native prepare/encode, compile hitch) and its
+  ms before changing code. A 0.3 ms CPU win is noise under a 50 ms GPU frame: here the Metal 4 encode path was
+  paused for that reason, and one hidden cost (27 dark lights) turned out to be 78 % of the main pass.
+- **Same picture.** Prefer exact transformations (bit-identical frames). Anything else stays inside the golden gates
+  (real game MAE < 10 against the browser reference, three-city < 1.0) and says in its note what moves and by how much.
+- **Every fix has an off switch and an ablation row**, so one hardware run prices it and a regression can be
+  bisected. A fix nobody can switch off cannot be measured later.
+- **Never compare across harnesses.** Electron (V8) and `fastrender bench` (JavaScriptCore, offscreen) differ in JS
+  cost and presentation. A before/after pair comes from one script, one machine, one build.
+- **Unmeasured is labelled unmeasured.** Write "node estimate", "CI ratio" or "not run on hardware" next to such a
+  number, in notes and in the reply to the user.
 
-## 4. Verify and report
-- `cargo test`, `DOCS_RS=1 cargo check --release --target aarch64-apple-darwin`, `cd js && npm test`, game tests for
-  patches. Push to the working branch; read macOS CI annotations
-  (`GET https://api.github.com/repos/<owner>/<repo>/check-runs/<job_id>/annotations`): goldens, Metal API validation,
-  `world-objects GPU cost A/B`, `compile launch`.
-- Write numbers (with commit hash and harness) to `docs/LOG.md` and the relevant `docs/notes/*.md`; mark anything not
-  run on real hardware as unverified.
-- Give the user the exact hardware command and which rows to compare.
+## Workflow
 
-## Pitfalls seen
-- Metal's binary archive serialise leaves a ~1.2 GB `com.apple.gpuarchiver` scratch folder per call; retries filled a
-  Mac's disk (fixed in `a05078d`). Any retry loop around Metal tooling must clean up and be bounded.
-- Light-count steps change every lit program: with async compile the lit scene can vanish for frames unless the old
-  variant is held (`lightHold`) or the pipeline waited for.
-- Index-based native state (shadow maps by `(kind, index)`) breaks when trimming reorders lists: key by stable ids.
-- `matrixWorldAutoUpdate = false` in r187 still walks children; skip the subtree by overriding its `updateMatrixWorld`.
-- CI `concurrency` must not cancel in-progress runs when many agents push, or no run ever finishes.
+Copy this list and tick it off:
+
+```
+- [ ] 1. Setup: the game bundles and boots in node; a golden exists
+- [ ] 2. Measure: which bucket is the frame? (hardware numbers, or ask for them)
+- [ ] 3. Attribute: ablation rows + censuses name the cause
+- [ ] 4. Fix: renderer option or game patch, with an off switch and an ablation row
+- [ ] 5. Verify: tests, goldens, exactness checks, CI annotations
+- [ ] 6. Record: docs/LOG.md, the relevant docs/notes/*.md, patches/README.md; hand the user one command
+```
+
+### 1. Setup
+
+For 3d-world-objects everything exists: `bash host/electron/scripts/world-game.sh` fetches the game at the pinned
+commit and applies `patches/` in order. For another game follow "A new game" in `references/harness.md`: bundle it
+with `WebGLRenderer` swapped for `FastRenderer({ programs: 'three' })`, boot it headless in node, read
+`renderer.info.unsupported` (what the frame needs that fastrender lacks; fix or accept those first, a wrong picture
+makes every timing meaningless), then make a browser golden for one pinned view.
+
+### 2. Measure
+
+Ask the user for a hardware run when no current one exists in `bench-results/` (folder names carry the commit; a
+run on older code prices older code). Give one command, say how long it takes and what to push:
+
+```bash
+git pull && scripts/gpu-ablate.sh          # ~1 min per row, 19 rows; then commit and push the bench-results/ folder it prints
+```
+
+Read, per run: `gpu passes ... targets, shadow, main, upscale; frame` (GPU ms per pass), `three frame cost: render()
+CPU (JS, native apply, prepare, encode), GPU, draws` and `draws per pass`. Then decide:
+
+| Observation | The frame is | Go to |
+|---|---|---|
+| GPU frame ms ~ wall frame ms, `main` dominates | GPU-bound in the main pass | step 3, GPU rows |
+| `main` scales with pixel count (0.5x scale cuts it ~3x) | fill / fragment-bound | lights, shader rows, render scale |
+| `basic` (unlit) row is still most of `main` | geometry-bound (vertex, tiling) | triangle census, instances, LODs |
+| `shadow` is several ms | shadow passes re-rendered | shadow `autoUpdate` / `needsUpdate`, caster count |
+| JS ms is a large share once GPU is fixed | JS-bound | `--profile`, `--matrix-stats` |
+| long first frames, or frames missing after a scene change | compile hitch | compile / light-hold entries in the catalogue |
+
+### 3. Attribute
+
+Without a Mac (counts and JS, no GPU ms):
+
+```bash
+node js/test/world-objects.node.mjs <game dir> --gpu-census - --mesh-census 30 --matrix-stats --profile
+```
+
+- `--gpu-census -`: lights in three's light state and how many are zero-intensity, shadow maps rendered this
+  frame, draws per program, lines of `main()` per lit draw. Zero-intensity lights > 0, or dozens of lights, means
+  per-fragment waste.
+- `--mesh-census N`: triangles sent vs in view per material | mesh, by distance band. Sent >> in view means
+  instances or merged meshes drawn whole; many triangles in far bands means missing LODs.
+- `--matrix-stats`: `staticShare`, `updateMatrixWorldMs` vs `...StaticSubtreesSkipped`. A high static share with a
+  large gap means the matrix walk is paying for objects that never move.
+- `--profile`: top JS functions by self time, ms per frame.
+
+On hardware: `scripts/gpu-ablate.sh` prints one row per feature switched off; read each row's `main` against
+`none`. Row meanings are in `references/harness.md`. Add a row there for a new fix instead of writing a second
+script, so one run still prices everything.
+
+### 4. Fix
+
+Look the finding up in `references/fix-catalogue.md` before designing anything: most games repeat the same few
+problems, and each entry says where the existing fix lives and how to switch it. Choose where the fix goes:
+
+- **Renderer** (`js/*.js`, `src/*.rs`) when it is exact for every game, or opt-in when it has a price.
+- **Game patch** when only the game knows the fact (bounds of displaced instances, which subtrees are static, LOD
+  distances). Game repos are usually read-only here, so a game change ships as a `git format-patch` file in
+  `patches/` (workflow in `references/harness.md`).
+
+### 5. Verify
+
+Run until all pass, fixing and re-running on failure:
+
+```bash
+cargo test
+DOCS_RS=1 cargo check --release --target aarch64-apple-darwin    # type-checks the macOS code on Linux
+(cd js && npm test)
+node js/test/world-objects.node.mjs <game dir> --matrix-check 20 --walk 3,0   # only for transform changes: must report 0 differing
+```
+
+For a game patch also `git am` every patch on a fresh checkout (`world-game.sh` does it) and run the game's own
+`tsc --noEmit` and tests. Then push and read the macOS run's check-run annotations (GitHub API
+`/repos/<owner>/<repo>/check-runs/<id>/annotations`, or the GitHub tools): golden MAE notices, Metal API validation,
+`world-objects GPU cost A/B`, `compile launch`. A run takes long; do not cancel one in progress.
+
+### 6. Record and hand over
+
+- `docs/LOG.md`: a dated entry at the top with what was tested, how (harness, commit) and the result.
+- The relevant `docs/notes/*.md`, and `patches/README.md` for a patch (what, how verified, what is not verified).
+- Reply to the user with: the bucket and its ms, the fix and its switch, what is measured vs estimated, and the
+  exact hardware command plus the rows to compare (for example "`nofarlod` minus `none` is what the LODs save").
+
+## When a result surprises
+
+- A row that should equal `none` does not: the run is noisy (thermal, background apps) or the switch leaks. Rerun
+  interleaved before believing either.
+- fps moves but GPU ms does not: wall-clock fps of an offscreen run is noisy; compare GPU ms.
+- A fix measured in node shows nothing on the Air: it targeted a bucket that is not the frame. Go back to step 2.
+- The picture changed: stop and diff against the golden (`node js/golden/diff.mjs a.png b.png diff.png`) before
+  measuring anything else.
