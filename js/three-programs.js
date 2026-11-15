@@ -203,7 +203,29 @@ function parsePath(name) {
   return steps;
 }
 
-/** writes element components of a three.js value (number, boolean, Vector, Color, Matrix, array, typed array) */
+// Writers compare-and-set (the analogue of the per-uniform value caches in three's WebGLUniforms, which skip
+// gl.uniform* when the value is unchanged): a block kept from the previous frame is only touched where a value changed,
+// and `_changed` says whether anything did. Components go through the Float64Array `_v` first, so that doubles read
+// from Color / Vector / Matrix fields are never passed as (boxed) arguments: packing allocates nothing.
+let _changed = 0;
+const _v = new Float64Array(16);
+/** _v[from .. from+n) -> f32[i ..], as float32; +0 and -0 differ */
+function flushF(f32, i, from, n) {
+  for (let k = 0; k < n; k++) {
+    const y = Math.fround(_v[from + k]), o = f32[i + k];
+    if (o !== y || (y === 0 && 1 / o !== 1 / y)) { f32[i + k] = y; _changed = 1; }
+  }
+}
+/** _v[0 .. n) -> u32[i ..] as a Uint32Array store converts them (true 1, false 0, -1 0xffffffff, NaN 0) */
+function flushI(u32, i, n) {
+  for (let k = 0; k < n; k++) { const b = _v[k] >>> 0; if (u32[i + k] !== b) { u32[i + k] = b; _changed = 1; } }
+}
+function zero(u32, i, n) { for (let k = i; k < i + n; k++) if (u32[k] !== 0) { u32[k] = 0; _changed = 1; } }
+
+/**
+ * writes element components of a three.js value (number, boolean, Vector, Color, Matrix, array, typed array):
+ * write(v, f32, u32, w) with f32 and u32 views of one buffer.
+ */
 function makeWriter(type, count, stride, matrixStride) {
   const n = COMPONENTS[type];
   if (!n) throw new Error(`three-programs: unknown uniform type ${type}`);
@@ -211,8 +233,16 @@ function makeWriter(type, count, stride, matrixStride) {
   const isMat = type[0] === 'm';
   const cols = isMat ? Number(type[3]) : 1, rows = cols;
   const ms = matrixStride >> 2, st = stride >> 2;
+  const elemWords = isMat ? (cols - 1) * ms + rows : n;
   // component j of element e from value v (v already resolved to the leaf's value)
   return function write(v, f32, u32, w) {
+    // a number / boolean: no property loads on a primitive
+    const tv = typeof v;
+    if (tv === 'number' || tv === 'boolean') {
+      _v[0] = v;
+      for (let e = 0; e < count; e++) if (integer) flushI(u32, w + e * st, 1); else flushF(f32, w + e * st, 0, 1);
+      return;
+    }
     for (let e = 0; e < count; e++) {
       const base = w + e * st;
       let src = v, flatOff = -1;
@@ -221,51 +251,63 @@ function makeWriter(type, count, stride, matrixStride) {
         if (typeof x0 === 'number' || typeof x0 === 'boolean') flatOff = e * n; // flat array of numbers
         else { // array of Vector / Color / Matrix (or of arrays)
           src = v[e];
-          if (src === undefined || src === null) continue;
+          if (src === undefined || src === null) { zero(u32, base, elemWords); continue; }
           if (typeof src.length === 'number') flatOff = 0;
         }
       }
       if (flatOff < 0 && src.elements !== undefined) { src = src.elements; flatOff = 0; }
       if (isMat) {
-        for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++) f32[base + c * ms + r] = src[flatOff + c * rows + r];
+        for (let k = 0; k < cols * rows; k++) _v[k] = src[flatOff + k];
+        for (let c = 0; c < cols; c++) flushF(f32, base + c * ms, c * rows, rows);
         continue;
       }
-      if (n === 1) {
-        const x = flatOff >= 0 ? src[flatOff] : src;
-        if (integer) u32[base] = x === true ? 1 : x === false ? 0 : x; else f32[base] = x;
-        continue;
-      }
-      let a, b, c, d;
-      if (flatOff >= 0) { a = src[flatOff]; b = src[flatOff + 1]; c = src[flatOff + 2]; d = src[flatOff + 3]; }
-      else if (src.x !== undefined) { a = src.x; b = src.y; c = src.z; d = src.w; }
-      else if (src.r !== undefined) { a = src.r; b = src.g; c = src.b; d = src.a ?? 1; }
-      else continue;
-      if (integer) {
-        u32[base] = a === true ? 1 : a === false ? 0 : a; u32[base + 1] = b === true ? 1 : b === false ? 0 : b;
-        if (n > 2) u32[base + 2] = c === true ? 1 : c === false ? 0 : c;
-        if (n > 3) u32[base + 3] = d === true ? 1 : d === false ? 0 : d;
-      } else {
-        f32[base] = a; f32[base + 1] = b;
-        if (n > 2) f32[base + 2] = c;
-        if (n > 3) f32[base + 3] = d;
-      }
+      if (flatOff >= 0) for (let k = 0; k < n; k++) _v[k] = src[flatOff + k];
+      else if (n === 1) _v[0] = src;
+      else if (src.x !== undefined) { _v[0] = src.x; _v[1] = src.y; if (n > 2) _v[2] = src.z; if (n > 3) _v[3] = src.w; }
+      else if (src.r !== undefined) { _v[0] = src.r; _v[1] = src.g; if (n > 2) _v[2] = src.b; if (n > 3) _v[3] = src.a ?? 1; }
+      else { zero(u32, base, n); continue; }
+      if (integer) flushI(u32, base, n); else flushF(f32, base, 0, n);
     }
   };
 }
 
-/** per-layout setter list, compiled once (cached on the layout object) */
+/** words a member spans in the block (to the end of its last element) */
+function memberWords(m) {
+  const isMat = m.type[0] === 'm', k = isMat ? Number(m.type[3]) : 1;
+  const elem = isMat ? (k - 1) * ((m.matrixStride || 16) >> 2) + k : (COMPONENTS[m.type] || 1);
+  return ((m.count || 1) - 1) * ((m.stride || 0) >> 2) + elem;
+}
+
+/**
+ * per-layout setter list, compiled once (cached on the layout object). The leaves wired from three's lights state
+ * (`lightLeaves`: the same values for every lit material in a frame) are packed once per program per frame and copied
+ * into each block as the merged word ranges `lightRanges` (start, end pairs); the others are `matLeaves`.
+ */
 export function compileLayout(layout) {
   let c = _compiled.get(layout);
   if (c) return c;
   const leaves = layout.members.map((m) => {
     const steps = parsePath(m.name);
-    return { root: steps[0], steps: steps.slice(1), offset: m.offset >> 2, write: makeWriter(m.type, m.count || 1, m.stride || 0, m.matrixStride || 16) };
+    return { root: steps[0], steps: steps.slice(1), offset: m.offset >> 2, span: memberWords(m), light: LIGHT_ROOTS.has(steps[0]), write: makeWriter(m.type, m.count || 1, m.stride || 0, m.matrixStride || 16) };
   });
   const textures = (layout.textures || []).map((t) => {
     const steps = parsePath(t.name);
     return { name: t.name, root: steps[0], steps: steps.slice(1), shadow: SHADOW_KIND[steps[0]] || 0 };
   });
-  c = { size: layout.size, words: Math.ceil(layout.size / 4), leaves, textures, uses: new Set(leaves.map((l) => l.root)) };
+  const indices = (keep) => Int32Array.from(leaves.map((l, i) => (keep(l) ? i : -1)).filter((i) => i >= 0));
+  // light leaves in offset order, merged into word ranges; a range never runs across a non-light leaf
+  const ranges = [];
+  let open = false;
+  for (const l of [...leaves].sort((a, b) => a.offset - b.offset)) {
+    if (!l.light) { open = false; continue; }
+    const last = ranges[ranges.length - 1];
+    if (open) last[1] = Math.max(last[1], l.offset + l.span);
+    else { ranges.push([l.offset, l.offset + l.span]); open = true; }
+  }
+  c = {
+    size: layout.size, words: Math.ceil(layout.size / 4), leaves, textures, uses: new Set(leaves.map((l) => l.root)),
+    allLeaves: indices(() => true), matLeaves: indices((l) => !l.light), lightLeaves: indices((l) => l.light), lightRanges: Int32Array.from(ranges.flat()),
+  };
   _compiled.set(layout, c);
   return c;
 }
@@ -295,16 +337,21 @@ export function packUniforms(layout, values, f32, u32, byteOffset = 0, fallback 
 
 /** packUniforms with the holders already resolved (holders[i] for leaf i): what the per-frame path uses */
 export function packHolders(compiled, holders, f32, u32, byteOffset) {
-  const w0 = byteOffset >> 2;
-  const leaves = compiled.leaves;
-  for (let i = 0; i < leaves.length; i++) {
-    const h = holders[i];
-    if (h === undefined || h === null) continue;
-    const l = leaves[i];
-    let v = h.value;
+  packLeaves(compiled, compiled.allLeaves, holders, f32, u32, byteOffset >> 2);
+}
+
+/**
+ * the leaves `list` (leaf indices) from holders[leaf index] into u32 at word w0, compare-and-write. A leaf without a
+ * value is zeroed (what a block packed into zeroed memory holds). Sets `_changed` when any word changed.
+ */
+function packLeaves(c, list, holders, f32, u32, w0) {
+  const leaves = c.leaves;
+  for (let k = 0; k < list.length; k++) {
+    const i = list[k], l = leaves[i], h = holders[i];
+    let v = h === undefined || h === null ? null : h.value;
     for (let s = 0; s < l.steps.length && v !== undefined && v !== null; s++) v = v[l.steps[s]];
-    if (v === undefined || v === null) continue;
-    l.write(v, f32, u32, w0 + l.offset);
+    if (v === undefined || v === null) zero(u32, w0 + l.offset, l.span);
+    else l.write(v, f32, u32, w0 + l.offset);
   }
 }
 
@@ -331,6 +378,7 @@ const LIGHT_WIRING = [
   // r170 kept the shadow map arrays in the material uniforms; r187 sets them on the program
   ['directionalShadowMap', 'directionalShadowMap'], ['spotShadowMap', 'spotShadowMap'], ['pointShadowMap', 'pointShadowMap'], ['sunShadowMap', 'sunShadowMap'],
 ];
+const LIGHT_ROOTS = new Set(LIGHT_WIRING.map(([u]) => u));
 // uniforms that depend on the object being drawn (besides the FrObject matrices): their blocks are per object
 const OBJECT_SPECIFIC = ['bindMatrix', 'bindMatrixInverse', 'boneTexture', 'morphTargetBaseInfluence', 'morphTargetInfluences', 'morphTargetsTexture', 'morphTargetsTextureSize', 'morphTexture', 'batchingTexture', 'batchingIdTexture', 'batchingColorTexture', 'center'];
 
@@ -362,6 +410,7 @@ export class ThreePrograms {
     if (extensions.init) extensions.init();
     const capabilities = this.capabilities = new WebGLCapabilities(gl, extensions, { logarithmicDepthBuffer: !!renderer.logarithmicDepthBuffer }, { convert: () => 0 });
     this.properties = new WebGLProperties();
+    this._ms = new WeakMap(); // material -> our per-material state (also properties.get(material).frState)
     this.clipping = new WebGLClipping(this.properties);
     // a view of the FastRenderer with the few WebGLRenderer members three's internals read
     const facade = this.facade = Object.create(renderer);
@@ -391,8 +440,18 @@ export class ThreePrograms {
       isOrthographic: { value: false }, logDepthBufFC: { value: 0 }, toneMappingExposure: { value: 1 },
     };
     this._camPos = { x: 0, y: 0, z: 0 };
-    this._epoch = 0; this._frameKey = '';
+    this._epoch = 0; this._frameKey = [];
     this._frameNo = 0;
+    // the light uniforms every lit program reads, wired from lights.state each frame (as WebGLRenderer.getProgram
+    // wires them into each material's uniforms): one { value } holder per uniform name
+    this._lightHolders = {};
+    for (const [u] of LIGHT_WIRING) this._lightHolders[u] = { value: null };
+    // scene fog as of the last frame: refreshFogUniforms is skipped for a material whose fog values are current
+    this._fogKey = []; this._fogStamp = 0;
+    this._size = { x: 1, y: 1, set(x, y) { this.x = x; this.y = y; return this; } };
+    this._casters = []; this._casterPool = []; this._nCasters = 0;
+    /** per frame: uniform blocks refreshed, and how many of them changed (any word) since the previous frame */
+    this.stats = { blocks: 0, changed: 0, lightPrograms: 0 };
     this._transmissionRT = { texture: { isFastRenderTransmission: true }, width: 1, height: 1 };
     this._emptyScene = { isScene: true, fog: null, environment: null };
   }
@@ -401,13 +460,16 @@ export class ThreePrograms {
   beginFrame(scene, camera, lights) {
     const r = this.facade;
     this._frameNo++;
+    this.stats.blocks = 0; this.stats.changed = 0; this.stats.lightPrograms = 0;
     this.scene = scene; this.camera = camera;
     // shadow matrices: WebGLShadowMap would update these while rendering shadow maps (native renders them)
-    const shadows = this.shadows; shadows.length = 0;
+    const shadows = this.shadows;
+    let ns = 0;
     for (let i = 0; i < lights.length; i++) {
       const l = lights[i];
-      if (l.castShadow && l.shadow) { shadows.push(l); if (r.shadowMap.enabled) updateShadow(l, camera); }
+      if (l.castShadow && l.shadow) { shadows[ns++] = l; if (r.shadowMap.enabled) updateShadow(l, camera); }
     }
+    if (shadows.length !== ns) shadows.length = ns; // (not cleared with length = 0: V8 would drop its backing store)
     if (!HAS_PCF_SOFT && r.shadowMap.enabled && r.shadowMap.type === 2 && shadows.length) r.shadowMap.type = 1;
     this.lightList = lights;
     this.lights.setup(lights);          // sorts `lights` in place in three's order
@@ -425,47 +487,64 @@ export class ThreePrograms {
     f.isOrthographic.value = camera.isOrthographicCamera === true;
     f.toneMappingExposure.value = r.toneMappingExposure;
     if (this.capabilities.logarithmicDepthBuffer) f.logDepthBufFC.value = 2.0 / (Math.log(camera.far + 1.0) / Math.LN2);
-    const s = r.getSize ? r.getSize() : { x: 1, y: 1 };
+    const s = (r.getSize && r.getSize(this._size)) || this._size;
     this._height = (s.y || 1) * (r.getPixelRatio ? r.getPixelRatio() : 1);
     this._transmissionRT.width = s.x; this._transmissionRT.height = s.y;
+    const state = this.lights.state, lh = this._lightHolders;
+    for (let i = 0; i < LIGHT_WIRING.length; i++) lh[LIGHT_WIRING[i][0]].value = state[LIGHT_WIRING[i][1]];
     // everything that can change a program for every material: bump the epoch when it changes
     const fog = scene.fog || null;
-    const key = `${this.lights.state.version}|${fog ? fog.uuid + (fog.isFogExp2 ? 'e' : 'l') : ''}|${scene.environment ? scene.environment.uuid : ''}|${r.toneMapping}|${r.outputColorSpace}|${r.shadowMap.enabled}|${r.shadowMap.type}|${this.clipping.numPlanes}|${this.clipping.numIntersection}`;
-    if (key !== this._frameKey) { this._frameKey = key; this._epoch++; }
+    if (changed(this._frameKey, state.version, fog, fog !== null && fog.isFogExp2 === true, scene.environment || null, r.toneMapping, r.outputColorSpace,
+      r.shadowMap.enabled, r.shadowMap.type, this.clipping.numPlanes, this.clipping.numIntersection)) this._epoch++;
+    // what refreshFogUniforms reads (fog values; the colour space follows the output colour space)
+    if (fog !== null && changed(this._fogKey, fog, fog.color.r, fog.color.g, fog.color.b, fog.near, fog.far, fog.density, r.outputColorSpace, 0, 0)) this._fogStamp++;
   }
 
   /** shadow casters in three's lights-state order: [{ light, kind: 'directionalShadowMap'|..., index }] */
   shadowCasters() {
-    const out = [];
-    const n = { dir: 0, spot: 0, point: 0, sun: 0 };
-    for (const l of this.lightList || []) {
+    // one array and its records are reused every frame (valid until the next call)
+    const out = this._casters, list = this.lightList;
+    this._nCasters = 0;
+    let dir = 0, spot = 0, point = 0, sun = 0;
+    for (let i = 0; list && i < list.length; i++) {
+      const l = list[i];
       // indices follow WebGLLights.setup: shadow casters are sorted first within each light type
-      if (l.isSunLight) { if (l.castShadow) out.push({ light: l, kind: 'sunShadowMap', index: n.sun++ }); }
-      else if (l.isDirectionalLight) { if (l.castShadow) out.push({ light: l, kind: 'directionalShadowMap', index: n.dir }); n.dir++; }
-      else if (l.isSpotLight) { if (l.castShadow) out.push({ light: l, kind: 'spotShadowMap', index: n.spot }); n.spot++; }
-      else if (l.isPointLight) { if (l.castShadow) out.push({ light: l, kind: 'pointShadowMap', index: n.point }); n.point++; }
+      if (l.isSunLight) { if (l.castShadow) this._addCaster(l, 'sunShadowMap', sun++); }
+      else if (l.isDirectionalLight) { if (l.castShadow) this._addCaster(l, 'directionalShadowMap', dir); dir++; }
+      else if (l.isSpotLight) { if (l.castShadow) this._addCaster(l, 'spotShadowMap', spot); spot++; }
+      else if (l.isPointLight) { if (l.castShadow) this._addCaster(l, 'pointShadowMap', point); point++; }
     }
+    if (out.length !== this._nCasters) out.length = this._nCasters;
     return out;
+  }
+
+  _addCaster(light, kind, index) {
+    const pool = this._casterPool, k = this._nCasters++;
+    const c = pool[k] || (pool[k] = { light: null, kind: '', index: 0 });
+    c.light = light; c.kind = kind; c.index = index;
+    this._casters[k] = c;
   }
 
   // -------------------------------------------------------------- per draw
   /** the program + uniform-block instance three would use for (material, object) this frame */
   instance(material, object) {
     const ms = this._materialState(material);
-    const scene = this.scene && this.scene.isScene ? this.scene : this._emptyScene;
     if (this._clippingEnabled && this.facade.localClippingEnabled) this.clipping.setState(material, this.camera, false);
     if (ms.version !== material.version || ms.epoch !== this._epoch) {
-      ms.version = material.version; ms.epoch = this._epoch; ms.variants.clear();
+      ms.version = material.version; ms.epoch = this._epoch; ms.variants.clear(); ms.lastVariant = null;
     }
     const sig = objectSignature(material, object, this.clipping);
-    let variant = ms.variants.get(sig);
+    // most materials are drawn with one object signature: remember the last variant
+    let variant = ms.lastSig === sig && ms.lastVariant !== null ? ms.lastVariant : ms.variants.get(sig);
     if (variant === undefined) {
+      const scene = this.scene && this.scene.isScene ? this.scene : this._emptyScene;
       const program = this._getProgram(material, scene, object, ms);
       let slot = ms.slots.get(sig);
       if (!slot) ms.slots.set(sig, (slot = { inst: [null, null], perObject: new WeakMap() }));
       variant = { program, slot };
       ms.variants.set(sig, variant);
     }
+    ms.lastSig = sig; ms.lastVariant = variant;
     const prog = variant.program, slot = variant.slot;
     const rs = prog.usesReceiveShadow && object.receiveShadow ? 1 : 0;
     let inst;
@@ -483,13 +562,17 @@ export class ThreePrograms {
   }
 
   _materialState(material) {
-    const p = this.properties.get(material);
-    if (p.frState === undefined) {
-      // variants: object signature -> { program, slot } (cleared when the material or the frame-wide program inputs
-      // change); slots: object signature -> uniform-block instances, kept across clears so native ids stay stable
-      p.frState = { version: -1, epoch: -1, variants: new Map(), programs: new Map(), slots: new Map(), instances: new Set(), uniforms: null, uniformsGen: 0, refreshed: -1 };
-      material.addEventListener('dispose', () => this._disposeMaterial(material));
-    }
+    const ms = this._ms.get(material); // (our own map: three's material properties objects are dictionaries)
+    return ms !== undefined ? ms : this._initMaterialState(material, this.properties.get(material));
+  }
+
+  // (kept out of _materialState: a function that creates a closure allocates its context on every call)
+  _initMaterialState(material, p) {
+    // variants: object signature -> { program, slot } (cleared when the material or the frame-wide program inputs
+    // change); slots: object signature -> uniform-block instances, kept across clears so native ids stay stable
+    p.frState = { version: -1, epoch: -1, variants: new Map(), lastSig: -1, lastVariant: null, programs: new Map(), slots: new Map(), instances: new Set(), uniforms: null, uniformsGen: 0, refreshed: -1, fogStamp: -1, fogGen: -1 };
+    this._ms.set(material, p.frState);
+    material.addEventListener('dispose', () => this._disposeMaterial(material));
     return p.frState;
   }
 
@@ -502,6 +585,7 @@ export class ThreePrograms {
     }
     if (material.isShaderMaterial) this.programCache.releaseShaderCache(material);
     this.properties.remove(material);
+    this._ms.delete(material);
   }
 
   /** mirrors WebGLRenderer.getProgram: parameters, cache key, onBeforeCompile, light wiring */
@@ -595,13 +679,37 @@ export class ThreePrograms {
    * writes layout.textures.length ids at texOut[texOffset...]. Returns the block size in bytes.
    */
   pack(inst, f32, u32, byteOffset, textureId, texOut, texOffset) {
+    this.update(inst, textureId);
+    const c = inst.program.packer, block = inst.block, w0 = byteOffset >> 2;
+    for (let i = 0; i < c.words; i++) u32[w0 + i] = block[i];
+    for (let i = 0; i < c.textures.length; i++) texOut[texOffset + i] = block[c.words + i];
+    return c.size;
+  }
+
+  /**
+   * Bring inst.block up to date for this frame: `words` words of the packed default block followed by one texture id
+   * per layout.textures entry (the MATERIAL_UNIFORMS record body, ready to copy). The block persists across frames and
+   * is written compare-and-set, so a value that did not change costs a read; returns true when any word changed.
+   *  - material uniforms: three's refreshMaterialUniforms runs once per material per frame, as WebGLRenderer runs it on
+   *    every material switch (games set material.color / opacity / uniforms.x.value without needsUpdate);
+   *    refreshFogUniforms only when the scene fog changed (its only inputs) or for ShaderMaterials;
+   *  - light uniforms (lights.state): packed once per program per frame into the program's light block, copied into an
+   *    instance's block only when they changed (`prog.lightGen`);
+   *  - per-object values (receiveShadow, bones, morph targets): instance holders, compared like the rest.
+   */
+  update(inst, textureId) {
     const prog = inst.program, c = prog.packer;
     const material = inst.material, ms = inst.ms;
     const scene = this.scene;
     if (ms.refreshed !== this._frameNo) {
       ms.refreshed = this._frameNo;
       const u = ms.uniforms;
-      if (scene.fog && material.fog === true) this.materials.refreshFogUniforms(u, scene.fog);
+      if (scene.fog && material.fog === true) {
+        if (ms.fogStamp !== this._fogStamp || ms.fogGen !== ms.uniformsGen || material.isShaderMaterial) {
+          this.materials.refreshFogUniforms(u, scene.fog);
+          ms.fogStamp = this._fogStamp; ms.fogGen = ms.uniformsGen;
+        }
+      } else ms.fogStamp = -1;
       this.materials.refreshMaterialUniforms(u, material, this.facade.getPixelRatio ? this.facade.getPixelRatio() : 1, this._height, this._transmissionRT);
       if (u.dfgLUT !== undefined) u.dfgLUT.value = this.dfgLUT;
     }
@@ -609,13 +717,31 @@ export class ThreePrograms {
     if (inst.gen !== ms.uniformsGen) this._bindValues(inst, ms);
     if (inst.object) this._refreshObject(inst);
     if (this._clippingEnabled && this.facade.localClippingEnabled) this.clipping.setState(material, this.camera, false);
-    const w0 = byteOffset >> 2;
-    u32.fill(0, w0, w0 + c.words);
+    let block = inst.block, fresh = false;
+    if (inst.blockProgram !== prog) {
+      // a new layout: a zeroed block, written in full below
+      block = inst.block = new Uint32Array(c.words + c.textures.length);
+      inst.blockF = new Float32Array(block.buffer);
+      inst.blockProgram = prog; inst.lightGen = -1; fresh = true;
+      inst.sharedLights = c.lightLeaves.length > 0 && materialNeedsLights(material);
+      if (inst.sharedLights && !prog.lightBlock) this._initLights(prog);
+    }
     // holders are resolved once per instance; a ShaderMaterial's game code may swap whole holder objects
     // (WebGLUniforms.upload looks them up live), so re-resolve those every frame
     if (material.isShaderMaterial) resolveHolders(c, inst.values, this.frame, inst.holders);
-    packHolders(c, inst.holders, f32, u32, byteOffset);
-    const tex = c.textures, holders = inst.holders, n = c.leaves.length;
+    _changed = 0;
+    packLeaves(c, inst.sharedLights ? c.matLeaves : c.allLeaves, inst.holders, inst.blockF, block, 0);
+    let dirty = _changed;
+    if (inst.sharedLights) {
+      this._packLights(prog);
+      if (inst.lightGen !== prog.lightGen) {
+        inst.lightGen = prog.lightGen;
+        const r = c.lightRanges, views = prog.lightViews;
+        for (let i = 0; i < views.length; i++) block.set(views[i], r[2 * i]);
+        dirty = 1;
+      }
+    }
+    const tex = c.textures, holders = inst.holders, n = c.leaves.length, words = c.words;
     for (let i = 0; i < tex.length; i++) {
       const t = tex[i];
       let id = TEX.NONE;
@@ -628,9 +754,46 @@ export class ThreePrograms {
         else if (!v && t.root === 'dfgLUT') id = TEX.DFG_LUT;
         else if (v) id = textureId(v, t.name);
       }
-      texOut[texOffset + i] = id;
+      id >>>= 0;
+      if (block[words + i] !== id) { block[words + i] = id; dirty = 1; }
     }
-    return c.size;
+    this.stats.blocks++;
+    if (dirty || fresh) { this.stats.changed++; return true; }
+    return false;
+  }
+
+  /** a program's light block: the light leaves' words, packed from lights.state (see _packLights) */
+  _initLights(prog) {
+    const c = prog.packer, r = c.lightRanges;
+    prog.lightBlock = new Uint32Array(c.words);
+    prog.lightBlockF = new Float32Array(prog.lightBlock.buffer);
+    prog.lightViews = [];
+    for (let i = 0; i < r.length; i += 2) prog.lightViews.push(prog.lightBlock.subarray(r[i], r[i + 1]));
+    // holders by leaf index (light leaves only): this frame's lights.state values, as getProgram wires them
+    prog.lightHolders = c.leaves.map((l) => (l.light ? this._lightHolders[l.root] : null));
+    prog.lightFrame = -1; prog.lightGen = 0;
+  }
+
+  /** once per program per frame: repack its light leaves; bump lightGen when a word changed */
+  _packLights(prog) {
+    if (prog.lightFrame === this._frameNo) return;
+    prog.lightFrame = this._frameNo;
+    const saved = _changed;
+    _changed = 0;
+    packLeaves(prog.packer, prog.packer.lightLeaves, prog.lightHolders, prog.lightBlockF, prog.lightBlock, 0);
+    if (_changed) { prog.lightGen++; this.stats.lightPrograms++; }
+    _changed = saved;
+  }
+
+  /** a stand-in WebGLProgram for WebGLMorphtargets.update whose uniforms' setValue writes our holders */
+  _morphProgram(inst) {
+    const ov = inst.objectValues;
+    const uniforms = { setValue: (gl, name, value) => {
+      if (ov[name]) { ov[name].value = value; return; }
+      ov[name] = inst.values[name] = { value };
+      resolveHolders(inst.program.packer, inst.values, this.frame, inst.holders);
+    } };
+    inst.morphProgram = { getUniforms: () => uniforms };
   }
 
   _refreshObject(inst) {
@@ -647,17 +810,17 @@ export class ThreePrograms {
     const ma = g.morphAttributes;
     if (ma.position !== undefined || ma.normal !== undefined || ma.color !== undefined) {
       // three's WebGLMorphtargets, writing into our holders instead of GL uniforms
-      if (!inst.morphProgram) {
-        const uniforms = { setValue: (gl, name, value) => {
-          if (ov[name]) { ov[name].value = value; return; }
-          ov[name] = inst.values[name] = { value };
-          resolveHolders(inst.program.packer, inst.values, this.frame, inst.holders);
-        } };
-        inst.morphProgram = { getUniforms: () => uniforms };
-      }
+      if (!inst.morphProgram) this._morphProgram(inst);
       this.morphtargets.update(o, g, inst.morphProgram);
     }
   }
+}
+
+/** stores v0..v9 in a and says whether any differed (field-wise key compare, no string building) */
+function changed(a, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9) {
+  if (a.length === 10 && a[0] === v0 && a[1] === v1 && a[2] === v2 && a[3] === v3 && a[4] === v4 && a[5] === v5 && a[6] === v6 && a[7] === v7 && a[8] === v8 && a[9] === v9) return false;
+  a[0] = v0; a[1] = v1; a[2] = v2; a[3] = v3; a[4] = v4; a[5] = v5; a[6] = v6; a[7] = v7; a[8] = v8; a[9] = v9;
+  return true;
 }
 
 /** what WebGLShadowMap.render does to a light's shadow before WebGLLights.setup reads it (native renders the maps) */
@@ -688,7 +851,10 @@ function objectSignature(material, object, clipping) {
   if (object.isPoints && a.uv) s |= 4096;
   if (a.position) s |= 8192;
   const morph = ma.position || ma.normal || ma.color;
-  return s + (morph ? morph.length : 0) * 16384 + clipping.numPlanes * 16384 * 1024 + clipping.numIntersection * 16384 * 1024 * 256;
+  const nm = morph ? morph.length : 0, np = clipping.numPlanes, ni = clipping.numIntersection;
+  // a small integer (no heap number per draw) unless the counts are unusually large
+  if (nm < 256 && np < 16 && ni < 16) return s | (nm << 14) | (np << 22) | (ni << 26);
+  return s + nm * 16384 + np * 16384 * 1024 + ni * 16384 * 1024 * 256 + 2 ** 32;
 }
 
 // ================================================================== shadow pass (mirrors three's WebGLShadowMap)

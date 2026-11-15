@@ -2,6 +2,49 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: per-frame JS cost of `programs: 'three'` halved, garbage ~0 (no wire change)
+
+`js/test/three-programs.bench.mjs` (extended): 5000 meshes × {20, 200, 1000} materials, static / moving camera / moving
+camera + changing lights; the pre-change code (f9ef59d) runs interleaved in the same process (`FR_BASE`), since this
+container was loaded (load average 5–10 on 4 cores). Median ms/frame of `render()`, before → after (v2 garbage:
+3.0–3.5 MB → 0.4–1.7 KB per frame):
+
+| materials, mode | V8 (node 22) v2 | V8 v3 | V8 v3 bytes/frame | JSC (bun 1.4.4) v2 | JSC v3 |
+|---|---|---|---|---|---|
+| 20, static | 2.69 → 1.57 | 3.30 → 1.83 | 3.3 MB → 6 KB | 1.80 → 0.79 | 2.19 → 0.98 |
+| 20, lights | 2.83 → 1.58 | 3.31 → 1.84 | 3.3 MB → 5 KB | 1.79 → 0.87 | 2.14 → 0.89 |
+| 200, static | 2.91 → 1.55 | 4.17 → 2.21 | 4.0 MB → 2 KB | 1.92 → 1.03 | 2.69 → 1.34 |
+| 200, camera | 2.59 → 1.33 | 3.37 → 1.85 | 4.1 MB → 2 KB | 1.55 → 0.77 | 2.28 → 1.03 |
+| 1000, static | 3.38 → 2.07 | 10.56 → 6.20 | 5.2 MB → 3 KB | 2.15 → 1.18 | 5.92 → 2.36 |
+| 1000, camera | 3.32 → 1.83 | 10.20 → 5.49 | 5.3 MB → 3 KB | 2.17 → 1.19 | 5.67 → 2.36 |
+| 1000, lights | 3.31 → 1.88 | 10.34 → 5.85 | 5.3 MB → 4 KB | 2.24 → 1.20 | 5.79 → 2.47 |
+
+Bytes = V8 heap growth plus what GCs collected (`v8.GCProfiler`); the rest is three's own camera / shadow / texture
+matrix math and does not grow with draws. JSC is bun's JavaScriptCore on Linux, the same engine family as the macOS
+host but not the host itself (`cargo run --release -- bench` needs Metal).
+
+What changed (details in `docs/notes/three-programs.md`, "Per-frame cost"):
+- garbage: draws written straight into the command buffer; field-wise geometry / instance / pipeline-state checks
+  instead of key strings; a reused walk stack; scratch arrays never cleared with `length = 0` (V8 drops the backing
+  store); no closures in per-draw functions (V8 allocated their contexts on every call: 48 B per draw in
+  `_materialState`, 40 B in `_geometry`); uniform values go through a `Float64Array` (no boxed doubles);
+- uniform blocks kept per instance and written compare-and-set; light members (from `lights.state`) packed once per
+  program per frame and copied only when changed; `refreshFogUniforms` only when the fog changed. `info.uniformBlocks`
+  counts blocks changed: 0 on an unchanged frame;
+- `refreshMaterialUniforms` still runs once per material per frame: WebGLRenderer does the same (on every
+  material/program switch; its version checks gate program changes, not refreshes), and direct `material.color` /
+  `opacity` edits must land. That is most of what separates v3 from v2 at 1000 materials (≈ 1.1 µs per material).
+
+Same native input: a check (not committed) ran the old and new code side by side over 10 frames of edits (camera,
+colour, light, fog, visibility, texture offset, light added, needsUpdate) with 5 light types (3 casting shadows), PCF and
+VSM, a multi-material mesh, an InstancedMesh and alphaTest casters drawn with three's depth programs: every op's payload
+(SHADOWS / SHADOW_PASS / SHADOW_DRAWS included) and every upload identical, v2 and v3; only the op order differs (DRAWS
+before LIGHTS; the decoder is order-independent, now stated in PROTOCOL.md). The shadow section's interface is
+unchanged (`shadowDraw` fills a reused record per draw index; `writeShadowDraws` reads them); its per-caster
+`depthMaterialFor` still builds a key string, only for casters that need a depth program. New tests (§6 of
+three-programs.test.mjs): an unchanged frame changes no block and emits the same stream; after 8 kinds of edit the kept
+blocks equal a from-scratch pack; allocation < 8 B per extra draw (300 vs 3000 draws).
+
 ## 2026-11-15: three.js's own programs run natively: golden MAE 0.97 (hand-written path: 2.23)
 
 `FastRenderer({ programs: 'three' })` is now drawn end to end on Metal: JS hands three's exact GLSL to

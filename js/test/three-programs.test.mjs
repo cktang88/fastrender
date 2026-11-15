@@ -268,7 +268,7 @@ function decode(buf) {
   r.render(scene, camera);
   fr = decode(h.cmd);
   const valueOf = (mesh, name) => {
-    const id = fr.draws.find((d, i) => r._drawList[i].matrix === mesh.matrixWorld.elements).material;
+    const id = fr.draws.find((d, i) => r._drawObjects[i] === mesh).material;
     const key = h.programIds.get(h.uploads.filter((x) => x.kind === KIND.MATERIAL && x.id === id).at(-1).meta.program);
     const m = h.programs.get(key).layout.members.find((x) => x.name === name);
     return fr.blocks.get(id).f32[m.offset / 4];
@@ -299,4 +299,92 @@ function decode(buf) {
   };
   const legacy = cost(undefined), three = cost('three');
   console.log(`[three r${REV}] 5000 meshes, 20 materials: ${legacy.toFixed(2)} ms/frame (v2 path) vs ${three.toFixed(2)} ms/frame with programs:'three' (+ lights setup + 20 uniform blocks refreshed by three + packed)`);
+}
+
+// ------------------------------------------------------------------ 6. dirty tracking: uniform blocks kept across frames
+{
+  const { GCProfiler } = await import('node:v8');
+  const build = (n, nm) => {
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x99aabb, 5, 80);
+    const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(4, 10, 2); sun.castShadow = true;
+    const lamp = new THREE.PointLight(0xffaa00, 3, 20); lamp.position.set(0, 2, 0);
+    scene.add(sun, lamp, new THREE.AmbientLight(0x404040));
+    const tex = new THREE.DataTexture(new Uint8Array(16).fill(200), 2, 2); tex.needsUpdate = true;
+    const mats = Array.from({ length: nm }, (_, i) => (i % 3 === 0 ? new THREE.MeshLambertMaterial({ color: i * 997 }) : new THREE.MeshStandardMaterial({ color: i * 997, map: i % 3 === 1 ? tex : null })));
+    const geos = [new THREE.BoxGeometry(), new THREE.SphereGeometry(0.5, 8, 6)];
+    const meshes = [];
+    for (let i = 0; i < n; i++) { const m = new THREE.Mesh(geos[i % 2], mats[i % nm]); m.position.set(i % 40, 0, Math.floor(i / 40)); m.receiveShadow = i % 2 === 0; scene.add(m); meshes.push(m); }
+    scene.add(new THREE.InstancedMesh(geos[0], mats[1], 4));
+    const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 3, 8); camera.lookAt(0, 0, 0);
+    const r = new FastRenderer({ host: makeHost(), programs: 'three', commandWords: 1 << 20 });
+    r.shadowMap.enabled = true;
+    return { scene, camera, r, mats, meshes, sun, lamp };
+  };
+  const words = (r) => new Uint32Array(r.cmd, 0, r.u32[1]).slice();
+  // every draw's packed block and texture ids, in draw order: comparable across renderers (texture ids aside)
+  const drawBlocks = (r) => {
+    const fr = decode(r.cmd);
+    return fr.draws.map((d) => { const b = fr.blocks.get(d.material); return [...b.u32, '|', ...b.textures.map((t) => (t >>> 24 >= 0xfe ? t : t ? 'tex' : 0))].join(','); });
+  };
+
+  // a frame with nothing changed: every block compared, none changed, the stream is word-for-word the same
+  const s = build(200, 12);
+  for (let i = 0; i < 3; i++) s.r.render(s.scene, s.camera);
+  const before = words(s.r);
+  s.r.render(s.scene, s.camera);
+  assert.ok(s.r.info.uniformBlocks.total > 12, 'blocks in use');
+  assert.equal(s.r.info.uniformBlocks.changed, 0, 'nothing changed: no block repacked');
+  assert.deepEqual(words(s.r), before, 'nothing changed: the same command stream');
+
+  // what changes is repacked, only there, and equals what a renderer packing from scratch sends
+  const edits = [
+    ['camera moves (light uniforms are in view space)', () => { s.camera.position.x += 0.5; s.camera.updateMatrixWorld(); }, (n) => n > 0],
+    ['material.color edited without needsUpdate', () => s.mats[4].color.setRGB(1, 0, 0), (n) => n >= 1 && n <= 2],
+    ['opacity edited', () => { s.mats[5].opacity = 0.5; }, (n) => n >= 1 && n <= 2],
+    ['point light moves', () => s.lamp.position.set(3, 2, 1), (n) => n > 0],
+    ['fog changes', () => { s.scene.fog.far = 60; }, (n) => n > 0],
+    ['nothing', () => {}, (n) => n === 0],
+    ['receiveShadow toggled (the receiveShadow=false block of that material, new here)', () => { s.meshes[0].receiveShadow = !s.meshes[0].receiveShadow; }, (n) => n <= 1],
+    ['texture transform (a texture 4 materials share)', () => { s.mats[1].map.offset.set(0.25, 0); }, (n) => n >= 4],
+  ];
+  for (const [what, edit, ok] of edits) {
+    edit();
+    s.r.render(s.scene, s.camera);
+    assert.ok(ok(s.r.info.uniformBlocks.changed), `${what}: ${s.r.info.uniformBlocks.changed} blocks changed`);
+    const fresh = new FastRenderer({ host: makeHost(), programs: 'three', commandWords: 1 << 20 });
+    fresh.shadowMap.enabled = true;
+    fresh.render(s.scene, s.camera);
+    assert.deepEqual(drawBlocks(s.r), drawBlocks(fresh), `${what}: kept blocks equal blocks packed from scratch`);
+  }
+
+  // allocation: ~0 bytes per draw from the renderer, so a frame's garbage does not grow with the scene. Bytes allocated
+  // = heap growth + what each GC in between collected (GCProfiler); the minimum over interleaved runs (other work in
+  // the process allocates too).
+  // One scene and renderer for both counts (300 or 3000 meshes visible), so the per-frame constant (JIT state of three's
+  // own math) is the same in both.
+  const big = build(3000, 20);
+  const show = (n) => { for (let i = 0; i < big.meshes.length; i++) big.meshes[i].visible = i < n; };
+  for (const n of [300, 3000]) { show(n); for (let i = 0; i < 60; i++) big.r.render(big.scene, big.camera); }
+  const best = [Infinity, Infinity];
+  for (let attempt = 0; attempt < 6; attempt++) {
+    for (let k = 0; k < 2; k++) {
+      show(k ? 3000 : 300);
+      for (let i = 0; i < 3; i++) big.r.render(big.scene, big.camera);
+      const p = new GCProfiler();
+      p.start();
+      const h0 = process.memoryUsage().heapUsed;
+      for (let i = 0; i < 10; i++) big.r.render(big.scene, big.camera);
+      const h1 = process.memoryUsage().heapUsed;
+      let bytes = 0, prev = h0;
+      for (const st of p.stop().statistics) { bytes += st.beforeGC.heapStatistics.usedHeapSize - prev; prev = st.afterGC.heapStatistics.usedHeapSize; }
+      best[k] = Math.min(best[k], (bytes + h1 - prev) / 10);
+    }
+  }
+  const [small, large] = best, perDraw = (large - small) / 2700;
+  // (the old path allocated ~600 B per draw, ~2 MB here; what is left is per frame, in three's camera / shadow camera /
+  // texture matrix updates)
+  assert.ok(large < 64 * 1024, `a static frame of 3000 draws allocates ${(large / 1024).toFixed(1)} KB (< 64 KB)`);
+  assert.ok(perDraw < 8, `allocation does not grow with draws (${perDraw.toFixed(2)} B per extra draw)`);
+  console.log(`[three r${REV}] unchanged frame: 0 of ${s.r.info.uniformBlocks.total} blocks repacked, same stream; ${edits.length} kinds of edit repack only what changed and equal a from-scratch pack; a static frame allocates ${(small / 1024).toFixed(1)} KB (300 draws) / ${(large / 1024).toFixed(1)} KB (3000 draws)`);
 }

@@ -66,32 +66,73 @@ as `three/src/...` and `three/addons/...` resolve normally) and the node tests u
 which does the same and lets `THREE_PKG=three-r170` switch both together. The bundled example is 873 KB with a single
 three.
 
-## Per-frame cost (node 22, this container)
+## Per-frame cost
 
-5000 meshes (3 geometries), directional (shadow) + ambient + point light, fog; 100–200 frames after warm-up; median of
-a few runs, noisy ±0.4 ms:
+`js/test/three-programs.bench.mjs`: 5000 meshes (3 geometries) over 20/200/1000 MeshStandardMaterials, a shadowed
+directional + ambient + point light, fog, receiveShadow everywhere; `static` (nothing moves), `camera` (the camera moves)
+and `lights` (camera + point light move, sun intensity changes). `node --expose-gc test/three-programs.bench.mjs` (V8)
+or `bun test/three-programs.bench.mjs` (JavaScriptCore, the macOS host's engine; the native `bench` command needs Metal);
+`FR_BASE=<dir>` runs another checkout's `fastrender-three.js` interleaved in the same process, which keeps the
+comparison fair on a busy machine. Median ms/frame of `render()`, Nov 2026 (before = f9ef59d; v2 garbage went
+from 3.0–3.5 MB to 0.4–1.7 KB per frame):
 
-| materials in use | v2 path | `programs: 'three'` | of which: lights setup | refresh + pack all blocks |
-|---|---|---|---|---|
-| 20 | 2.5 ms | 2.6 ms | 0.01 ms | 0.03 ms |
-| 200 | 2.6 ms | 3.5 ms | 0.01 ms | 0.4 ms |
-| 1000 | 3.0 ms | 9.2 ms | 0.004 ms | 2.7 ms |
+| materials | mode | V8 v2 | V8 v3 | V8 v3 garbage / frame | JSC v2 | JSC v3 |
+|---|---|---|---|---|---|---|
+| 20 | static | 2.69 → **1.57** | 3.30 → **1.83** | 3.3 MB → **6 KB** | 1.80 → **0.79** | 2.19 → **0.98** |
+| 20 | lights | 2.83 → **1.58** | 3.31 → **1.84** | 3.3 MB → **5 KB** | 1.79 → **0.87** | 2.14 → **0.89** |
+| 200 | static | 2.91 → **1.55** | 4.17 → **2.21** | 4.0 MB → **2 KB** | 1.92 → **1.03** | 2.69 → **1.34** |
+| 200 | camera | 2.59 → **1.33** | 3.37 → **1.85** | 4.1 MB → **2 KB** | 1.55 → **0.77** | 2.28 → **1.03** |
+| 1000 | static | 3.38 → **2.07** | 10.56 → **6.20** | 5.2 MB → **3 KB** | 2.15 → **1.18** | 5.92 → **2.36** |
+| 1000 | camera | 3.32 → **1.83** | 10.20 → **5.49** | 5.3 MB → **3 KB** | 2.17 → **1.19** | 5.67 → **2.36** |
+| 1000 | lights | 3.31 → **1.88** | 10.34 → **5.85** | 5.3 MB → **4 KB** | 2.24 → **1.20** | 5.79 → **2.47** |
 
-(`node --import ./test/three-alias.mjs test/three-programs.bench.mjs`.) With a typical material count the v3 path costs
-the same as v2: the scene walk dominates. Per material instance the cost is three's own `refreshMaterialUniforms` +
-`refreshFogUniforms` (which three also runs on every material switch) plus ~1 µs of packing; the 1000-material case also
-pays the per-draw instance lookup (object signature + Map). Blocks are 400–800 bytes (Standard with one shadowed light:
-416 B).
+Garbage is V8 bytes allocated per frame (heap growth plus what each GC in between collected, `v8.GCProfiler`); what is
+left is three's own camera / shadow-camera / texture matrix updates, and it does not grow with the number of draws
+(`three-programs.test.mjs` §6 checks < 8 B per extra draw; the old path allocated ~600 B per draw: draw records, a
+geometry key string, a pipeline-state string per instance, arrays refilled after `length = 0`, closure contexts).
+
+How the per-frame path works now:
+
+- **No allocation.** The walk uses a reused stack; draws go straight into the command buffer (DRAWS now precedes the
+  ops that depend on what the draws used; ops are order-independent); geometry / instance / pipeline-state checks
+  compare fields, not key strings; scratch arrays keep their length (V8 frees an array's backing store on
+  `length = 0`); functions on the per-draw path create no closures (V8 allocates a function's context on every call when
+  any closure in it captures a local, even on a branch not taken); doubles reach the packer's typed arrays through a
+  `Float64Array`, never as arguments (boxed heap numbers).
+- **Uniform blocks are kept** per material instance and written compare-and-set (the analogue of the value caches in
+  three's `WebGLUniforms`, which skip `gl.uniform*` for unchanged values). `renderer.info.uniformBlocks` = `{ total,
+  changed }` per frame; an unchanged frame changes none and emits the same stream word for word (§6 also checks that
+  kept blocks equal a from-scratch pack after camera, colour, opacity, light, fog, receiveShadow and texture-transform
+  edits). Every block in use still goes on the wire every frame (the native side keeps none), as a copy.
+- **Light members** (everything wired from `lights.state`, `LIGHT_WIRING`) are split per layout (`compileLayout`:
+  `lightLeaves`, merged word ranges `lightRanges`). They are packed once per **program** per frame, and copied into an
+  instance's block only when they changed. A frame where only lights changed repacks only light words; the camera
+  moving changes them too (three keeps light positions and directions in view space).
+- **three's refreshes:** `refreshMaterialUniforms` still runs once per material in use per frame. That is what
+  `WebGLRenderer.setProgram` does: `refreshMaterial` is set on every program switch, material switch or camera change,
+  so with materials interleaved it runs once per material per frame; its version checks (`material.version`,
+  `needsLights && lightsStateVersion`) decide program changes, not uniform refreshes, and its only skipping of unchanged
+  values is in `WebGLUniforms`. Games set `material.color` / `opacity` / `uniforms.x.value` without `needsUpdate`, so
+  skipping it on `material.version` would drop those edits. `refreshFogUniforms` (whose inputs are only the scene fog
+  and the output colour space) is skipped while those are unchanged, except for ShaderMaterials.
+- **Scene walk:** WebGLRenderer's `projectObject` + `WebGLRenderLists` add frustum culling and sorting, which the native
+  side does; `WebGLObjects.update` updates GL buffers. Reusing them would add work, so the walk stays ours (same
+  traversal order and visibility/layers rules).
+
+Where the 1000-material v3 frame goes (V8): three's `refreshMaterialUniforms` ≈ 1.1 µs per material, the per-draw
+program/instance lookup (object signature, as `setProgram` checks every draw) ≈ 0.05–0.2 µs per draw, compare-pack
+≈ 0.5 µs per block. Blocks are 300–800 bytes (Standard with one shadowed light: 416 B).
 
 ## Per-frame shared block (buffer(3))
 
 **Done for the camera** (Nov 2026): `normalizeGlsl` moves `projectionMatrix`, `viewMatrix` and `cameraPosition` into
 `FrFrame` (buffer(3)), which the native side fills per pass (main pass: with the MetalFX jitter, applied natively, so
-JS needs no jitter hook). The rest below is still packed per material block.
+JS needs no jitter hook). The rest below is still packed per material block (light members once per program per frame
+and copied, see above).
 
-Every block is repacked every frame because camera and light values live in it. The names below come from the camera
-or from `WebGLLights` state and are **identical for every program in a frame**; moving them into a per-frame block
-would make material blocks static between material edits:
+The names below come from the camera or from `WebGLLights` state and are **identical for every program in a frame**;
+moving them into a per-frame block would make material blocks static between material edits (today a moving camera
+changes every lit block's light words):
 
 - camera: `projectionMatrix`, `viewMatrix`, `cameraPosition`, `logDepthBufFC`, `toneMappingExposure`;
 - lights (wired from `lights.state`): `ambientLightColor`, `lightProbe`, `directionalLights`, `directionalLightShadows`,

@@ -18,7 +18,8 @@ Materials are deduplicated by content. Texture ids inside a material refer to up
 
 ## 2. Per frame: one command buffer of 32-bit words
 
-`[0]` = `0x46524D32` ('FRM2'), `[1]` = number of words used. Then a list of commands, each `op, payload word count, payload`:
+`[0]` = `0x46524D32` ('FRM2'), `[1]` = number of words used. Then a list of commands, each `op, payload word count, payload`,
+in any order (the decoder does not depend on it; JS writes DRAWS before LIGHTS and the v3 ops):
 
 | op | payload |
 |---|---|
@@ -126,8 +127,10 @@ Texture ids in MATERIAL_UNIFORMS are uploaded texture ids or special ids:
 `0xFE000001` three's DFG LUT (r178+, `src/renderers/shaders/DFGLUTData.js`) unless JS was given it (`dfgLUT` option);
 `0xFE000002` the transmission render target; `0` none (bind a neutral texture).
 
-Every block of every instance in use is packed every frame: three refreshes material uniforms on every material switch,
-and games edit `material.color` / `uniforms.x.value` without `needsUpdate`, so there is no cheap dirty signal.
+Every block of every instance in use is sent every frame (the native side keeps none between frames). JS keeps each block
+and rewrites only the words whose values changed: three refreshes material uniforms on every material switch, and games
+edit `material.color` / `uniforms.x.value` without `needsUpdate`, so values are compared, not versions
+(`docs/notes/three-programs.md`).
 The draw list's material id is the instance id; draw flags are unchanged.
 
 ## Memory ownership

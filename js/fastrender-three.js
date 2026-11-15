@@ -70,10 +70,17 @@ export class FastRenderer {
     this._nextId = 1;
     this._materials = new Map();    // material description key -> id
     this._matKey = new WeakMap();   // material -> {version, id}
-    this._drawList = [];
+    this._geo = new WeakMap();      // geometry -> { id, frame, attribute versions as last uploaded }
+    this._inst = new WeakMap();     // instanceMatrix attribute -> { mv, cv, count } as last uploaded
     this._size = { w: 1, h: 1 }; this._pixelRatio = 1;
     this._clearColor = [0, 0, 0]; this._clearAlpha = 1;
-    this._meshes = []; this._lightsCopy = []; this._used = []; this._frameNo = 0;
+    // per-frame scratch, reused: nothing in render() allocates in steady state
+    this._meshes = []; this._lights = []; this._lightsCopy = []; this._used = []; this._stack = []; this._frameNo = 0;
+    this._nUsed = 0; this._nDraws = 0;
+    this._drawObjects = [];         // the object drawn by each DRAWS record this frame (debugging, tests)
+    this._shadowRecs = [];          // v3: per DRAWS record, { shadowDepth, shadowDistance } (shadowDraw, writeShadowDraws)
+    this._w = 0; this._tris = 0;
+    this.info.uniformBlocks = { total: 0, changed: 0 };
     // protocol v3: three's own programs + uniform blocks
     this._tp = null;
     if (opts.programs === 'three') {
@@ -130,12 +137,15 @@ export class FastRenderer {
   _unsupported(what) { this.info.unsupported[what] = (this.info.unsupported[what] || 0) + 1; }
 
   _id(obj) {
-    let id = this._ids.get(obj);
-    if (id === undefined) {
-      id = this._nextId++;
-      this._ids.set(obj, id);
-      if (obj.addEventListener) obj.addEventListener('dispose', () => this._release(obj, id));
-    }
+    const id = this._ids.get(obj);
+    return id !== undefined ? id : this._newId(obj);
+  }
+
+  // (kept out of _id: a function that creates a closure allocates its context on every call)
+  _newId(obj) {
+    const id = this._nextId++;
+    this._ids.set(obj, id);
+    if (obj.addEventListener) obj.addEventListener('dispose', () => this._release(obj, id));
     return id;
   }
 
@@ -144,6 +154,7 @@ export class FastRenderer {
     if (kind && this.host.release) this.host.release(kind, id);
     this._versions.delete(id);
     this._ids.delete(obj);
+    this._geo.delete(obj);
   }
 
   // ------------------------------------------------------------------ resources
@@ -155,10 +166,21 @@ export class FastRenderer {
    * locations the translated program reflected.
    */
   _geometry(g) {
+    // once per geometry per frame: compare the attribute versions field-wise with what was last uploaded
+    let rec = this._geo.get(g);
+    if (rec !== undefined && rec.frame === this._frameNo) return rec.id;
     const id = this._id(g);
     const a = g.attributes;
     if (!a.position) return 0;
-    let key = `${a.position.version}|${a.normal?.version}|${a.uv?.version}|${a.color?.version}|${g.index?.version}|${g.index ? 1 : 0}`;
+    if (rec === undefined) this._geo.set(g, (rec = { id, frame: 0, v: [], extra: [] }));
+    rec.id = id; rec.frame = this._frameNo;
+    if (!geometryCurrent(rec, g, !!this._tp)) this._uploadGeometry(g, id, rec);
+    return id;
+  }
+
+  // (kept out of _geometry, which runs per draw: a function that creates a closure allocates its context on every call)
+  _uploadGeometry(g, id, rec) {
+    const a = g.attributes;
     let extra = null;
     if (this._tp) {
       for (const name in a) {
@@ -166,10 +188,9 @@ export class FastRenderer {
         const at = a[name];
         if (!at || !at.count || at.itemSize > 4) { this._unsupported(`attribute ${name}`); continue; }
         (extra || (extra = [])).push(name);
-        key += `|${name}:${at.version}:${at.itemSize}`;
       }
     }
-    if (this._versions.get(id) !== key) {
+    {
       if (!a.normal) { g.computeVertexNormals(); }
       if (!g.boundingSphere) g.computeBoundingSphere();
       const s = g.boundingSphere;
@@ -187,10 +208,9 @@ export class FastRenderer {
         for (const name of extra) arrays.push(dense(a[name], a[name].itemSize));
       }
       this.host.upload(KIND.GEOMETRY, id, meta, ...arrays);
-      this._versions.set(id, key);
+      geometryCurrent(rec, g, !!this._tp, true); // record the versions as uploaded (normals may have been computed)
       this.info.memory.geometries++;
     }
-    return id;
   }
 
   /** texture -> id (0 = none); pixels via DataTexture data, or the host's image decoder */
@@ -260,11 +280,11 @@ export class FastRenderer {
     if (!inst.program.packer) { this._unsupported(`program without layout (${inst.program.name})`); return 0; }
     if (inst.frame !== this._frameNo) {
       inst.frame = this._frameNo;
-      this._used.push(inst);
-      // pipeline state is read from the material every draw by WebGLRenderer, so re-check it every frame
-      const st = `${m.side}|${m.shadowSide}|${m.blendSrcAlpha}|${m.blendDstAlpha}|${m.blendEquationAlpha}|${m.transparent}|${m.blending}|${m.blendSrc}|${m.blendDst}|${m.blendEquation}|${m.premultipliedAlpha}|${m.depthTest}|${m.depthWrite}|${m.depthFunc}|${m.colorWrite}|${m.alphaToCoverage}|${m.polygonOffset}|${m.polygonOffsetFactor}|${m.polygonOffsetUnits}|${m.wireframe}`;
-      if (inst.state !== st || inst.uploadedProgram !== inst.program) {
-        inst.state = st; inst.uploadedProgram = inst.program;
+      this._used[this._nUsed++] = inst;
+      // pipeline state is read from the material every draw by WebGLRenderer, so re-check it every frame (field-wise)
+      const st = inst.pipelineState || (inst.pipelineState = []);
+      if (pipelineStateChanged(st, m) | (inst.uploadedProgram !== inst.program)) {
+        inst.uploadedProgram = inst.program;
         this.host.upload(KIND.MATERIAL, inst.id, {
           program: inst.program.id, name: m.name, type: m.type,
           side: m.side, shadowSide: m.shadowSide ?? null, transparent: m.transparent, opacity: m.opacity, blending: m.blending, blendSrc: m.blendSrc, blendDst: m.blendDst, blendEquation: m.blendEquation,
@@ -280,13 +300,15 @@ export class FastRenderer {
   /** InstancedMesh matrices (+ colours) -> instance buffer id */
   _instances(mesh) {
     const id = this._id(mesh.instanceMatrix);
-    const key = `${mesh.instanceMatrix.version}|${mesh.instanceColor?.version}|${mesh.count}`;
-    if (this._versions.get(id) !== key) {
+    let rec = this._inst.get(mesh.instanceMatrix);
+    if (rec === undefined) this._inst.set(mesh.instanceMatrix, (rec = { mv: -1, c: null, cv: -1, count: -1 }));
+    const ic = mesh.instanceColor || null, cv = ic ? ic.version : -1;
+    if (rec.mv !== mesh.instanceMatrix.version || rec.c !== ic || rec.cv !== cv || rec.count !== mesh.count) {
+      rec.mv = mesh.instanceMatrix.version; rec.c = ic; rec.cv = cv; rec.count = mesh.count;
       const n = mesh.count, src = mesh.instanceMatrix.array, rows = new Float32Array(n * 12);
       for (let i = 0; i < n; i++) to3x4(src, i * 16, rows, i * 12);
       const colors = mesh.instanceColor ? new Float32Array(mesh.instanceColor.array.buffer, mesh.instanceColor.array.byteOffset, n * 3) : null;
       this.host.upload(KIND.INSTANCES, id, { count: n }, rows, colors);
-      this._versions.set(id, key);
     }
     return id;
   }
@@ -320,32 +342,36 @@ export class FastRenderer {
       f[w++] = fg.isFogExp2 ? 1 : 0; f[w++] = fg.isFogExp2 ? fg.density : fg.near; f[w++] = fg.isFogExp2 ? 0 : fg.far;
     }
     // walk the scene: lights and meshes (three.js visibility + layers semantics)
-    const lights = [], draws = this._drawList, meshes = this._meshes;
-    draws.length = 0; meshes.length = 0;
+    const lights = this._lights, meshes = this._meshes;
     this._frameNo++;
-    const walk = (o) => {
-      if (!o.visible || !o.layers.test(camera.layers)) return;
-      if (o.isLight) lights.push(o);
-      else if (o.isMesh) meshes.push(o);
-      else if (o.isSprite || o.isPoints || o.isLine) this._unsupported(o.type);
-      const ch = o.children;
-      for (let i = 0; i < ch.length; i++) walk(ch[i]);
-    };
-    walk(scene);
-    if (this._tp) {
+    this._walk(scene, camera.layers);
+    const tp = this._tp;
+    if (tp) {
       // three's lights state (WebGLLights.setup sorts its input, so it gets its own copy)
-      const lc = this._lightsCopy; lc.length = 0;
-      for (let i = 0; i < lights.length; i++) lc.push(lights[i]);
-      this._tp.beginFrame(scene, camera, lc);
-      this._used.length = 0;
+      const lc = this._lightsCopy;
+      for (let i = 0; i < lights.length; i++) lc[i] = lights[i];
+      setLength(lc, lights.length);
+      tp.beginFrame(scene, camera, lc);
+      this._nUsed = 0;
     }
     this._scene = scene; this._camera = camera;
-    for (let i = 0; i < meshes.length; i++) this._collect(meshes[i], draws);
+    // draws, written straight into the command buffer (the count is patched in after the walk). The ops are
+    // order-independent; DRAWS comes before the ops that depend on what the draws used (MATERIAL_UNIFORMS).
+    u[w++] = OP.DRAWS; const drawsAt = w++; const countAt = w++;
+    this._w = w; this._tris = 0; this._nDraws = 0;
+    for (let i = 0; i < meshes.length; i++) this._collect(meshes[i]);
+    const nDraws = this._nDraws;
+    setLength(this._drawObjects, nDraws); setLength(this._shadowRecs, nDraws);
+    if (tp) setLength(this._used, this._nUsed);
+    w = this._w;
+    u[drawsAt] = 1 + nDraws * DRAW_WORDS; u[countAt] = nDraws;
     // lights, 16 words each: kind, castShadow, colour*intensity (3), position (3), direction (3),
     // distance, decay, then hemisphere ground colour (3) or spot angle, penumbra, 0
     u[w++] = OP.LIGHTS; const lightsAt = w++; const lightsStart = w;
     u[w++] = lights.length;
-    for (const l of lights) {
+    let caster = null;
+    for (let i = 0; i < lights.length; i++) {
+      const l = lights[i];
       const m = l.matrixWorld.elements;
       const k = l.isAmbientLight ? L.AMBIENT : l.isHemisphereLight ? L.HEMI : l.isDirectionalLight ? L.DIRECTIONAL : l.isPointLight ? L.POINT : l.isSpotLight ? L.SPOT : 0;
       let dx = 0, dy = -1, dz = 0;
@@ -359,12 +385,12 @@ export class FastRenderer {
       // 3 kind-specific words: hemisphere ground colour, or spot angle + penumbra
       if (l.isHemisphereLight) { f[w++] = l.groundColor.r * l.intensity; f[w++] = l.groundColor.g * l.intensity; f[w++] = l.groundColor.b * l.intensity; }
       else { f[w++] = l.angle ?? 0; f[w++] = l.penumbra ?? 0; f[w++] = 0; }
+      if (caster === null && l.isDirectionalLight && l.castShadow) caster = l;
     }
     u[lightsAt] = w - lightsStart;
     // the game's own shadow camera for the first shadow-casting directional light (three.js computes
     // it the same way in WebGLShadowMap), so shadows land exactly where the game tuned them
-    const caster = this.shadowMap.enabled && lights.find((l) => l.isDirectionalLight && l.castShadow);
-    if (caster) {
+    if (caster !== null && this.shadowMap.enabled) {
       caster.shadow.updateMatrices(caster);
       const sc = caster.shadow.camera;
       const vp = this._shadowVP || (this._shadowVP = sc.projectionMatrix.clone());
@@ -373,29 +399,38 @@ export class FastRenderer {
       f.set(vp.elements, w); w += 16;
       f[w++] = caster.shadow.mapSize.x; f[w++] = caster.shadow.bias;
     }
-    if (this._tp) w = this._writePrograms(w);
-    // draws
-    u[w++] = OP.DRAWS; u[w++] = 1 + draws.length * DRAW_WORDS; u[w++] = draws.length;
-    if (w + draws.length * DRAW_WORDS + 8 > u.length) throw new Error(`fastrender-three: command buffer too small for ${draws.length} draws`);
-    let tris = 0;
-    for (let i = 0; i < draws.length; i++) {
-      const d = draws[i];
-      u[w] = d.geometry; u[w + 1] = d.material; u[w + 2] = d.flags; u[w + 3] = d.instances;
-      u[w + 4] = d.start; u[w + 5] = d.count; u[w + 6] = d.instanceCount; u[w + 7] = d.renderOrder | 0;
-      to3x4(d.matrix, 0, f, w + 8);
-      w += DRAW_WORDS;
-      tris += (d.count / 3) * Math.max(1, d.instanceCount);
-    }
-    if (this._tp) w = writeShadowDraws(this, w, draws);
-    u[0] = this._tp ? MAGIC3 : MAGIC; u[1] = w;
-    this.info.render.calls = draws.length; this.info.render.triangles = tris | 0; this.info.render.frame++;
+    if (tp) w = this._writePrograms(w);
+    if (tp) w = writeShadowDraws(this, w, this._shadowRecs); // after DRAWS' count is known (three-programs.js, shadow section)
+    u[0] = tp ? MAGIC3 : MAGIC; u[1] = w;
+    this.info.render.calls = nDraws; this.info.render.triangles = this._tris | 0; this.info.render.frame++;
+    if (tp) { this.info.uniformBlocks.total = tp.stats.blocks; this.info.uniformBlocks.changed = tp.stats.changed; }
     if (this.host.present) this.host.present(w);
+  }
+
+  /** visible lights and meshes in three's traversal order (pre-order, children in order), with a reused stack */
+  _walk(root, layers) {
+    const stack = this._stack, lights = this._lights, meshes = this._meshes;
+    let sp = 0, nl = 0, nm = 0;
+    stack[sp++] = root;
+    while (sp > 0) {
+      const o = stack[--sp];
+      stack[sp] = null;
+      if (!o.visible || !o.layers.test(layers)) continue;
+      if (o.isLight) lights[nl++] = o;
+      else if (o.isMesh) meshes[nm++] = o;
+      else if (o.isSprite || o.isPoints || o.isLine) this._unsupported(o.type);
+      const ch = o.children;
+      for (let i = ch.length - 1; i >= 0; i--) stack[sp++] = ch[i];
+    }
+    setLength(lights, nl); setLength(meshes, nm);
   }
 
   /** v3 ops: SHADOWS (three's shadow casters, in lights-state order) and MATERIAL_UNIFORMS (a packed block per instance in use) */
   _writePrograms(w) {
     const u = this.u32, f = this.f32, tp = this._tp;
     w = writeShadows(this, w); // SHADOWS + SHADOW_PASS (three-programs.js, shadow section)
+    // every block in use goes out every frame (the native side keeps none between frames); a block whose values did
+    // not change since the previous frame is a copy of the instance's kept block (tp.update compares as it packs)
     const used = this._used;
     u[w++] = OP.MATERIAL_UNIFORMS; const at = w++; const start = w;
     u[w++] = used.length;
@@ -404,52 +439,116 @@ export class FastRenderer {
       if (!c) throw new Error('fastrender-three: host.program returned no layout');
       if (w + 3 + c.words + c.textures.length + 64 > u.length) throw new Error('fastrender-three: command buffer too small for uniform blocks');
       u[w] = inst.id; u[w + 1] = c.words * 4; u[w + 2] = c.textures.length;
-      tp.pack(inst, f, u, (w + 3) * 4, this._textureId, u, w + 3 + c.words);
+      tp.update(inst, this._textureId);
+      u.set(inst.block, w + 3); // block words, then texture ids: the record body as it goes on the wire
       w += 3 + c.words + c.textures.length;
     }
     u[at] = w - start;
     return w;
   }
 
-  _collect(o, out) {
+  _collect(o) {
     const g = o.geometry;
     if (!g || !g.attributes || !g.attributes.position) return;
     if (o.isSkinnedMesh && !this._tp) this._unsupported('SkinnedMesh (drawn in bind pose)');
-    if (!this._tp && g.morphAttributes && Object.keys(g.morphAttributes).length) this._unsupported('morph targets');
+    if (!this._tp && g.morphAttributes && hasKeys(g.morphAttributes)) this._unsupported('morph targets');
     const geometry = this._geometry(g);
     const inst = o.isInstancedMesh ? this._instances(o) : 0;
-    const mats = Array.isArray(o.material) ? o.material : [o.material];
     const indexCount = g.index ? g.index.count : g.attributes.position.count;
-    const groups = Array.isArray(o.material) && g.groups.length ? g.groups : [{ start: g.drawRange.start, count: Math.min(g.drawRange.count, indexCount), materialIndex: 0 }];
-    for (const grp of groups) {
-      const m = mats[grp.materialIndex ?? 0];
-      if (!m || !m.visible) continue;
-      // WebGLRenderer.renderObject calls these right before the draw (games use them to set per-draw uniforms)
-      o.onBeforeRender(this, this._scene, this._camera, g, m, grp);
-      if (m.onBeforeRender) m.onBeforeRender(this, this._scene, this._camera, g, o, grp);
-      let flags = 0;
-      if (o.castShadow) flags |= F.CAST;
-      if (o.receiveShadow) flags |= F.RECEIVE;
-      if (m.transparent && m.opacity < 1 || m.transparent && m.map && m.map.format === 1023) flags |= F.TRANSPARENT;
-      if (m.side === 2) flags |= F.DOUBLE; else if (m.side === 1) flags |= F.BACK;
-      if (m.vertexColors) flags |= F.VERTEX_COLORS;
-      if (m.flatShading) flags |= F.FLAT;
-      if (o.frustumCulled === false) flags |= F.NO_CULL;
-      if (inst) flags |= F.INSTANCED;
-      const material = this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT));
-      if (!material) continue; // v3: the host could not translate this program
-      const d = {
-        geometry, material, flags, instances: inst,
-        start: grp.start, count: Math.min(grp.count, indexCount - grp.start), instanceCount: inst ? o.count : 1,
-        renderOrder: o.renderOrder, matrix: o.matrixWorld.elements,
-      };
-      if (this._tp) shadowDraw(this, o, m, d); // v3: how three would draw it into shadow maps
-      out.push(d);
+    const mat = o.material;
+    if (Array.isArray(mat)) {
+      const groups = g.groups;
+      if (groups.length) {
+        for (let i = 0; i < groups.length; i++) {
+          const grp = groups[i];
+          this._draw(o, g, mat[grp.materialIndex ?? 0], grp, geometry, inst, grp.start, grp.count, indexCount);
+        }
+        return;
+      }
+      // no groups: the first material over the draw range
+      this._draw(o, g, mat[0], null, geometry, inst, g.drawRange.start, Math.min(g.drawRange.count, indexCount), indexCount);
+      return;
     }
+    // WebGLRenderer passes a null group for a single-material object
+    this._draw(o, g, mat, null, geometry, inst, g.drawRange.start, Math.min(g.drawRange.count, indexCount), indexCount);
+  }
+
+  /** one DRAWS record at this._w */
+  _draw(o, g, m, grp, geometry, inst, start, count, indexCount) {
+    if (!m || !m.visible) return;
+    // WebGLRenderer.renderObject calls these right before the draw (games use them to set per-draw uniforms)
+    o.onBeforeRender(this, this._scene, this._camera, g, m, grp);
+    if (m.onBeforeRender) m.onBeforeRender(this, this._scene, this._camera, g, o, grp);
+    let flags = 0;
+    if (o.castShadow) flags |= F.CAST;
+    if (o.receiveShadow) flags |= F.RECEIVE;
+    if (m.transparent && m.opacity < 1 || m.transparent && m.map && m.map.format === 1023) flags |= F.TRANSPARENT;
+    if (m.side === 2) flags |= F.DOUBLE; else if (m.side === 1) flags |= F.BACK;
+    if (m.vertexColors) flags |= F.VERTEX_COLORS;
+    if (m.flatShading) flags |= F.FLAT;
+    if (o.frustumCulled === false) flags |= F.NO_CULL;
+    if (inst) flags |= F.INSTANCED;
+    const material = this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT));
+    if (!material) return; // v3: the host could not translate this program
+    if (this._tp) {
+      // v3: how three would draw it into shadow maps; a reused record per draw index (read by writeShadowDraws)
+      const rec = this._shadowRecs[this._nDraws] || (this._shadowRecs[this._nDraws] = { shadowDepth: 0, shadowDistance: 0 });
+      shadowDraw(this, o, m, rec);
+    }
+    const u = this.u32, w = this._w;
+    if (w + DRAW_WORDS + 8 > u.length) throw new Error(`fastrender-three: command buffer too small for ${this._drawObjects.length + 1} draws`);
+    const n = Math.min(count, indexCount - start), instanceCount = inst ? o.count : 1;
+    u[w] = geometry; u[w + 1] = material; u[w + 2] = flags; u[w + 3] = inst;
+    u[w + 4] = start; u[w + 5] = n; u[w + 6] = instanceCount; u[w + 7] = o.renderOrder | 0;
+    to3x4(o.matrixWorld.elements, 0, this.f32, w + 8);
+    this._w = w + DRAW_WORDS;
+    this._tris += (n / 3) * Math.max(1, instanceCount);
+    this._drawObjects[this._nDraws++] = o;
   }
 }
 
 // ------------------------------------------------------------------ helpers
+
+/**
+ * whether geometry g still has the attributes (objects and versions) recorded in rec when it was last uploaded; with
+ * store, records them instead. v3 also tracks every other attribute it sends by name.
+ */
+function geometryCurrent(rec, g, v3, store = false) {
+  const a = g.attributes, v = rec.v, ix = g.index || null;
+  const p = a.position, n = a.normal || null, uv = a.uv || null, c = a.color || null;
+  const pv = p.version, nv = n ? n.version : -1, uvv = uv ? uv.version : -1, cv = c ? c.version : -1, iv = ix ? ix.version : -1;
+  let same = false;
+  if (store) { v[0] = p; v[1] = n; v[2] = uv; v[3] = c; v[4] = ix; v[5] = pv; v[6] = nv; v[7] = uvv; v[8] = cv; v[9] = iv; }
+  else same = v.length === 10 && v[0] === p && v[1] === n && v[2] === uv && v[3] === c && v[4] === ix && v[5] === pv && v[6] === nv && v[7] === uvv && v[8] === cv && v[9] === iv;
+  if (v3 && (same || store)) {
+    const x = rec.extra;
+    let k = 0;
+    for (const name in a) {
+      if (name === 'position' || name === 'normal' || name === 'uv' || name === 'color') continue;
+      const at = a[name];
+      if (!at || !at.count || at.itemSize > 4) continue;
+      if (store) { x[k] = name; x[k + 1] = at; x[k + 2] = at.version; x[k + 3] = at.itemSize; }
+      else if (x[k] !== name || x[k + 1] !== at || x[k + 2] !== at.version || x[k + 3] !== at.itemSize) return false;
+      k += 4;
+    }
+    if (store) x.length = k;
+    else if (k !== x.length) return false;
+  }
+  return same;
+}
+
+/** WebGLRenderer re-reads these material fields every draw: compare them with the copy in s, then store them */
+function pipelineStateChanged(s, m) {
+  if (s.length === 20 && s[0] === m.side && s[1] === m.shadowSide && s[2] === m.blendSrcAlpha && s[3] === m.blendDstAlpha && s[4] === m.blendEquationAlpha &&
+    s[5] === m.transparent && s[6] === m.blending && s[7] === m.blendSrc && s[8] === m.blendDst && s[9] === m.blendEquation &&
+    s[10] === m.premultipliedAlpha && s[11] === m.depthTest && s[12] === m.depthWrite && s[13] === m.depthFunc && s[14] === m.colorWrite &&
+    s[15] === m.alphaToCoverage && s[16] === m.polygonOffset && s[17] === m.polygonOffsetFactor && s[18] === m.polygonOffsetUnits && s[19] === m.wireframe) return false;
+  s[0] = m.side; s[1] = m.shadowSide; s[2] = m.blendSrcAlpha; s[3] = m.blendDstAlpha; s[4] = m.blendEquationAlpha;
+  s[5] = m.transparent; s[6] = m.blending; s[7] = m.blendSrc; s[8] = m.blendDst; s[9] = m.blendEquation;
+  s[10] = m.premultipliedAlpha; s[11] = m.depthTest; s[12] = m.depthWrite; s[13] = m.depthFunc; s[14] = m.colorWrite;
+  s[15] = m.alphaToCoverage; s[16] = m.polygonOffset; s[17] = m.polygonOffsetFactor; s[18] = m.polygonOffsetUnits; s[19] = m.wireframe;
+  return true;
+}
 
 /** column-major 4x4 (three.js) -> 3 rows of 4 into dst */
 function to3x4(m, o, dst, d) {
@@ -471,5 +570,12 @@ function dense(attr, n) {
   }
   return out;
 }
+/**
+ * a reused per-frame array's length; changed only when the count differs (V8 drops an array's backing store on
+ * `length = 0`, so clearing and refilling a scratch array every frame reallocates it)
+ */
+function setLength(a, n) { if (a.length !== n) a.length = n; }
+/** Object.keys(o).length > 0 without the array */
+function hasKeys(o) { for (const k in o) return true; return false; }
 const toU16 = (a) => (a instanceof Uint16Array ? a : Uint16Array.from(a));
 const toU32 = (a) => (a instanceof Uint32Array ? a : Uint32Array.from(a));
