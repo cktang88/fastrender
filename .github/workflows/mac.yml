@@ -110,6 +110,14 @@ jobs:
           set -o pipefail
           npx electron app/main.js --frames 60 --out "$GITHUB_WORKSPACE" --tag electron-childwindow --stack childwindow 2>&1 | tee "$GITHUB_WORKSPACE/electron-childwindow.log"
           echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-childwindow.log" || true
+      - name: electron spike - direct mode (contextIsolation off, no bridge) for the per-call cost comparison
+        if: steps.electron_build.outcome == 'success'
+        continue-on-error: true
+        working-directory: host/electron
+        run: |
+          set -o pipefail
+          npx electron app/main.js --frames 120 --out "$GITHUB_WORKSPACE" --tag electron-direct --stack subview --isolation off --no-reload 2>&1 | tee "$GITHUB_WORKSPACE/electron-direct.log"
+          echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-direct.log" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

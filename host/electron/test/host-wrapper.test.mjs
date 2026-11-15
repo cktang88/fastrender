@@ -11,7 +11,7 @@ const { createHost } = require('../host.js');
 
 function parseFrame(w) { // mirror of shm.rs parse_frame
   const f = new Float32Array(w.buffer, w.byteOffset, w.length);
-  assert.equal(w[0], 0x46524d32);
+  assert.ok(w[0] === 0x46524d32 || w[0] === 0x46524d33); // FRM2 / FRM3
   let i = 2, draws = 0, bg = null;
   while (i + 2 <= w[1]) {
     const op = w[i], n = w[i + 1], p = i + 2;
@@ -27,7 +27,7 @@ const calls = { attach: 0, present: [], upload: 0, frames: [] };
 let view = null;
 const fake = {
   attach(handle, buf, shm) { calls.attach++; view = buf; assert.ok(buf instanceof Uint32Array); assert.equal(handle, null); assert.equal(shm, '/fr-test'); return shm; },
-  present(words) { calls.present.push(words); calls.frames.push(parseFrame(view.subarray(0, words))); },
+  present(buf, words) { assert.ok(buf instanceof Uint32Array); assert.equal(buf.buffer, view.buffer, 'present gets the live buffer each call'); calls.present.push(words); calls.frames.push(parseFrame(buf.subarray(0, words))); },
   upload(kind, id, meta, arrays) { calls.upload++; assert.equal(typeof meta, 'string'); assert.ok(arrays.every((a) => a instanceof Uint8Array)); },
   release() {}, stats: () => ({}),
 };
@@ -47,4 +47,8 @@ const fr = calls.frames[0];
 assert.equal(fr.draws, 7);
 const c = new THREE.Color(0x336699);
 assert.ok(Math.abs(fr.bg[0] - c.r) < 1e-6 && Math.abs(fr.bg[2] - c.b) < 1e-6);
+// a transferred (detached) ArrayBuffer must be an error in JS, never a read of freed memory
+const stolen = structuredClone(renderer.cmd, { transfer: [renderer.cmd] });
+assert.ok(stolen.byteLength > 0 && renderer.cmd.byteLength === 0);
+assert.throws(() => host.present(100), /detached/);
 console.log('host-wrapper ok:', JSON.stringify({ words: calls.present[0], draws: fr.draws, uploads: calls.upload }));

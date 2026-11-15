@@ -9,7 +9,7 @@
     "build:debug": "napi build --platform --manifest-path native/Cargo.toml --output-dir native",
     "start": "electron app/main.js",
     "spike": "electron app/main.js --frames 120 --out ../..",
-    "test": "node test/host-wrapper.test.mjs"
+    "test": "node --import ./test/three-alias.mjs test/host-wrapper.test.mjs"
   },
   "napi": {
     "binaryName": "fastrender-electron",

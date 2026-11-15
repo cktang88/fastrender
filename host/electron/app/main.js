@@ -17,13 +17,14 @@ const outDir = path.resolve(opt('out', '.'));
 const tag = opt('tag', 'electron');
 const stack = opt('stack', 'subview');
 const keepOpen = argv.includes('--keep-open');
+const isolated = opt('isolation', 'on') !== 'off'; // contextIsolation + preload (default) vs direct addon access
 const W = 800, H = 600, W2 = 1000, H2 = 700;
 
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
-const results = { electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, stack, checks: [] };
+const results = { electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, stack, isolated, checks: [] };
 let win = null, native = null, finished = false;
 
 function check(name, ok, detail) {
@@ -35,12 +36,24 @@ function check(name, ok, detail) {
 function finish(code) {
   if (finished) return;
   finished = true;
+  clearInterval(heartbeat);
+  const t0 = Date.now();
+  try { native && native.shutdown(); } catch (e) { console.log('[spike] shutdown error', e.message); }
+  const dt = Date.now() - t0;
+  results.shutdown_ms = dt;
+  check('shutdown() returned promptly (never hangs)', dt < 2000, `${dt} ms`);
+  if (dt >= 2000 && code === 0) code = 1;
+  results.max_main_loop_gap_ms = maxGap;
   results.ok = code === 0;
   try { fs.mkdirSync(outDir, { recursive: true }); fs.writeFileSync(path.join(outDir, `${tag}-spike.json`), JSON.stringify(results, null, 2)); } catch (e) { console.log('[spike] cannot write result json', e.message); }
   console.log(`[spike] ${code === 0 ? 'PASS' : 'FAIL'} overall (exit ${code})`);
-  try { native && native.shutdown(); } catch (e) { console.log('[spike] shutdown error', e.message); }
   app.exit(code);
 }
+
+// main-process event-loop heartbeat: a hung addon call (e.g. spinning on a dead renderer's seqlock) shows up as a gap
+let lastBeat = Date.now(), maxGap = 0;
+const heartbeat = setInterval(() => { const n = Date.now(); maxGap = Math.max(maxGap, n - lastBeat); lastBeat = n; }, 20);
+heartbeat.unref();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const run = (cmd, args) => new Promise((res) => execFile(cmd, args, { timeout: 20000 }, (err, so, se) => res({ err, so, se })));
@@ -96,18 +109,28 @@ async function capture(phase, st) {
 ipcMain.on('bench-blob', () => {});
 ipcMain.on('fatal', (e, msg) => { check('renderer ran', false, msg); finish(2); });
 
-let phase1Done = false;
+const load = (ph) => win.loadFile(path.join(__dirname, 'index.html'), { query: { phase: ph } });
+
+function checkResources(label, res) {
+  if (!res) return;
+  check(`${label}: resource channel delivered ${res.n} uploads in order with the right bytes`,
+    res.applied === res.n && res.got_hash === res.expected_hash && res.errors === 0 && res.in_sync,
+    `applied=${res.applied}/${res.n} bytes=${res.bytes} hash=${res.got_hash}/${res.expected_hash} errors=${res.errors} seq=${res.seq_applied}/${res.seq_written} sent_ms=${res.sent_ms} (includes a 6 MB message over a 4 MB ring)`);
+}
+
+let initialFrames = 0, expectGone = false, gapAtReload = 0;
 ipcMain.on('ready', async (e, msg) => {
   try {
-    const st = msg.stats;
-    if (msg.phase === 'initial' && !phase1Done) {
-      phase1Done = true;
+    const st = msg.settled;
+    if (msg.phase === 'initial') {
       results.bench = msg.bench;
       results.stats = st;
       console.log('[spike] bench ' + JSON.stringify(msg.bench));
       check('addon loaded in renderer, frames flowed JS -> shm -> Metal thread', st.renderReady && st.framesRendered > 0 && st.lastDrawCount === msg.finalDraws,
         `published=${st.framesPublished} rendered=${st.framesRendered} lastDraws=${st.lastDrawCount} uploads=${st.uploads} drawable=${st.drawableWidth}x${st.drawableHeight}`);
-      check('resources reached native (upload)', st.uploads > 0, `uploads=${st.uploads} bytes=${st.uploadBytes}`);
+      check('resources reached the render thread (counts, bytes applied)', msg.stats.resApplied > 0 && msg.stats.resBytes > 0 && msg.stats.resErrors === 0, `applied=${msg.stats.resApplied} bytes=${msg.stats.resBytes} errors=${msg.stats.resErrors}`);
+      checkResources('initial', msg.res);
+      initialFrames = msg.stats.framesRendered;
       await sleep(400);
       await capture('initial', st);
       // DOM input reaches the page through the Metal view stack
@@ -121,9 +144,22 @@ ipcMain.on('ready', async (e, msg) => {
       { const bw = win.getBounds().width, ratio = st.drawableWidth / bw;
         check('resize: drawable followed window size', bw === W2 && st.drawableWidth >= bw && Math.abs(ratio - Math.round(ratio)) < 0.01, `drawable=${st.drawableWidth}x${st.drawableHeight} window=${bw}x${win.getBounds().height}`); }
       await capture('resized', st);
-      const bad = results.checks.filter((c) => !c.ok).length;
       if (keepOpen) return;
-      finish(bad ? 1 : 0);
+      if (argv.includes('--no-reload')) return finish(results.checks.some((c) => !c.ok) ? 1 : 0);
+      gapAtReload = maxGap;
+      console.log('[spike] reloading the page (navigation)');
+      await load('reloaded'); // did-start-navigation -> native.resetChannel()
+    } else if (msg.phase === 'reloaded') {
+      check('reload: new page re-attached, frames flowed again', st.framesRendered > initialFrames && st.lastDrawCount === msg.finalDraws, `rendered=${st.framesRendered} (was ${initialFrames}) lastDraws=${st.lastDrawCount}`);
+      checkResources('reloaded', msg.res);
+      expectGone = true;
+      console.log('[spike] crashing the renderer process');
+      win.webContents.forcefullyCrashRenderer(); // -> render-process-gone -> resetChannel, then reload below
+    } else if (msg.phase === 'recovered') {
+      check('crash: new renderer process attached, frames flowed again', st.lastDrawCount === msg.finalDraws && st.renderReady, `rendered=${st.framesRendered} lastDraws=${st.lastDrawCount}`);
+      checkResources('recovered', msg.res);
+      check('main process stayed responsive through reload + renderer crash', maxGap < 1500, `max event-loop gap ${maxGap} ms (before reloads: ${gapAtReload} ms)`);
+      finish(results.checks.some((c) => !c.ok) ? 1 : 0);
     }
   } catch (err) {
     check('main-process checks', false, String(err && err.stack || err));
@@ -143,15 +179,36 @@ app.whenReady().then(() => {
     x: 100, y: 100, width: W, height: H,
     frame: false, transparent: true, backgroundColor: '#00000000', hasShadow: false, show: false,
     webPreferences: {
-      // Option (a): game + addon in the renderer. Needed: nodeIntegration (require the .node), no sandbox
-      // (the addon calls shm_open/mmap/sem_open), no context isolation (host object shared with game code).
-      nodeIntegration: true, contextIsolation: false, sandbox: false, backgroundThrottling: false,
-      additionalArguments: [`--fr-shm=${shmName}`, `--fr-frames=${frames}`],
+      // The addon loads in a PRELOAD script (app/preload.js); the page gets no Node. sandbox must stay false
+      // (the addon calls shm_open/mmap/sem_open). `--isolation off` is the direct-call fallback (see HOST.md).
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false, contextIsolation: isolated, sandbox: false, backgroundThrottling: false,
+      webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, spellcheck: false,
+      additionalArguments: [`--fr-shm=${shmName}`, `--fr-frames=${frames}`, `--fr-isolated=${isolated ? 1 : 0}`],
     },
   });
   win.setAlwaysOnTop(true, 'floating');
   win.webContents.on('console-message', (e, level, message) => console.log(`[renderer] ${message}`));
-  win.webContents.on('render-process-gone', (e, d) => { check('renderer alive', false, d.reason); finish(2); });
+  // Security: the page is bundled local code. No navigation away, no new windows, no permissions.
+  win.webContents.on('will-navigate', (e) => e.preventDefault());
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.session.setPermissionRequestHandler((wc, perm, cb) => cb(false));
+  // The renderer process died or navigates: its shared region may be mid-write (seqlock odd) or full.
+  // Replace it so the render thread never waits on a dead writer and the next page attaches cleanly.
+  win.webContents.on('did-start-navigation', (...a) => {
+    const d = a[0] || {};
+    const isMain = d.isMainFrame !== undefined ? d.isMainFrame : a[3];
+    const inPlace = d.isInPlace !== undefined ? d.isInPlace : a[2];
+    if (isMain && !inPlace) { try { native.resetChannel(); } catch (e) { console.log('[spike] resetChannel', e.message); } }
+  });
+  win.webContents.on('render-process-gone', async (e, d) => {
+    try { native.resetChannel(); } catch (err) { console.log('[spike] resetChannel', err.message); }
+    if (!expectGone) { check('renderer alive', false, d.reason); return finish(2); }
+    expectGone = false;
+    check('renderer crash observed; main process alive and channel reset', true, d.reason);
+    await sleep(100);
+    await load('recovered');
+  });
   try {
     const name = native.startHost(win.getNativeWindowHandle(), shmName, 1 << 20, stack);
     results.shm = name;
@@ -161,8 +218,8 @@ app.whenReady().then(() => {
     return finish(2);
   }
   win.once('ready-to-show', () => win.show());
-  win.loadFile(path.join(__dirname, 'index.html'));
-  setTimeout(() => { check('finished within watchdog', false, 'timeout 120s'); finish(2); }, 120000).unref();
+  load('initial');
+  setTimeout(() => { check('finished within watchdog', false, 'timeout 180s'); finish(2); }, 180000).unref();
 });
 
 app.on('window-all-closed', () => finish(finished ? 0 : 2));
