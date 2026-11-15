@@ -18,6 +18,8 @@ pub enum SceneKind {
     City,
     /// voxel island meshed natively by voxel-castle-defense's greedy mesher (one draw per chunk)
     Voxel,
+    /// a JS game script (three.js-shaped API, js/three-shim.js) running in JavaScriptCore
+    Script,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +33,8 @@ pub enum Upscale {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub scene: SceneKind,
+    /// game script for `--scene script`
+    pub script: String,
     pub path: RenderPath,
     /// transient attachments (depth, G-buffer) memoryless (true) or stored to DRAM (false)
     pub memoryless: bool,
@@ -63,6 +67,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             scene: SceneKind::City,
+            script: "js/examples/boxes.js".into(),
             path: RenderPath::Deferred,
             memoryless: true,
             scale: 0.5,
@@ -90,7 +95,7 @@ impl Config {
     pub fn label(&self) -> String {
         format!(
             "{} {} {} scale={:.2} up={} shadow={} lights={} cull={} props={}",
-            match self.scene { SceneKind::City => "city", SceneKind::Voxel => "voxel" },
+            match self.scene { SceneKind::City => "city", SceneKind::Voxel => "voxel", SceneKind::Script => "script" },
             match self.path { RenderPath::Forward => "forward", RenderPath::Deferred => "deferred" },
             if self.memoryless { "memoryless" } else { "stored" },
             self.scale,
@@ -110,7 +115,8 @@ impl Config {
             let v = args.get(i + 1).ok_or_else(|| format!("missing value for --{k}"))?;
             let num = |s: &str| s.parse::<f64>().map_err(|_| format!("bad number for --{k}: {s}"));
             match k {
-                "scene" => self.scene = match v.as_str() { "city" => SceneKind::City, "voxel" => SceneKind::Voxel, _ => return Err(format!("bad --scene {v}")) },
+                "scene" => self.scene = match v.as_str() { "city" => SceneKind::City, "voxel" => SceneKind::Voxel, "script" => SceneKind::Script, _ => return Err(format!("bad --scene {v}")) },
+                "script" => { self.script = v.clone(); self.scene = SceneKind::Script; }
                 "path" => self.path = match v.as_str() { "forward" => RenderPath::Forward, "deferred" => RenderPath::Deferred, _ => return Err(format!("bad --path {v}")) },
                 "memoryless" => self.memoryless = num(v)? != 0.0,
                 "scale" => self.scale = (num(v)? as f32).clamp(0.25, 1.0),

@@ -204,7 +204,8 @@ impl ApplicationHandler for App {
                 let el_s = self.stat_start.elapsed().as_secs_f32();
                 if el_s >= 0.5 {
                     let gpu = if self.stat_gpu.is_empty() { 0.0 } else { self.stat_gpu.iter().sum::<f64>() / self.stat_gpu.len() as f64 };
-                    let title = format!("fastrender {:.0} fps | GPU {:.2} ms | draws {} | {}", self.stat_frames as f32 / el_s, gpu, r.last_draws, r.cfg.label());
+                    let js = r.script_ms().map(|ms| format!(" | JS {ms:.2} ms")).unwrap_or_default();
+                    let title = format!("fastrender {:.0} fps | GPU {:.2} ms{js} | draws {} | {}", self.stat_frames as f32 / el_s, gpu, r.last_draws, r.cfg.label());
                     if let Some(w) = &self.window {
                         w.set_title(&title);
                     }

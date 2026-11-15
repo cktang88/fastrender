@@ -126,6 +126,43 @@ vertex ShadowOut vs_voxel_shadow(uint vid [[vertex_id]], uint iid [[instance_id]
     return o;
 }
 
+// ------------------------------------------------------------------ scripted boxes (JS three-shim)
+// 3x4 world rows already scaled by the box half extents (the cube spans [-1,1]); see src/script.rs.
+struct ScriptInstance { float4 r0; float4 r1; float4 r2; uint color; uint pad0; uint pad1; uint pad2; };
+
+static float3 script_world(ScriptInstance i, float3 p) {
+    float4 p4 = float4(p, 1.0);
+    return float3(dot(i.r0, p4), dot(i.r1, p4), dot(i.r2, p4));
+}
+
+vertex VOut vs_script(uint vid [[vertex_id]], uint iid [[instance_id]],
+                      device const Vertex* verts [[buffer(0)]],
+                      device const ScriptInstance* inst [[buffer(1)]],
+                      constant Frame& f [[buffer(3)]]) {
+    ScriptInstance i = inst[iid];
+    Vertex v = verts[vid];
+    float3 w = script_world(i, float3(v.pos));
+    // normal: rotation x non-uniform scale -> inverse-transpose = columns divided by their squared length
+    float3 c0 = float3(i.r0.x, i.r1.x, i.r2.x), c1 = float3(i.r0.y, i.r1.y, i.r2.y), c2 = float3(i.r0.z, i.r1.z, i.r2.z);
+    float3 n = float3(v.nrm);
+    float3 wn = c0 * (n.x / max(dot(c0, c0), 1e-8)) + c1 * (n.y / max(dot(c1, c1), 1e-8)) + c2 * (n.z / max(dot(c2, c2), 1e-8));
+    VOut o;
+    o.pos = f.view_proj * float4(w, 1.0);
+    o.wpos = w;
+    o.nrm = half3(normalize(wn));
+    o.albedo = unpack_rgb(as_type<float>(i.color));
+    return o;
+}
+
+vertex ShadowOut vs_script_shadow(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                  device const Vertex* verts [[buffer(0)]],
+                                  device const ScriptInstance* inst [[buffer(1)]],
+                                  constant Frame& f [[buffer(3)]]) {
+    ShadowOut o;
+    o.pos = f.shadow_vp * float4(script_world(inst[iid], float3(verts[vid].pos)), 1.0);
+    return o;
+}
+
 // ------------------------------------------------------------------ lighting helpers
 
 static half sun_shadow(float3 wpos, depth2d<float> sm, constant Frame& f) {

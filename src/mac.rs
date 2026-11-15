@@ -25,6 +25,8 @@ use objc2_metal::*;
 use objc2_metal_fx::*;
 
 use crate::core::*;
+use crate::jsc::ScriptHost;
+use crate::script;
 use crate::voxel;
 
 type Device = ProtocolObject<dyn MTLDevice>;
@@ -47,6 +49,37 @@ const OUT_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 const SHADER_SRC: &str = include_str!("../shaders/fastrender.metal");
 const SUN: Vec3 = Vec3::new(0.5, 0.6, 0.35);
 const FOG: [f32; 3] = [0.62, 0.68, 0.76];
+const FOG_DENSITY: f32 = 0.0035;
+/// command buffer for scripts: 16 MB of words (about 260k boxes)
+const SCRIPT_WORDS: usize = 4 << 20;
+const MAX_SCRIPT_BOXES: usize = 250_000;
+
+/// Camera for a frame: position, unit direction, vertical fov (radians), near, far.
+#[derive(Clone, Copy, Debug)]
+struct Cam {
+    eye: Vec3,
+    dir: Vec3,
+    fovy: f32,
+    near: f32,
+    far: f32,
+}
+
+impl Cam {
+    fn std(eye: Vec3, dir: Vec3) -> Cam { Cam { eye, dir, fovy: 60f32.to_radians(), near: 0.1, far: 900.0 } }
+}
+
+/// Sun and fog for a frame (scripts can change them).
+#[derive(Clone, Copy, Debug)]
+struct Env {
+    sun: Vec3,
+    sun_intensity: f32,
+    fog: [f32; 3],
+    fog_density: f32,
+}
+
+impl Default for Env {
+    fn default() -> Self { Env { sun: SUN.normalize(), sun_intensity: 1.8, fog: FOG, fog_density: FOG_DENSITY } }
+}
 
 // ------------------------------------------------------------------ device capabilities
 
@@ -88,12 +121,13 @@ fn tonemap(c: f32) -> f64 {
 /// index into per-content pipeline arrays
 const CITY: usize = 0;
 const VOXEL: usize = 1;
+const SCRIPT: usize = 2;
 
 struct Pipelines {
     cull: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-    forward: [RenderPipeline; 2],
-    shadow: [RenderPipeline; 2],
-    gbuffer: [Option<RenderPipeline>; 2],
+    forward: [RenderPipeline; 3],
+    shadow: [RenderPipeline; 3],
+    gbuffer: [Option<RenderPipeline>; 3],
     light: Option<RenderPipeline>,
     tonemap: Option<RenderPipeline>,
     blit: RenderPipeline,
@@ -163,9 +197,13 @@ impl Pipelines {
         };
         Ok(Pipelines {
             cull,
-            forward: [render("vs_main", Some("fs_forward"), &fwd_att, d32)?, render("vs_voxel", Some("fs_forward"), &fwd_att, d32)?],
-            shadow: [render("vs_shadow", None, &[], d32)?, render("vs_voxel_shadow", None, &[], d32)?],
-            gbuffer: [gb("vs_main")?, gb("vs_voxel")?],
+            forward: [
+                render("vs_main", Some("fs_forward"), &fwd_att, d32)?,
+                render("vs_voxel", Some("fs_forward"), &fwd_att, d32)?,
+                render("vs_script", Some("fs_forward"), &fwd_att, d32)?,
+            ],
+            shadow: [render("vs_shadow", None, &[], d32)?, render("vs_voxel_shadow", None, &[], d32)?, render("vs_script_shadow", None, &[], d32)?],
+            gbuffer: [gb("vs_main")?, gb("vs_voxel")?, gb("vs_script")?],
             light: if deferred { Some(render("vs_light", Some("fs_light"), &deferred_atts([true, false, false, false, false], true), d32)?) } else { None },
             tonemap: if deferred { Some(render("vs_fsq", Some("fs_tonemap"), &deferred_atts([false, false, false, false, true], false), d32)?) } else { None },
             blit: render("vs_fsq", Some("fs_blit"), &fwd_att, MTLPixelFormat::Invalid)?,
@@ -233,17 +271,37 @@ struct FrameRes {
     visible: Buffer,
     shadow_args: Buffer,
     shadow_visible: Buffer,
+    /// lights for this frame (scripts move them every frame)
+    lights: Buffer,
+    /// scripted instances for this frame
+    script_inst: Option<Buffer>,
 }
 
 /// What gets drawn. Each variant owns its geometry and knows how to cull and draw itself.
 enum Content {
     City { instances: Buffer, identity: Buffer, n: usize },
     Voxel { verts: Buffer, indices: Buffer, origins: Buffer, chunks: Vec<voxel::ChunkMesh>, world: voxel::World, mesh_ms: f64 },
+    /// JS game script; instances, lights, camera, sun and fog come from its command stream each frame
+    Script { host: Box<ScriptHost>, n: usize, cam: Cam, env: Env, lights: Vec<Light>, last_t: f32, error: Option<String> },
 }
 
 impl Content {
-    fn build(dev: &Device, cfg: &Config) -> (Content, Vec<Light>) {
-        match cfg.scene {
+    fn build(dev: &Device, cfg: &Config) -> Result<(Content, Vec<Light>), String> {
+        Ok(match cfg.scene {
+            SceneKind::Script => {
+                let shim_path = std::path::Path::new(&cfg.script).parent().and_then(|p| p.parent()).map(|p| p.join("three-shim.js"));
+                let shim = shim_path
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_else(|| include_str!("../js/three-shim.js").to_string());
+                let game = std::fs::read_to_string(&cfg.script).map_err(|e| format!("script {}: {e}", cfg.script))?;
+                let params = format!("{{\"boxes\": {}, \"lights\": {}}}", cfg.props.min(MAX_SCRIPT_BOXES as u32), cfg.lights);
+                let host = ScriptHost::new(&shim, &game, &cfg.script, &params, SCRIPT_WORDS)?;
+                let _ = dev;
+                (
+                    Content::Script { host: Box::new(host), n: 0, cam: Cam::std(Vec3::new(0.0, 10.0, 30.0), Vec3::NEG_Z), env: Env::default(), lights: Vec::new(), last_t: 0.0, error: None },
+                    Vec::new(),
+                )
+            }
             SceneKind::City => {
                 let scene = build_city(cfg.props, cfg.lights, cfg.seed);
                 let n = scene.instances.len();
@@ -272,19 +330,67 @@ impl Content {
                     lights,
                 )
             }
+        })
+    }
+
+    fn kind(&self) -> usize { match self { Content::City { .. } => CITY, Content::Voxel { .. } => VOXEL, Content::Script { .. } => SCRIPT } }
+
+    /// content that moves every frame needs its shadow re-rendered every frame
+    fn dynamic(&self) -> bool { matches!(self, Content::Script { .. }) }
+
+    /// Per-frame update (scripts run here). Copies scripted instances into `inst`.
+    fn update(&mut self, t: f32, inst: Option<&Buffer>) {
+        let Content::Script { host, n, cam, env, lights, last_t, error } = self else { return };
+        let dt = (t - *last_t).max(0.0);
+        *last_t = t;
+        let words = match host.frame(t as f64, dt as f64) {
+            Ok(w) => w,
+            Err(e) => {
+                if error.as_deref() != Some(&e) { eprintln!("{e}"); }
+                *error = Some(e);
+                return; // keep drawing the last good frame's state
+            }
+        };
+        match script::decode(words) {
+            Ok(f) => {
+                let k = f.boxes.len().min(MAX_SCRIPT_BOXES);
+                if let Some(buf) = inst {
+                    unsafe { std::ptr::copy_nonoverlapping(f.boxes.as_ptr(), buf.contents().as_ptr() as *mut script::ScriptInstance, k) };
+                }
+                *n = k;
+                let c = f.camera;
+                let eye = Vec3::from(c.eye);
+                let dir = (Vec3::from(c.target) - eye).try_normalize().unwrap_or(Vec3::NEG_Z);
+                *cam = Cam { eye, dir, fovy: c.fovy_deg.to_radians(), near: c.near.max(0.01), far: c.far.max(c.near + 1.0) };
+                if let Some((d, i)) = f.sun { env.sun = Vec3::from(d).try_normalize().unwrap_or(SUN.normalize()); env.sun_intensity = i; }
+                if let Some((c, d)) = f.fog { env.fog = c; env.fog_density = d; }
+                lights.clear();
+                lights.extend_from_slice(&f.lights[..f.lights.len().min(MAX_LIGHTS as usize)]);
+                *error = None;
+            }
+            Err(e) => {
+                if error.as_deref() != Some(&e) { eprintln!("script stream: {e}"); }
+                *error = Some(e);
+            }
         }
     }
 
-    fn kind(&self) -> usize { match self { Content::City { .. } => CITY, Content::Voxel { .. } => VOXEL } }
-
-    fn camera(&self, t: f32) -> (Vec3, Vec3) {
+    fn camera(&self, t: f32) -> Cam {
         match self {
-            Content::City { .. } => camera_at(t),
-            Content::Voxel { world, .. } => voxel::camera_at(world, t),
+            Content::City { .. } => { let (e, d) = camera_at(t); Cam::std(e, d) }
+            Content::Voxel { world, .. } => { let (e, d) = voxel::camera_at(world, t); Cam::std(e, d) }
+            Content::Script { cam, .. } => *cam,
         }
     }
 
-    fn visible_capacity(&self) -> usize { match self { Content::City { n, .. } => *n, Content::Voxel { .. } => 1 } }
+    fn env(&self) -> Env { match self { Content::Script { env, .. } => *env, _ => Env::default() } }
+
+    /// lights that change per frame (scripts); None = the static lights
+    fn frame_lights(&self) -> Option<&[Light]> { match self { Content::Script { lights, .. } => Some(lights), _ => None } }
+
+    pub fn script_ms(&self) -> Option<f64> { match self { Content::Script { host, .. } => Some(host.last_js_ms), _ => None } }
+
+    fn visible_capacity(&self) -> usize { match self { Content::City { n, .. } => *n, _ => 1 } }
 
     /// GPU culling for the city (camera list every frame, shadow list when due). Voxel culls per chunk on the CPU.
     fn encode_cull(&self, cb: &CmdBuf, pipes: &Pipelines, list: (&Buffer, &Buffer), planes: &[Vec4; 6], cam: Vec3, prop_dist: f32) {
@@ -311,7 +417,8 @@ impl Content {
 
     /// Draw the geometry (pipeline already set). `list` = (visible, args) for the GPU-culled city.
     /// Returns the number of draw calls issued.
-    fn encode_draw(&self, enc: &RenderEnc, cube: &Cube, uniforms: &Buffer, list: Option<(&Buffer, &Buffer)>, planes: &[Vec4; 6]) -> usize {
+    fn encode_draw(&self, enc: &RenderEnc, cube: &Cube, f: &FrameRes, list: Option<(&Buffer, &Buffer)>, planes: &[Vec4; 6]) -> usize {
+        let uniforms = &f.uniforms;
         unsafe {
             enc.setVertexBuffer_offset_atIndex(Some(uniforms), 0, 3);
             match self {
@@ -349,6 +456,15 @@ impl Content {
                         draws += 1;
                     }
                     draws
+                }
+                Content::Script { n, .. } => {
+                    if *n == 0 { return 0; }
+                    enc.setVertexBuffer_offset_atIndex(Some(&cube.v), 0, 0);
+                    enc.setVertexBuffer_offset_atIndex(f.script_inst.as_deref(), 0, 1);
+                    enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
+                        MTLPrimitiveType::Triangle, 36, MTLIndexType::UInt16, &cube.i, 0, *n,
+                    );
+                    1
                 }
             }
         }
@@ -460,8 +576,10 @@ pub struct Renderer {
     pipes: Pipelines,
     cube: Cube,
     content: Content,
-    lights: Buffer,
+    /// lights of static content (copied into each frame's light buffer)
+    static_lights: Vec<Light>,
     n_lights: usize,
+    env: Env,
     frames: Vec<FrameRes>,
     shadow_map: Texture,
     targets: Targets,
@@ -489,14 +607,15 @@ impl Renderer {
         let src = std::fs::read_to_string(&shader_path).unwrap_or_else(|_| SHADER_SRC.to_string());
         let pipes = Pipelines::new(&dev, &src, caps)?;
         let queue = dev.newCommandQueue().ok_or("no command queue")?;
-        let (content, lights) = Content::build(&dev, &cfg);
+        let (content, lights) = Content::build(&dev, &cfg)?;
         let targets = Targets::new(&dev, &cfg, (cfg.width as usize, cfg.height as usize), cfg.scale)?;
         let (cv, ci) = cube();
         let in_flight = in_flight.clamp(1, FRAME_SLOTS);
         let mut r = Renderer {
             cube: Cube { v: buffer_with(&dev, &cv), i: buffer_with(&dev, &ci) },
             n_lights: lights.len(),
-            lights: buffer_with(&dev, &lights),
+            static_lights: lights,
+            env: Env::default(),
             frames: Vec::new(),
             shadow_map: texture(&dev, MTLPixelFormat::Depth32Float, SHADOW_SIZE, SHADOW_SIZE, MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead, MTLStorageMode::Private),
             content,
@@ -543,9 +662,18 @@ impl Renderer {
                 visible: buffer_private(&self.dev, cap * 4),
                 shadow_args: buffer_with(&self.dev, &[0u32; 5]),
                 shadow_visible: buffer_private(&self.dev, cap * 4),
+                lights: buffer_with(&self.dev, &vec![Light::default(); MAX_LIGHTS as usize]),
+                script_inst: if matches!(self.content, Content::Script { .. }) {
+                    self.dev.newBufferWithLength_options(MAX_SCRIPT_BOXES * std::mem::size_of::<script::ScriptInstance>(), MTLResourceOptions::StorageModeShared)
+                } else {
+                    None
+                },
             })
             .collect()
     }
+
+    /// JS time of the last scripted frame
+    pub fn script_ms(&self) -> Option<f64> { self.content.script_ms() }
 
     pub fn content_mesh_ms(&self) -> Option<f64> {
         match &self.content { Content::Voxel { mesh_ms, .. } => Some(*mesh_ms), _ => None }
@@ -555,17 +683,17 @@ impl Renderer {
     /// targets + scaler (size/path/memoryless/upscale/scale), or nothing (cull/shadow knobs).
     pub fn set_config(&mut self, cfg: Config) -> Result<(), String> {
         let cfg = Self::effective(cfg, self.caps)?;
-        let content_changed = cfg.scene != self.cfg.scene || cfg.props != self.cfg.props || cfg.lights != self.cfg.lights || cfg.seed != self.cfg.seed;
+        let content_changed = cfg.scene != self.cfg.scene || cfg.props != self.cfg.props || cfg.lights != self.cfg.lights || cfg.seed != self.cfg.seed || cfg.script != self.cfg.script;
         let out = (cfg.width as usize, cfg.height as usize);
         let targets_changed = !self.targets.matches(&cfg, out, cfg.scale);
         if content_changed || targets_changed {
             self.wait_idle();
         }
         if content_changed {
-            let (content, lights) = Content::build(&self.dev, &cfg);
+            let (content, lights) = Content::build(&self.dev, &cfg)?;
             self.content = content;
             self.n_lights = lights.len();
-            self.lights = buffer_with(&self.dev, &lights);
+            self.static_lights = lights;
             self.frames = self.make_frames();
             self.shadow_center = None;
         }
@@ -617,23 +745,25 @@ impl Renderer {
 
     fn view_proj(&self, t: f32) -> (Mat4, Vec3) {
         let (cw, ch) = self.content_size();
-        let (eye, dir) = self.content.camera(t);
-        let view = glam::camera::rh::view::look_to_mat4(eye, dir, Vec3::Y);
-        let proj = glam::camera::rh::proj::directx::perspective(60f32.to_radians(), cw as f32 / ch as f32, 0.1, 900.0);
-        (proj * view, eye)
+        let c = self.content.camera(t);
+        let up = if c.dir.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
+        let view = glam::camera::rh::view::look_to_mat4(c.eye, c.dir, up);
+        let proj = glam::camera::rh::proj::directx::perspective(c.fovy, cw as f32 / ch as f32, c.near, c.far);
+        (proj * view, c.eye)
     }
 
     fn write_uniforms(&self, slot: usize, t: f32, vp: &Mat4, eye: Vec3) {
         let (cw, ch) = self.content_size();
-        let sun = SUN.normalize();
+        let e = self.env;
+        let sun = e.sun;
         let n = match &self.content { Content::City { n, .. } => *n, _ => 0 };
         let u = FrameUniforms {
             view_proj: vp.to_cols_array_2d(),
             inv_view_proj: vp.inverse().to_cols_array_2d(),
             shadow_vp: self.shadow_vp.to_cols_array_2d(),
             cam_pos: [eye.x, eye.y, eye.z, t],
-            sun_dir: [sun.x, sun.y, sun.z, 1.8],
-            fog: [FOG[0], FOG[1], FOG[2], 0.0035],
+            sun_dir: [sun.x, sun.y, sun.z, e.sun_intensity],
+            fog: [e.fog[0], e.fog[1], e.fog[2], e.fog_density],
             frustum: frustum_planes(vp).map(|p| p.to_array()),
             counts: [n as u32, self.n_lights as u32, 0, 0],
             viewport: [cw as f32, ch as f32, self.targets.alloc.0 as f32, self.targets.alloc.1 as f32],
@@ -644,6 +774,8 @@ impl Renderer {
             (f.uniforms.contents().as_ptr() as *mut FrameUniforms).write(u);
             (f.args.contents().as_ptr() as *mut MTLDrawIndexedPrimitivesIndirectArguments).write(reset);
             (f.shadow_args.contents().as_ptr() as *mut MTLDrawIndexedPrimitivesIndirectArguments).write(reset);
+            let ls = self.content.frame_lights().unwrap_or(&self.static_lights);
+            std::ptr::copy_nonoverlapping(ls.as_ptr(), f.lights.contents().as_ptr() as *mut Light, ls.len().min(MAX_LIGHTS as usize));
         }
     }
 
@@ -651,13 +783,14 @@ impl Renderer {
     fn shadow_due(&mut self, eye: Vec3) -> bool {
         let due = match (self.cfg.shadow_every, self.shadow_center) {
             (_, None) => true,
+            _ if self.content.dynamic() => true, // moving objects: a cached shadow would be stale
             (0, Some(c)) => c.distance(eye) > 40.0,
             (n, Some(_)) => self.frame % n as u64 == 0,
         };
         if due {
             // texel-snapped ortho box around the camera
             let texel = 2.0 * SHADOW_HALF / SHADOW_SIZE as f32;
-            let light_view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, -SUN.normalize(), Vec3::Y);
+            let light_view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, -self.env.sun, if self.env.sun.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y });
             let mut c = light_view.transform_point3(eye);
             c.x = (c.x / texel).floor() * texel;
             c.y = (c.y / texel).floor() * texel;
@@ -677,6 +810,10 @@ impl Renderer {
         use objc2_quartz_core::CAMetalDrawable;
         self.sem.wait();
         let slot = (self.frame % FRAME_SLOTS as u64) as usize;
+        // scripts run here, once the slot's buffers are free to overwrite
+        self.content.update(t, self.frames[slot].script_inst.as_ref());
+        self.env = self.content.env();
+        self.n_lights = self.content.frame_lights().map(|l| l.len()).unwrap_or(self.static_lights.len());
         let (vp, eye) = self.view_proj(t);
         let shadow = self.shadow_due(eye);
         self.write_uniforms(slot, t, &vp, eye);
@@ -741,7 +878,7 @@ impl Renderer {
         enc.setCullMode(MTLCullMode::Back);
         enc.setFrontFacingWinding(MTLWinding::CounterClockwise);
         let list = if self.cfg.gpu_cull { Some((&f.shadow_visible, &f.shadow_args)) } else { None };
-        self.content.encode_draw(&enc, &self.cube, &f.uniforms, list, shadow_planes);
+        self.content.encode_draw(&enc, &self.cube, f, list, shadow_planes);
         enc.endEncoding();
     }
 
@@ -766,7 +903,7 @@ impl Renderer {
                     a.setLoadAction(MTLLoadAction::Clear);
                     a.setStoreAction(transient_store);
                     a.setClearColor(match i {
-                        0 => MTLClearColor { red: FOG[0] as f64, green: FOG[1] as f64, blue: FOG[2] as f64, alpha: 1.0 },
+                        0 => MTLClearColor { red: self.env.fog[0] as f64, green: self.env.fog[1] as f64, blue: self.env.fog[2] as f64, alpha: 1.0 },
                         3 => MTLClearColor { red: 1.0, green: 0.0, blue: 0.0, alpha: 0.0 },
                         _ => MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0 },
                     });
@@ -780,7 +917,8 @@ impl Renderer {
                 a.setTexture(Some(color));
                 a.setLoadAction(MTLLoadAction::Clear);
                 // same sky as the deferred path: fog through the shader's tonemap curve
-                a.setClearColor(MTLClearColor { red: tonemap(FOG[0]), green: tonemap(FOG[1]), blue: tonemap(FOG[2]), alpha: 1.0 });
+                let fog = self.env.fog;
+                a.setClearColor(MTLClearColor { red: tonemap(fog[0]), green: tonemap(fog[1]), blue: tonemap(fog[2]), alpha: 1.0 });
                 a.setStoreAction(MTLStoreAction::Store);
             }
         }
@@ -794,11 +932,11 @@ impl Renderer {
         enc.setRenderPipelineState(if deferred { self.pipes.gbuffer[k].as_ref().unwrap() } else { &self.pipes.forward[k] });
         unsafe {
             enc.setFragmentBuffer_offset_atIndex(Some(&f.uniforms), 0, 0);
-            enc.setFragmentBuffer_offset_atIndex(Some(&self.lights), 0, 1);
+            enc.setFragmentBuffer_offset_atIndex(Some(&f.lights), 0, 1);
             enc.setFragmentTexture_atIndex(Some(&self.shadow_map), 0);
         }
         let list = if self.cfg.gpu_cull { Some((&f.visible, &f.args)) } else { None };
-        let draws = self.content.encode_draw(&enc, &self.cube, &f.uniforms, list, planes);
+        let draws = self.content.encode_draw(&enc, &self.cube, f, list, planes);
         if deferred {
             unsafe {
                 // light volumes: back faces of a cube per light, depth-tested against the scene
@@ -810,7 +948,7 @@ impl Renderer {
                     enc.setCullMode(MTLCullMode::Front);
                     enc.setRenderPipelineState(self.pipes.light.as_ref().unwrap());
                     enc.setVertexBuffer_offset_atIndex(Some(&self.cube.v), 0, 0);
-                    enc.setVertexBuffer_offset_atIndex(Some(&self.lights), 0, 1);
+                    enc.setVertexBuffer_offset_atIndex(Some(&f.lights), 0, 1);
                     enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
                         MTLPrimitiveType::Triangle, 36, MTLIndexType::UInt16, &self.cube.i, 0, self.n_lights,
                     );
@@ -962,11 +1100,13 @@ pub struct BenchResult {
     pub fps: f64,
     pub gpu_avg: f64,
     pub gpu_p99: f64,
+    /// JS time per frame (scripted scenes), ms
+    pub js_ms: Option<f64>,
     pub skipped: Option<String>,
 }
 
 pub fn bench(cfg: &Config, label: &str) -> BenchResult {
-    let skip = |e: String| BenchResult { label: label.into(), frames: 0, fps: 0.0, gpu_avg: 0.0, gpu_p99: 0.0, skipped: Some(e) };
+    let skip = |e: String| BenchResult { label: label.into(), frames: 0, fps: 0.0, gpu_avg: 0.0, gpu_p99: 0.0, js_ms: None, skipped: Some(e) };
     let mut r = match Renderer::new(cfg.clone(), FRAME_SLOTS) {
         Ok(r) => r,
         Err(e) => return skip(e),
@@ -981,8 +1121,10 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     let mut last_log = Instant::now();
     let mut logged = 0usize;
     let mut gpu = Stats::default();
+    let mut js = Stats::default();
     for i in 0..cfg.frames {
         r.render((cfg.warmup + i) as f32 * dt, || None);
+        if let Some(ms) = r.script_ms() { js.push(ms); }
         if cfg.log_every_s > 0.0 && last_log.elapsed().as_secs_f32() >= cfg.log_every_s {
             let done = i as usize + 1;
             println!("  t={:>6.0}s  {:>6.1} fps", start.elapsed().as_secs_f32(), (done - logged) as f32 / last_log.elapsed().as_secs_f32());
@@ -1002,7 +1144,8 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
         }
     }
     let label = if label.contains('=') { r.cfg.label() } else { format!("{label} [{}]", r.cfg.label()) };
-    BenchResult { label, frames: cfg.frames as usize, fps: cfg.frames as f64 / wall, gpu_avg: gpu.avg(), gpu_p99: gpu.pct(99.0), skipped: None }
+    let js_ms = if js.samples.is_empty() { None } else { Some(js.avg()) };
+    BenchResult { label, frames: cfg.frames as usize, fps: cfg.frames as f64 / wall, gpu_avg: gpu.avg(), gpu_p99: gpu.pct(99.0), js_ms, skipped: None }
 }
 
 /// Run every matrix row `rounds` times, interleaved (A..L, A..L, ...) so heat-soak on a fanless
@@ -1035,7 +1178,11 @@ pub fn print_results(device: &str, results: &[BenchResult]) {
     for r in results {
         match &r.skipped {
             Some(why) => println!("| {} | — | — | {why} |", r.label),
-            None => println!("| {} | {:.1} | {:.2} | {:.2} |", r.label, r.fps, r.gpu_avg, r.gpu_p99),
+            None => println!(
+                "| {} | {:.1} | {:.2} | {:.2} |{}",
+                r.label, r.fps, r.gpu_avg, r.gpu_p99,
+                r.js_ms.map(|ms| format!(" JS {ms:.2} ms/frame |")).unwrap_or_default()
+            ),
         }
     }
     println!("\n*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.");
