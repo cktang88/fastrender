@@ -9,6 +9,7 @@ const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
   bench    offscreen benchmark of one config
   matrix   offscreen benchmark of the hypothesis matrix (A..L), writes bench-results.json
   probe    print GPU capabilities
+  selftest stage-by-stage render diagnostics (writes selftest-*.png)
 options: --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|bilinear
          --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
          --warmup n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
@@ -16,7 +17,7 @@ options: --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale meta
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mode, rest) = match args.first().map(String::as_str) {
-        Some("run" | "bench" | "matrix" | "probe") => (args[0].clone(), &args[1..]),
+        Some("run" | "bench" | "matrix" | "probe" | "selftest") => (args[0].clone(), &args[1..]),
         Some("-h" | "--help") => { println!("{USAGE}"); return; }
         _ => ("run".to_string(), &args[..]),
     };
@@ -32,6 +33,7 @@ fn main() {
 fn run(mode: &str, cfg: core::Config) {
     match mode {
         "probe" => mac::probe(),
+        "selftest" => mac::selftest(cfg),
         "bench" => {
             let r = mac::bench(&cfg, &cfg.label());
             mac::print_results(&mac::device_name(), &[r]);

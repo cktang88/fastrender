@@ -55,6 +55,13 @@ pub fn device() -> Retained<Device> {
     MTLCreateSystemDefaultDevice().expect("no Metal device")
 }
 
+pub fn selftest(cfg: Config) {
+    match Renderer::new(cfg) {
+        Ok(mut r) => r.selftest(),
+        Err(e) => println!("selftest: {e}"),
+    }
+}
+
 pub fn probe() {
     let d = device();
     let c = caps(&d);
@@ -410,28 +417,88 @@ impl Renderer {
 
     pub fn frame_count(&self) -> u64 { self.frame }
 
-    /// Read back the last output frame (offscreen) and save it as PNG.
-    pub fn screenshot(&self, path: &str) -> Result<(), String> {
-        let (w, h) = (self.targets.width, self.targets.height);
+    /// Copy a BGRA8 texture into CPU memory (RGBA order).
+    pub fn read_texture(&self, tex: &ProtocolObject<dyn MTLTexture>) -> Result<(usize, usize, Vec<u8>), String> {
+        let (w, h) = (tex.width(), tex.height());
         let buf = self.dev.newBufferWithLength_options(w * h * 4, MTLResourceOptions::StorageModeShared).ok_or("readback buffer")?;
         let cb = self.queue.commandBuffer().ok_or("command buffer")?;
         unsafe {
             let b = cb.blitCommandEncoder().ok_or("blit")?;
             b.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-                &self.targets.upscaled, 0, 0, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: w, height: h, depth: 1 },
+                tex, 0, 0, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: w, height: h, depth: 1 },
                 &buf, 0, w * 4, w * h * 4,
             );
             b.endEncoding();
         }
         cb.commit();
         cb.waitUntilCompleted();
+        if let Some(e) = cb.error() { return Err(format!("readback: {}", e.localizedDescription())); }
         let mut px = unsafe { std::slice::from_raw_parts(buf.contents().as_ptr() as *const u8, w * h * 4) }.to_vec();
         for p in px.chunks_exact_mut(4) { p.swap(0, 2); }
-        let f = std::fs::File::create(path).map_err(|e| e.to_string())?;
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.write_header().and_then(|mut wr| wr.write_image_data(&px)).map_err(|e| e.to_string())
+        Ok((w, h, px))
+    }
+
+    /// Read back the last output frame (offscreen) and save it as PNG.
+    pub fn screenshot(&self, path: &str) -> Result<(), String> {
+        let (w, h, px) = self.read_texture(&self.targets.upscaled)?;
+        save_png(path, w, h, &px)
+    }
+
+    /// Stage-by-stage diagnostics: does each target hold what it should?
+    pub fn selftest(&mut self) {
+        let stats = |name: &str, r: Result<(usize, usize, Vec<u8>), String>| match r {
+            Ok((w, h, px)) => {
+                let n = (w * h) as f64;
+                let mut sum = [0f64; 4];
+                let mut distinct = std::collections::HashSet::new();
+                for (i, p) in px.chunks_exact(4).enumerate() {
+                    for c in 0..4 { sum[c] += p[c] as f64; }
+                    if i % 97 == 0 { distinct.insert([p[0], p[1], p[2], p[3]]); }
+                }
+                println!("  {name:<28} {w}x{h} mean rgba = {:.0} {:.0} {:.0} {:.0}, ~distinct colours = {}", sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n, distinct.len());
+            }
+            Err(e) => println!("  {name:<28} ERROR {e}"),
+        };
+        println!("selftest: {}", self.cfg.label());
+        // 1. a bare clear to red, then read back
+        let cb = self.queue.commandBuffer().expect("cb");
+        let rp = MTLRenderPassDescriptor::new();
+        unsafe {
+            let a = rp.colorAttachments().objectAtIndexedSubscript(0);
+            a.setTexture(Some(&self.targets.color));
+            a.setLoadAction(MTLLoadAction::Clear);
+            a.setClearColor(MTLClearColor { red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0 });
+            a.setStoreAction(MTLStoreAction::Store);
+        }
+        cb.renderCommandEncoderWithDescriptor(&rp).expect("enc").endEncoding();
+        cb.commit();
+        cb.waitUntilCompleted();
+        stats("1 clear-to-red (expect 255 0 0)", self.read_texture(&self.targets.color));
+        // 2. same clear but with renderTargetWidth/Height limited to the top-left quarter
+        let cb = self.queue.commandBuffer().expect("cb");
+        let rp = MTLRenderPassDescriptor::new();
+        rp.setRenderTargetWidth(self.targets.width / 2);
+        rp.setRenderTargetHeight(self.targets.height / 2);
+        unsafe {
+            let a = rp.colorAttachments().objectAtIndexedSubscript(0);
+            a.setTexture(Some(&self.targets.color));
+            a.setLoadAction(MTLLoadAction::Clear);
+            a.setClearColor(MTLClearColor { red: 0.0, green: 1.0, blue: 0.0, alpha: 1.0 });
+            a.setStoreAction(MTLStoreAction::Store);
+        }
+        cb.renderCommandEncoderWithDescriptor(&rp).expect("enc").endEncoding();
+        cb.commit();
+        cb.waitUntilCompleted();
+        stats("2 quarter green (64 191 0)", self.read_texture(&self.targets.color));
+        // 3. real frames
+        for i in 0..4 { self.render(1.0 + i as f32 / 60.0, None); }
+        self.wait_idle();
+        stats("3 frame: internal color", self.read_texture(&self.targets.color));
+        stats("4 frame: output", self.read_texture(&self.targets.upscaled));
+        if let Ok((w, h, px)) = self.read_texture(&self.targets.color) {
+            let _ = save_png("selftest-internal.png", w, h, &px);
+        }
+        let _ = self.screenshot("selftest-output.png");
     }
 
     fn content_size(&self) -> (usize, usize) {
@@ -708,8 +775,9 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     }
     let mut s = Stats::default();
     for &ms in r.gpu_times.lock().unwrap().iter() { s.push(ms); }
+    let label = if label.contains('=') { r.cfg.label() } else { format!("{label} [{}]", r.cfg.label()) };
     BenchResult {
-        label: label.into(),
+        label,
         frames: s.samples.len(),
         fps: s.samples.len() as f64 / wall,
         gpu_avg: s.avg(),
@@ -717,6 +785,14 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
         gpu_p99: s.pct(99.0),
         skipped: None,
     }
+}
+
+fn save_png(path: &str, w: usize, h: usize, px: &[u8]) -> Result<(), String> {
+    let f = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().and_then(|mut wr| wr.write_image_data(px)).map_err(|e| e.to_string())
 }
 
 pub fn print_results(device: &str, results: &[BenchResult]) {

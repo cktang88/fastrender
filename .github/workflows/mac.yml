@@ -18,6 +18,10 @@ jobs:
         run: xcrun -sdk macosx metal -std=metal3.0 -c shaders/fastrender.metal -o /tmp/fr.air
       - name: probe
         run: ./target/release/fastrender probe
+      - name: selftest
+        run: |
+          ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000
+          ./target/release/fastrender selftest --path forward --upscale metalfx --scale 0.5 --size 640x400 --props 20000
       - name: validation-layer run + screenshots
         env:
           MTL_DEBUG_LAYER: "1"
