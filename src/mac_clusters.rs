@@ -35,7 +35,11 @@ struct ClSlot {
     draws: Option<Buffer>,
     args: Option<Buffer>,
     out: Option<Buffer>,
-    /// capacities: records, indices
+    /// per thread: the indices its cluster emits (0: not drawn); sums of 64 of them
+    counts: Option<Buffer>,
+    sums: Option<Buffer>,
+    /// capacities: threads, records, indices
+    counts_cap: usize,
     draws_cap: usize,
     out_cap: usize,
     /// records of the frame this slot last encoded (their arguments are read back when the slot comes round again)
@@ -59,7 +63,7 @@ pub(super) struct ClusterGpu {
     px: f32,
     /// output height / main-pass render height (render scale + upscaler): the threshold is in output pixels
     pub screen_scale: f32,
-    pipe: Option<Retained<ComputePipe>>,
+    pipe: Option<[Retained<ComputePipe>; 3]>,
     builder: Option<Builder>,
     recs: Option<Buffer>,
     recs_alloc: RangeAlloc,
@@ -94,10 +98,15 @@ fn grow(dev: &Device, old: &Option<Buffer>, old_bytes: usize, bytes: usize, dead
 impl ClusterGpu {
     pub fn new(dev: &Device, shader_src: &str) -> Self {
         let mut on = clusters::enabled_by_env(std::env::var("FASTRENDER_CLUSTERS").ok().as_deref());
+        // the three kernels of shaders/fastrender.metal: select, sum, emit
         let pipe = if on {
-            let made = crate::mac_programs::builtin_library(dev, shader_src)
-                .and_then(|lib| lib.newFunctionWithName(&NSString::from_str("cluster_cull")).ok_or_else(|| "missing cluster_cull".to_string()))
-                .and_then(|f| dev.newComputePipelineStateWithFunction_error(&f).map_err(|e| format!("cluster_cull: {}", e.localizedDescription())));
+            let made = crate::mac_programs::builtin_library(dev, shader_src).and_then(|lib| {
+                let make = |name: &str| {
+                    let f = lib.newFunctionWithName(&NSString::from_str(name)).ok_or_else(|| format!("missing {name}"))?;
+                    dev.newComputePipelineStateWithFunction_error(&f).map_err(|e| format!("{name}: {}", e.localizedDescription()))
+                };
+                Ok([make("cluster_select")?, make("cluster_sum")?, make("cluster_emit")?])
+            });
             match made {
                 Ok(p) => Some(p),
                 Err(e) => {
@@ -268,26 +277,42 @@ impl ClusterGpu {
             s.out = Some(grow(dev, &None, 0, cap * 4, dead));
             s.out_cap = cap;
         }
-        let (Some(draws), Some(args), Some(out)) = (&s.draws, &s.args, &s.out) else { return };
+        let threads = self.threads as usize;
+        if s.counts_cap < threads {
+            let cap = (threads * 3 / 2).max(4096);
+            for b in [s.counts.take(), s.sums.take()].into_iter().flatten() {
+                dead.push(Dead::Buffer(b));
+            }
+            s.counts = Some(grow(dev, &None, 0, cap * 4, dead));
+            s.sums = Some(grow(dev, &None, 0, (cap / 64 + 1) * 4, dead));
+            s.counts_cap = cap;
+        }
+        let (Some(draws), Some(args), Some(out), Some(counts), Some(sums)) = (&s.draws, &s.args, &s.out, &s.counts, &s.sums) else { return };
         // SAFETY: both buffers hold at least `n` records (grown above); the slot's previous frame has completed
         unsafe {
             std::ptr::copy_nonoverlapping(self.frame.as_ptr(), draws.contents().as_ptr() as *mut DrawRec, n);
             let a = std::slice::from_raw_parts_mut(args.contents().as_ptr() as *mut u32, n * 5);
             for (k, r) in self.frame.iter().enumerate() {
-                // indexCount (the kernel adds to it), instanceCount, indexStart, baseVertex, baseInstance
+                // indexCount (the draw's last cluster writes it), instanceCount, indexStart, baseVertex, baseInstance
                 a[k * 5..k * 5 + 5].copy_from_slice(&[0, 1, r.out_base, 0, 0]);
             }
         }
         s.last = n;
         let params = [n as u32, self.threads];
         let bytes = unsafe { std::slice::from_raw_parts(params.as_ptr() as *const u8, 8) };
+        let one = |width: usize| MTLSize { width, height: 1, depth: 1 };
+        // select: per cluster, the indices it emits
+        frame.compute(&ComputeJob { pipeline: &pipe[0], buffers: &[(0, &**draws, 0), (2, &**recs, 0), (3, &**counts, 0)], textures: &[], bytes: Some((1, bytes)), threads: one(threads), per_group: one(64) });
+        // sum: per 64 threads
+        frame.compute(&ComputeJob { pipeline: &pipe[1], buffers: &[(3, &**counts, 0), (4, &**sums, 0)], textures: &[], bytes: Some((1, bytes)), threads: one(threads.div_ceil(64)), per_group: one(64) });
+        // emit: copy the selected clusters' triangles, in cluster order; the arguments' index counts
         frame.compute(&ComputeJob {
-            pipeline: pipe,
-            buffers: &[(0, &**draws, 0), (2, &**recs, 0), (3, &**idx, 0), (4, &**out, 0), (5, &**args, 0)],
+            pipeline: &pipe[2],
+            buffers: &[(0, &**draws, 0), (2, &**recs, 0), (3, &**counts, 0), (4, &**sums, 0), (5, &**idx, 0), (6, &**out, 0), (7, &**args, 0)],
             textures: &[],
             bytes: Some((1, bytes)),
-            threads: MTLSize { width: self.threads as usize, height: 1, depth: 1 },
-            per_group: MTLSize { width: 64, height: 1, depth: 1 },
+            threads: one(threads),
+            per_group: one(64),
         });
     }
 
@@ -298,7 +323,11 @@ impl ClusterGpu {
         let b = self.builder.as_ref()?;
         let st = b.stats;
         Some(format!(
-            "clusters: {} px, {} meshes in the arena ({} clusters, {} triangles at the finest level, {:.1} MB); builds: {} built + {} from the cache + {} failed, {:.0} ms total, longest {:.1} ms, {} workers{}, {} pending; last frame: {} clustered draws, {} clusters tested, triangles {} -> {}",
+            "clusters: last frame {} clustered draws, {} clusters tested, triangles {} -> {}; threshold {} px; arena: {} meshes, {} clusters, {} triangles at the finest level, {:.1} MB; builds: {} built + {} from the cache + {} failed, {:.0} ms total, longest {:.1} ms, {} workers{}, {} pending",
+            self.last.draws,
+            self.last.clusters,
+            self.last.tris_in,
+            self.last.tris_out,
             self.px,
             self.meshes,
             self.clusters,
@@ -312,10 +341,6 @@ impl ClusterGpu {
             b.workers,
             if self.blocking { " (blocking)" } else { "" },
             b.pending(),
-            self.last.draws,
-            self.last.clusters,
-            self.last.tris_in,
-            self.last.tris_out,
         ))
     }
 }

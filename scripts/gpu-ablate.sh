@@ -22,12 +22,14 @@ out="bench-results/$(date +%F)-gpu-ablate-$(sysctl -n hw.model 2>/dev/null || ec
 # name@N: the row `name` with FASTRENDER_V3_DEBUG=N (src/mac_three.rs: 512 discarding opaque draws in state order
 # instead of last and nearest first, 1024 no discarding opaque draws, 2048 instanced draws whole (not only the runs of instances in view), 4 no instanced
 # draws, 4096 only the instanced draws the game vouches for (patches/...-0003) drawn whole, 64 no textures bound)
-rows="alllights none nostatic nofarlod none@2048 none@4096 none@512 none@1024 none@4 none@64 lights0 nopoint nolights notransparent noenv nomaps lambert basic notransparent,noenv"
+rows="alllights none clusters clusters-basic nostatic nofarlod none@2048 none@4096 none@512 none@1024 none@4 none@64 lights0 nopoint nolights notransparent noenv nomaps lambert basic notransparent,noenv"
 for a in $rows; do
   echo "== $a"
-  FASTRENDER_V3_DEBUG="$( [ "${a#*@}" != "$a" ] && echo "${a#*@}" || echo 0 )" FASTRENDER_ABLATE="${a%@*}" FASTRENDER_ASSETS="$game/public" ./target/release/fastrender bench --three js/dist/world-objects.js \
+  # clusters / clusters-NAME: the row `none` / NAME with cluster LOD on (docs/notes/clusters.md; off by default)
+  cl=0; abl="${a%@*}"; case "$abl" in clusters) cl=1; abl=none;; clusters-*) cl=1; abl="${abl#clusters-}";; esac
+  FASTRENDER_CLUSTERS="$cl" FASTRENDER_V3_DEBUG="$( [ "${a#*@}" != "$a" ] && echo "${a#*@}" || echo 0 )" FASTRENDER_ABLATE="$abl" FASTRENDER_ASSETS="$game/public" ./target/release/fastrender bench --three js/dist/world-objects.js \
     --scale 1 --upscale bilinear --size "$size" --frames "$frames" --warmup 60 --gpu-passes 1 > "$out/$a.log" 2>&1
-  grep -E "gpu passes|\[ablate\]|fps|draws" "$out/$a.log" | tail -6
+  grep -E "gpu passes|\[ablate\]|fps|draws|^clusters:" "$out/$a.log" | tail -7
   # what the frame asks of the GPU (js/gpu-census.js): lights in three's light state, draws and fragment size per program
   case "$a" in alllights|none|nofarlod) grep -F "[census]" "$out/$a.log";; esac
 done

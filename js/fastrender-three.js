@@ -127,11 +127,11 @@ export class FastRenderer {
       this._textureId = (t) => this._texture(t);
       this.extensions = compressedTextureExtensions(opts.compressedTextures ?? (this.host.params && this.host.params.compressedTextures));
     }
-    // cluster LOD + GPU culling of static meshes (docs/notes/clusters.md; v3 only): true (default) honours
+    // cluster LOD + GPU culling of static meshes (docs/notes/clusters.md; v3 only; off by default): true honours
     // mesh.userData.frClusters, 'auto' also marks every plain static Mesh, false / 0 off (also host.params.clusters).
     // globalThis.__frClusters tells a game that marks its meshes to leave its own distance LODs for them off.
     const cl = opts.clusters ?? (this.host.params && this.host.params.clusters);
-    this.clusters = !this._tp || cl === false || cl === 0 || cl === '0' ? false : cl === 'auto' ? 'auto' : true;
+    this.clusters = !this._tp || !cl || cl === '0' ? false : cl === 'auto' ? 'auto' : true;
     if (this._tp) globalThis.__frClusters = !!this.clusters;
     this._initTargets();
     // the host's output size (native owns resolution): what getSize / getDrawingBufferSize report until setSize

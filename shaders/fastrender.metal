@@ -43,10 +43,6 @@ kernel void cull(device const Instance* inst [[buffer(0)]],
 
 // ------------------------------------------------------------------ cluster LOD (docs/notes/clusters.md)
 
-// One kernel for every clustered draw of the frame: a thread is one cluster of one draw. It decides whether the
-// cluster is the level of detail to draw from that draw's camera and whether it can be seen, and if so appends its
-// triangles to the draw's region of the frame's index buffer. The CPU reference is src/clusters.rs
-// (cluster_selected / cluster_visible): keep the two equal.
 struct ClusterRec {          // src/clusters.rs ClusterRec, 96 bytes
     float4 sphere;           // own bounds
     float4 cone_apex;        // w: cutoff
@@ -80,41 +76,99 @@ static float lod_error(float4 sphere, float error, const device ClusterDraw& d) 
     return e / max(distance(sphere.xyz, d.cam.xyz) - sphere.w, d.lod.y);
 }
 
-kernel void cluster_cull(const device ClusterDraw* draws [[buffer(0)]],
-                         constant ClusterParams& cp [[buffer(1)]],
-                         const device ClusterRec* clusters [[buffer(2)]],
-                         const device uint* indices [[buffer(3)]],
-                         device uint* out [[buffer(4)]],
-                         device atomic_uint* args [[buffer(5)]],
-                         uint id [[thread_position_in_grid]]) {
-    if (id >= cp.threads) return;
-    // the draw whose thread range holds this thread: the last one that starts at or before it
-    uint lo = 0, hi = cp.draws;
+// Three dispatches per frame cover every clustered draw of every pass; a thread of the first and the last is one
+// cluster of one draw (the draws' thread ranges tile 0..threads):
+//   cluster_select: is the cluster the level of detail to draw from its draw's camera, and can it be seen? Writes
+//                   its index count, or 0. The CPU reference is src/clusters.rs (cluster_selected / cluster_visible):
+//                   keep the two equal.
+//   cluster_sum:    sums of 64 counts (one thread per block of 64 threads).
+//   cluster_emit:   a selected cluster copies its triangles into its draw's region of the frame's index buffer, after
+//                   those of the draw's clusters before it (a prefix sum over counts and block sums: no atomics, so
+//                   the triangle order is the cluster order, the same every frame); the draw's last cluster writes
+//                   the indirect arguments' index count.
+
+// the draw whose thread range holds thread `id`: the last one that starts at or before it
+static uint cluster_draw(const device ClusterDraw* draws, uint n, uint id) {
+    uint lo = 0, hi = n;
     while (hi - lo > 1) {
         uint mid = (lo + hi) / 2;
         if (draws[mid].first_thread <= id) lo = mid; else hi = mid;
     }
-    const device ClusterDraw& d = draws[lo];
-    uint k = id - d.first_thread;
-    if (k >= d.cluster_count) return;
-    const device ClusterRec& c = clusters[d.cluster_base + k];
+    return lo;
+}
+
+static bool cluster_drawn(const device ClusterRec& c, const device ClusterDraw& d) {
     // the cut: this level is fine enough, the next coarser one is not
-    if (lod_error(c.self_sphere, c.cone_axis.w, d) > 1.0) return;
-    if (!(lod_error(c.parent_sphere, c.parent_error, d) > 1.0)) return;
+    if (lod_error(c.self_sphere, c.cone_axis.w, d) > 1.0) return false;
+    if (!(lod_error(c.parent_sphere, c.parent_error, d) > 1.0)) return false;
     float r = -c.sphere.w * d.lod.z;
     for (int p = 0; p < 6; p++)
-        if (dot(d.planes[p].xyz, c.sphere.xyz) + d.planes[p].w < r) return;
+        if (dot(d.planes[p].xyz, c.sphere.xyz) + d.planes[p].w < r) return false;
     if ((d.flags & 3u) == 2u && c.cone_apex.w < 1.0) {
         float3 v = c.cone_apex.xyz - d.cam.xyz;
-        if (dot(v, c.cone_axis.xyz) >= c.cone_apex.w * length(v)) return;
+        if (dot(v, c.cone_axis.xyz) >= c.cone_apex.w * length(v)) return false;
     }
-    uint n = c.index_count;
+    return true;
+}
+
+kernel void cluster_select(const device ClusterDraw* draws [[buffer(0)]],
+                           constant ClusterParams& cp [[buffer(1)]],
+                           const device ClusterRec* clusters [[buffer(2)]],
+                           device uint* counts [[buffer(3)]],
+                           uint id [[thread_position_in_grid]]) {
+    if (id >= cp.threads) return;
+    const device ClusterDraw& d = draws[cluster_draw(draws, cp.draws, id)];
+    uint k = id - d.first_thread;
+    uint n = 0;
+    if (k < d.cluster_count) {
+        const device ClusterRec& c = clusters[d.cluster_base + k];
+        if (cluster_drawn(c, d)) n = c.index_count;
+    }
+    counts[id] = n;
+}
+
+kernel void cluster_sum(constant ClusterParams& cp [[buffer(1)]],
+                        const device uint* counts [[buffer(3)]],
+                        device uint* sums [[buffer(4)]],
+                        uint id [[thread_position_in_grid]]) {
+    uint first = id * 64;
+    if (first >= cp.threads) return;
+    uint end = min(first + 64, cp.threads), s = 0;
+    for (uint t = first; t < end; t++) s += counts[t];
+    sums[id] = s;
+}
+
+kernel void cluster_emit(const device ClusterDraw* draws [[buffer(0)]],
+                         constant ClusterParams& cp [[buffer(1)]],
+                         const device ClusterRec* clusters [[buffer(2)]],
+                         const device uint* counts [[buffer(3)]],
+                         const device uint* sums [[buffer(4)]],
+                         const device uint* indices [[buffer(5)]],
+                         device uint* out [[buffer(6)]],
+                         device uint* args [[buffer(7)]],
+                         uint id [[thread_position_in_grid]]) {
+    if (id >= cp.threads) return;
+    uint draw = cluster_draw(draws, cp.draws, id);
+    const device ClusterDraw& d = draws[draw];
+    uint k = id - d.first_thread;
+    if (k >= d.cluster_count) return;
+    uint n = counts[id];
+    bool last = k + 1 == d.cluster_count;
+    if (n == 0 && !last) return;
+    // indices of the draw's clusters before this one: counts up to a block boundary, whole blocks, the rest
+    uint at = 0, t = d.first_thread;
+    uint head = min(id, (t + 63) & ~63u);
+    for (; t < head; t++) at += counts[t];
+    for (; t + 64 <= id; t += 64) at += sums[t >> 6];
+    for (; t < id; t++) at += counts[t];
     // args: 5 words per draw (MTLDrawIndexedPrimitivesIndirectArguments), word 0 = indexCount
-    uint at = atomic_fetch_add_explicit(&args[lo * 5], n, memory_order_relaxed);
-    if (at + n > d.out_cap) return; // cannot happen (no cut is larger than the finest level): never write past the region
+    if (last) args[draw * 5] = min(at + n, d.out_cap);
+    if (n == 0 || at + n > d.out_cap) return; // (no cut is larger than the finest level: never write past the region)
+    const device ClusterRec& c = clusters[d.cluster_base + k];
     uint src = d.index_base + c.index_offset, dst = d.out_base + at;
     for (uint i = 0; i < n; i++) out[dst + i] = indices[src + i];
 }
+
 
 // ------------------------------------------------------------------ geometry
 

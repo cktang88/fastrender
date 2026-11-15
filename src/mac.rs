@@ -355,10 +355,10 @@ impl Content {
                 // width / height: the output size (FastRenderer defaults its size to it; render targets sized from getSize)
                 // FASTRENDER_ABLATE=a,b,...: GPU-cost diagnostics applied by the game bundle (js/examples/world-objects.three.mjs)
                 let ablate: String = std::env::var("FASTRENDER_ABLATE").unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || *c == ',' || *c == '-').collect();
-                // cluster LOD (docs/notes/clusters.md): FASTRENDER_CLUSTERS=0 or the ablation row `noclusters` switch it off for
-                // the game's JS too (its own far LODs come back), `auto` lets the renderer mark static meshes itself
+                // cluster LOD (docs/notes/clusters.md), off by default: FASTRENDER_CLUSTERS=1 switches it on natively and for the
+                // game's JS (which then leaves its own far LODs off), `auto` lets the renderer mark static meshes itself
                 let clusters_env = std::env::var("FASTRENDER_CLUSTERS").ok();
-                let clusters = if !crate::clusters::enabled_by_env(clusters_env.as_deref()) || ablate.split(',').any(|a| a == "noclusters") { "0" } else if clusters_env.as_deref() == Some("auto") { "\"auto\"" } else { "1" };
+                let clusters = if !crate::clusters::enabled_by_env(clusters_env.as_deref()) { "0" } else if clusters_env.as_deref() == Some("auto") { "\"auto\"" } else { "1" };
                 let params = format!("{{\"boxes\": {}, \"lights\": {}, \"programs\": \"{}\", \"width\": {}, \"height\": {}, \"ablate\": \"{}\", \"clusters\": {}}}", cfg.props, cfg.lights, cfg.programs, cfg.width, cfg.height, ablate, clusters);
                 (Content::Three(Box::new(ThreeScene::new(dev, &src, &cfg.script, &params)?)), Vec::new())
             }

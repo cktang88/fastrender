@@ -1,0 +1,87 @@
+From 7dd2293c517b51881c8d4a561ff43f88a5977501 Mon Sep 17 00:00:00 2001
+From: Kwuang Tang <arctangent20@yahoo.com>
+Date: Sun, 15 Nov 2026 20:16:22 +0000
+Subject: [PATCH] fastrender: merged block meshes are marked for cluster LOD
+ (userData.frClusters); no far twins while the renderer's clusters are on
+
+bake() marks every merged mesh. FastRenderer sets globalThis.__frClusters when its cluster LOD is on
+(off by default); chunkLod.ts then builds and shows no twins: the renderer picks a level per cluster.
+three's WebGLRenderer ignores the field and the global is absent in the browser: no change there.
+---
+ src/nyc/chunkLod.ts     | 11 +++++++++--
+ src/nyc/common.ts       |  3 +++
+ tests/chunk-lod.test.ts |  9 ++++++++-
+ 3 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/src/nyc/chunkLod.ts b/src/nyc/chunkLod.ts
+index ed1b337..cedf57f 100644
+--- a/src/nyc/chunkLod.ts
++++ b/src/nyc/chunkLod.ts
+@@ -55,7 +55,14 @@ export const CHUNK_LOD = {
+ let ok = false;
+ simplifierReady.then(() => (ok = true)).catch(() => {});
+ /** the simplifier's wasm has loaded and the LODs are on */
+-export const chunkLodReady = () => ok && CHUNK_LOD.on;
++export const chunkLodReady = () => ok && CHUNK_LOD.on && !clustered();
++
++/**
++ * The renderer draws the merged meshes through cluster LODs of its own (fastrender: bake() marks them
++ * `userData.frClusters`, and FastRenderer sets this global when its clusters are on): a level per cluster by its
++ * error on screen, so the twins here would only be a second, coarser decision on top. No twin is built or shown.
++ */
++export const clustered = () => (globalThis as { __frClusters?: boolean }).__frClusters === true;
+ 
+ /** a hidden version's raycast: Raycaster ignores `visible`, so without this a ray would hit both versions */
+ const noRaycast: THREE.Mesh['raycast'] = () => {};
+@@ -233,6 +240,6 @@ export function setChunkLevel(lod: ChunkLod, level: number) {
+ /** the level of a block whose nearest point is `d` metres away and that shows level `cur` now */
+ export function chunkLevel(d: number, cur: number) {
+   let level = 0;
+-  if (CHUNK_LOD.on) for (const [i, l] of CHUNK_LOD.levels.entries()) if (d > l.dist - (cur > i ? l.back : 0)) level = i + 1;
++  if (CHUNK_LOD.on && !clustered()) for (const [i, l] of CHUNK_LOD.levels.entries()) if (d > l.dist - (cur > i ? l.back : 0)) level = i + 1;
+   return level;
+ }
+diff --git a/src/nyc/common.ts b/src/nyc/common.ts
+index 4c6f60f..427f3dc 100644
+--- a/src/nyc/common.ts
++++ b/src/nyc/common.ts
+@@ -113,6 +113,9 @@ export function bake(src: THREE.Object3D): THREE.Group {
+     mesh.receiveShadow = true;
+     mesh.userData.owned = true;
+     mesh.userData.baked = true;
++    // fastrender: a static merged mesh, drawn through its cluster DAG (cluster LOD + GPU culling in the native
++    // renderer; three's WebGLRenderer ignores the field). The far twins of nyc/chunkLod.ts stay off then.
++    mesh.userData.frClusters = true;
+     out.add(mesh);
+   }
+   return out;
+diff --git a/tests/chunk-lod.test.ts b/tests/chunk-lod.test.ts
+index fdbb255..e1f7bf4 100644
+--- a/tests/chunk-lod.test.ts
++++ b/tests/chunk-lod.test.ts
+@@ -7,7 +7,7 @@ import * as THREE from 'three';
+ import { test, expect, between, fmt } from './qa';
+ import { nycChunk } from './world';
+ import { simplifierReady, surfaceDistance } from '../src/meshlod-core';
+-import { CHUNK_LOD, chunkLodSteps, chunkLevel, setChunkLevel, type ChunkLod } from '../src/nyc/chunkLod';
++import { CHUNK_LOD, chunkLodSteps, chunkLevel, chunkLodReady, clustered, setChunkLevel, type ChunkLod } from '../src/nyc/chunkLod';
+ import { FLEET_LOD, fleetDistant } from '../src/nyc/vehicleFleet';
+ 
+ const tris = (m: THREE.Mesh) => m.geometry.index!.count / 3;
+@@ -145,6 +145,13 @@ test('exactly one version of each merged mesh is shown per level; the level foll
+   CHUNK_LOD.on = false;
+   expect(chunkLevel(500, L.length) === 0, 'switched off: the originals');
+   CHUNK_LOD.on = true;
++  // a renderer with cluster LODs of its own (fastrender): no twins, the originals stay (they carry the mark)
++  const g = globalThis as { __frClusters?: boolean };
++  g.__frClusters = true;
++  expect(clustered() && !chunkLodReady() && chunkLevel(500, 0) === 0 && chunkLevel(500, L.length) === 0, 'renderer clusters on: the originals at every distance, no twin built');
++  delete g.__frClusters;
++  expect(!clustered() && chunkLevel(500, 0) === L.length, 'renderer clusters off: the twins again');
++  for (const e of lod) expect(e[0]!.userData.frClusters === true, 'a merged mesh is marked for the renderer');
+   // one pixel of a 1600 px high drawable at 70 degrees: a level's error is at most ~1 px where it starts
+   for (const l of CHUNK_LOD.levels) expect(l.error <= ((l.dist * 2 * Math.tan((35 * Math.PI) / 180)) / 1600) * 1.05, `error ${l.error} m at ${l.dist} m is over a pixel`);
+ });
+-- 
+2.43.0
+

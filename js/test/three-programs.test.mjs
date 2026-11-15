@@ -996,8 +996,11 @@ else {
     return [Object.fromEntries(flags), r];
   };
   const none = { marked: false, plain: false, optout: false, small: false, instanced: false, unculled: false, morph: false };
-  const [byDefault, r1] = flagsOf({});
-  assert.deepEqual(byDefault, { ...none, marked: true }, 'default: only what the game marks (never an InstancedMesh)');
+  const [byDefault, r0] = flagsOf({});
+  assert.deepEqual(byDefault, none, 'off by default');
+  assert.equal(r0.clusters, false);
+  const [marked, r1] = flagsOf({ clusters: true });
+  assert.deepEqual(marked, { ...none, marked: true }, 'on: only what the game marks (never an InstancedMesh)');
   assert.equal(r1.clusters, true);
   assert.equal(globalThis.__frClusters, true, 'the game reads this to leave its own distance LODs off for marked meshes');
   const [auto] = flagsOf({ clusters: 'auto' });
@@ -1006,7 +1009,7 @@ else {
   assert.deepEqual(off, none);
   assert.equal(r3.clusters, false);
   assert.equal(globalThis.__frClusters, false);
-  const hp = makeHost(); hp.params = { clusters: 0 };
-  assert.equal(new FastRenderer({ host: hp, programs: 'three', commandWords: 1 << 20 }).clusters, false, 'host.params.clusters = 0 (FASTRENDER_CLUSTERS=0)');
-  console.log(`[three r${REV}] cluster LOD: userData.frClusters -> DRAWS flag 32768; clusters: 'auto' marks plain static meshes; false / host.params.clusters = 0 switch it off`);
+  const hp = makeHost(); hp.params = { clusters: 1 };
+  assert.equal(new FastRenderer({ host: hp, programs: 'three', commandWords: 1 << 20 }).clusters, true, 'host.params.clusters = 1 (FASTRENDER_CLUSTERS=1)');
+  console.log(`[three r${REV}] cluster LOD: userData.frClusters -> DRAWS flag 32768; clusters: true / host.params.clusters = 1 switch it on, 'auto' also marks plain static meshes`);
 }

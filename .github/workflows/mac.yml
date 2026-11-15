@@ -344,6 +344,11 @@ jobs:
           node js/golden/diff.mjs js/golden/world-objects-ref.png golden-native-world-objects.png golden-diff-world-objects.png | tee world-objects-golden.json
           echo "::notice title=world-objects golden (MAE vs browser, r187)::$(cat world-objects-golden.json)"
           { echo "world-objects golden: $(cat world-objects-golden.json)"; cat world-objects-summary.txt; } >> "$GITHUB_STEP_SUMMARY"
+          # cluster LOD (docs/notes/clusters.md; off by default): the same frame with it on, under API validation; its
+          # golden is reported, not gated. The `clusters:` line has the triangles in -> out of the golden camera.
+          rc5=0; FASTRENDER_CLUSTERS=1 FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 --shot golden-native-world-objects-clusters.png > world-objects-clusters.txt 2>&1 || rc5=$?
+          { grep -E "^clusters:|draws per pass|three frame cost|GPU error|rror" world-objects-clusters.txt | cut -c1-600 | tail -12; node js/golden/diff.mjs js/golden/world-objects-ref.png golden-native-world-objects-clusters.png golden-diff-world-objects-clusters.png 2>&1 | tail -1; node js/golden/diff.mjs golden-native-world-objects.png golden-native-world-objects-clusters.png golden-diff-world-objects-clusters-vs-plain.png 2>&1 | tail -1; } > world-objects-clusters-summary.txt
+          bash .github/annotate.sh $([ $rc5 -eq 0 ] && echo notice || echo error) "world-objects with cluster LOD (exit $rc5; MAE vs browser, then vs the plain native frame)" world-objects-clusters-summary.txt 20
           # per-frame costs once the level has streamed in (no API validation; the paravirtual GPU's ms are not an Air's)
           rc4=0; env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 60 > world-objects-cost.txt 2>&1 || rc4=$?
           grep -E "world-objects:|three frame cost|three programs:|fps" world-objects-cost.txt | cut -c1-1500 > world-objects-cost-summary.txt
@@ -358,6 +363,13 @@ jobs:
           done
           grep -F "[census]" wo-ab-none.txt | cut -c1-260 | head -12 >> world-objects-gpu-ab.txt || true
           bash .github/annotate.sh notice "world-objects GPU cost A/B (alllights = before trimLights, none = now, @512 = discard draws in state order, @2048 = instanced draws not split, @4096 = the game-hinted ones not split)" world-objects-gpu-ab.txt 40
+          # cluster LOD off (what ships) vs on (docs/notes/clusters.md), interleaved, twice each
+          : > world-objects-clusters-ab.txt
+          for a in 0 1 0 1; do
+            FASTRENDER_CLUSTERS="$a" FASTRENDER_ABLATE=none env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 40 --warmup 80 --gpu-passes 1 > "wo-cl-$a.txt" 2>&1 || true
+            { echo "== clusters $a"; grep -E "gpu passes|three frame cost|^clusters:" "wo-cl-$a.txt" | cut -c1-290; } >> world-objects-clusters-ab.txt
+          done
+          bash .github/annotate.sh notice "world-objects cluster LOD A/B (FASTRENDER_CLUSTERS 0 = what ships, 1 = on)" world-objects-clusters-ab.txt 30
       # WP3 (docs/research/perf-audit-2026-11.md): async compile on workers, persisted pipeline manifest + prewarm,
       # MTLBinaryArchive. Seven launches per scene (.github/compile-launch.sh): the old behaviour (blocking, one
       # worker, nothing persisted), blocking and async cold, async warm with / without the archive and with / without

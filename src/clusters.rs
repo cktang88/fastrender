@@ -246,6 +246,26 @@ pub fn projected(sphere: &[f32; 4], error: f32, d: &DrawRec) -> f32 {
     e / dist
 }
 
+/// `kernel: cluster_emit`'s prefix sum: the indices emitted by the threads `first_thread..id`, from the per-thread
+/// counts and the sums of every 64 of them (`sums[b]` = counts[64 b .. 64 b + 64]).
+pub fn emit_offset(counts: &[u32], sums: &[u32], first_thread: u32, id: u32) -> u32 {
+    let (mut at, mut t) = (0u32, first_thread);
+    let head = id.min((t + 63) & !63);
+    while t < head {
+        at += counts[t as usize];
+        t += 1;
+    }
+    while t + 64 <= id {
+        at += sums[(t >> 6) as usize];
+        t += 64;
+    }
+    while t < id {
+        at += counts[t as usize];
+        t += 1;
+    }
+    at
+}
+
 /// The cut rule: this cluster's level is fine enough and the next coarser one is not.
 pub fn cluster_selected(c: &ClusterRec, d: &DrawRec) -> bool { projected(&c.self_sphere, c.cone_axis[3], d) <= 1.0 && projected(&c.parent_sphere, c.parent_error, d) > 1.0 }
 
@@ -539,8 +559,8 @@ impl Drop for Builder {
     }
 }
 
-/// `FASTRENDER_CLUSTERS`: unset / anything but `0` / `off` / `false`: on.
-pub fn enabled_by_env(v: Option<&str>) -> bool { !matches!(v.map(str::trim), Some("0" | "off" | "false" | "no")) }
+/// `FASTRENDER_CLUSTERS`: `1` / `on` / `true` / `auto`: on. Off by default (docs/notes/clusters.md "Status").
+pub fn enabled_by_env(v: Option<&str>) -> bool { matches!(v.map(str::trim), Some("1" | "on" | "true" | "auto")) }
 
 #[cfg(test)]
 mod tests {
@@ -834,7 +854,18 @@ mod tests {
 
     #[test]
     fn the_switch_reads_the_environment() {
-        assert!(enabled_by_env(None) && enabled_by_env(Some("1")) && enabled_by_env(Some("auto")));
-        assert!(!enabled_by_env(Some("0")) && !enabled_by_env(Some("off")));
+        assert!(enabled_by_env(Some("1")) && enabled_by_env(Some("auto")));
+        assert!(!enabled_by_env(None) && !enabled_by_env(Some("0")) && !enabled_by_env(Some("off")));
+    }
+
+    #[test]
+    fn the_emit_prefix_sum_is_the_plain_one() {
+        let counts: Vec<u32> = (0..1000u32).map(|i| if i % 3 == 0 { 0 } else { (i * 7919) % 385 }).collect();
+        let sums: Vec<u32> = counts.chunks(64).map(|c| c.iter().sum()).collect();
+        for first in [0u32, 1, 63, 64, 65, 200, 448, 999] {
+            for id in (first..1000).step_by(7).chain([first, 999]) {
+                assert_eq!(emit_offset(&counts, &sums, first, id), counts[first as usize..id as usize].iter().sum::<u32>(), "{first}..{id}");
+            }
+        }
     }
 }
