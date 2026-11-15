@@ -103,7 +103,7 @@ pub(super) struct PassSlot {
     draws: Vec<Draw>,
     visible: Vec<(usize, usize)>,
     casters: Vec<(usize, usize)>,
-    uni: HashMap<u32, (usize, usize)>,
+    uni: FastMap<(usize, usize)>,
     layout: RingLayout,
     layout_slot: usize,
     shadow_ty: u32,
@@ -135,7 +135,7 @@ impl PassSlot {
             draws: Vec::new(),
             visible: Vec::new(),
             casters: Vec::new(),
-            uni: HashMap::new(),
+            uni: FastMap::default(),
             layout: RingLayout::default(),
             layout_slot: 0,
             shadow_ty: three::shadow_type::PCF,
@@ -155,9 +155,9 @@ impl PassSlot {
 
 /// Render targets, the frame's passes, and the small pipelines passes need (clears).
 pub(super) struct Targets {
-    rts: HashMap<u32, Rt>,
+    rts: FastMap<Rt>,
     /// texture id -> attachment texture + sampler (render-target colour / depth textures, FramebufferTextures)
-    textures: HashMap<u32, (Texture, Sampler)>,
+    textures: FastMap<(Texture, Sampler)>,
     /// FramebufferTexture ids -> meta (allocated on upload, re-made in the source's format on the first copy)
     framebuffer: HashMap<u32, TextureMeta>,
     passes: Vec<PassSlot>,
@@ -189,8 +189,8 @@ pub(super) struct Targets {
 impl Targets {
     pub fn new(dev: &Device) -> Self {
         Targets {
-            rts: HashMap::new(),
-            textures: HashMap::new(),
+            rts: FastMap::default(),
+            textures: FastMap::default(),
             framebuffer: HashMap::new(),
             passes: Vec::new(),
             cur: None,

@@ -47,13 +47,18 @@ impl ShadowMap {
 #[derive(Clone, Copy)]
 pub(super) struct ShadowProg {
     block: usize,
-    tex: usize,
+    /// first texture id in `uni_tex`
+    pub(super) tex: usize,
     pipe: u32,
     depth: u32,
     /// the depth material instance id
-    mat: u32,
+    pub(super) mat: u32,
     side: u32,
     wireframe: bool,
+    /// the stream plan of (the caster's geometry, the depth program) in `Geo::plans`
+    plan: u16,
+    /// the depth material instance's bind list (`resolve_binds` fills it at the end of prepare)
+    pub(super) bind: u32,
 }
 
 /// One caster in one shadow pass.
@@ -211,20 +216,20 @@ impl ThreeScene {
                     }
                     let Some(g) = self.geos.get(&d.geometry) else { continue };
                     let Some(main) = self.mats3.get(&d.material) else { continue };
+                    let (main_side, main_shadow_side, main_wireframe) = (main.meta.side, main.meta.shadow_side, main.meta.wireframe);
                     if d.flags & (flag::NO_CULL | flag::INSTANCED) == 0 {
                         let (c, r) = world_sphere(&d.rows, g.sphere);
                         if !sphere_visible(&planes, c, r) {
                             continue;
                         }
                     }
-                    let main_meta = main.meta.clone();
                     // packed maps: every caster on the native path (three's packing depth programs are not sent)
                     let id = if packed { 0 } else { self.shadow_ids.get(i).map_or(0, |p| if point { p[1] } else { p[0] }) };
                     let prog = if id != 0 {
                         match (self.uni.get(&id).copied(), self.instance_pipeline(dev, id, &d, Target::Depth)) {
-                            (Some((block, tex)), Some(pipe)) => {
-                                let m = &self.mats3[&id].meta;
-                                Some(ShadowProg { block, tex, pipe, depth: self.mats3[&id].depth, mat: id, side: m.side, wireframe: m.wireframe })
+                            (Some((block, tex)), Some((pipe, plan))) => {
+                                let m = &self.mats3[&id];
+                                Some(ShadowProg { block, tex, pipe, depth: m.depth, mat: id, side: m.meta.side, wireframe: m.meta.wireframe, plan, bind: u32::MAX })
                             }
                             _ => None, // the depth program failed (reported): native depth-only
                         }
@@ -241,9 +246,9 @@ impl ThreeScene {
                     // side rendered (WebGLShadowMap.getDepthMaterial): shadowSide, else the opposite side (VSM: the same)
                     let side = match &prog {
                         Some(p) => p.side,
-                        None => main_meta.shadow_side.unwrap_or(if vsm { main_meta.side } else { match main_meta.side { 0 => 1, 1 => 0, s => s } }),
+                        None => main_shadow_side.unwrap_or(if vsm { main_side } else { match main_side { 0 => 1, 1 => 0, s => s } }),
                     };
-                    self.shadow_list.push(ShadowDraw3 { i, obj, prog, side, wireframe: prog.map_or(main_meta.wireframe, |p| p.wireframe), depth: depth_le });
+                    self.shadow_list.push(ShadowDraw3 { i, obj, prog, side, wireframe: prog.map_or(main_wireframe, |p| p.wireframe), depth: depth_le });
                 }
                 self.shadow_jobs.push(ShadowJob { map, face, frame, pass, draws: first..self.shadow_list.len() });
             }
@@ -319,31 +324,37 @@ impl ThreeScene {
                 enc.setFragmentBuffer_offset_atIndex(Some(ring), job.frame, xlat::FRAME_BLOCK_BUFFER as usize);
                 enc.setFragmentBuffer_offset_atIndex(Some(ring), job.pass, xlat::PASS_BUFFER as usize);
             }
-            let mut last_depth = u32::MAX;
+            // what this encoder holds (src/mac_bind.rs): only state that changes between casters is set
+            let mut st = bind::EncState::new();
             for sd in &self.shadow_list[job.draws.clone()] {
                 let d = &self.draws[sd.i];
-                let g = &self.geos[&d.geometry];
+                let Some(g) = self.geos.get(&d.geometry) else { continue };
                 // side rendered: 0 front (cull back), 1 back (cull front), 2 both; the y-flipped projection mirrors winding
-                enc.setCullMode(match sd.side { 0 => MTLCullMode::Back, 1 => MTLCullMode::Front, _ => MTLCullMode::None });
+                st.cull(&enc, match sd.side { 0 => MTLCullMode::Back, 1 => MTLCullMode::Front, _ => MTLCullMode::None });
                 let mirrored = Self::winding(d) == MTLWinding::Clockwise;
-                enc.setFrontFacingWinding(if mirrored { MTLWinding::CounterClockwise } else { MTLWinding::Clockwise });
-                enc.setTriangleFillMode(if sd.wireframe { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
+                st.winding(&enc, if mirrored { MTLWinding::CounterClockwise } else { MTLWinding::Clockwise });
+                st.fill(&enc, if sd.wireframe { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
                 let depth = sd.prog.map_or(sd.depth, |p| p.depth);
-                if depth != last_depth {
+                if depth != st.depth {
                     enc.setDepthStencilState(Some(self.progs.depth_at(depth)));
-                    last_depth = depth;
+                    st.depth = depth;
                 }
                 unsafe { enc.setVertexBufferOffset_atIndex(sd.obj, xlat::OBJECT_BLOCK_BUFFER as usize) };
                 match sd.prog {
                     Some(p) => {
                         let Some(pipe) = self.progs.pipeline_at(p.pipe) else { continue };
-                        let Some(prog) = self.mats3.get(&p.mat).and_then(|m| self.progs.progs.get(&m.meta.program)) else { continue };
-                        enc.setRenderPipelineState(pipe);
+                        if p.pipe != st.pipe {
+                            enc.setRenderPipelineState(pipe);
+                            st.pipe = p.pipe;
+                        }
                         unsafe { enc.setFragmentBufferOffset_atIndex(sd.obj, xlat::OBJECT_BLOCK_BUFFER as usize) };
-                        self.bind_program_draw(&enc, prog, d, g, p.block, p.tex);
+                        self.bind_program_draw(&enc, &mut st, d, g, p.plan, p.block, p.bind);
                     }
                     None => {
-                        enc.setRenderPipelineState(if map.packed.is_some() { &self.pipes.depth3_packed } else { &self.pipes.depth3 });
+                        if st.pipe != bind::PIPE_NATIVE {
+                            enc.setRenderPipelineState(if map.packed.is_some() { &self.pipes.depth3_packed } else { &self.pipes.depth3 });
+                            st.pipe = bind::PIPE_NATIVE;
+                        }
                         let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
                         let instanced: u32 = inst.is_some() as u32;
                         unsafe {
@@ -351,6 +362,8 @@ impl ThreeScene {
                             enc.setVertexBuffer_offset_atIndex(Some(inst.map_or(&self.progs.defaults, |x| &x.cols)), 0, 5);
                             enc.setVertexBytes_length_atIndex(NonNull::new(&instanced as *const u32 as *mut c_void).unwrap(), 4, 6);
                         }
+                        // vertex buffers 4..6 are not the program casters' any more
+                        st.forget_streams();
                     }
                 }
                 self.draw(&enc, d, g);

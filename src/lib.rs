@@ -11,6 +11,7 @@ pub mod voxel;
 pub mod script;
 pub mod three;
 pub mod xlat;
+pub mod bindlist; // id tables, program / stream plans, bind lists, last-bound filter: the backend-neutral encoder data
 pub mod ring; // v3 per-slot ring layout + bounds-checked writes (src/mac_three.rs)
 pub mod image; // __fr.readFile / __fr.decodeImage for real web games (JavaScriptCore host)
 pub mod pipeline_manifest; // async compile queue, stage dedupe, persisted pipeline manifest (src/mac_programs.rs)

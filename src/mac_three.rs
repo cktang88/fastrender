@@ -8,6 +8,11 @@
 //! modules: mac_upload.rs (registry: apply + upload_*, samplers), mac_shadow.rs (v3 shadow maps), mac_bind.rs (per-draw
 //! binding and the draw call), mac_targets.rs (render targets and passes).
 //!
+//! The v3 hot path (docs/notes/bind-lists.md, src/bindlist.rs): the registries are id-indexed tables; prepare resolves
+//! every draw to indices once (`Draw3`: pipeline, depth state, raster bits, ring offsets, its geometry's stream plan,
+//! its material instance's bind list) and sorts opaque draws by (renderOrder, pipeline, material, geometry); the
+//! encoder walks `Draw3` and issues only the Metal calls whose state differs from the previous draw (`EncState`).
+//!
 //! Two material paths, chosen by the bundle (`FastRenderer({ programs })`, magic of the stream):
 //! - v3 (`programs: 'three'`, the default): three.js's OWN programs, translated to MSL in process
 //!   (`xlat`, `mac_programs.rs`), fed three's own uniform values (MATERIAL_UNIFORMS) at buffer(1), FrObject
@@ -15,8 +20,7 @@
 //! - v2 (`programs: 'native'`): materials described by value for the hand-written `vs_three`/`fs_three`
 //!   (the fast tier).
 
-use std::collections::HashMap;
-
+use crate::bindlist::{self, BindArena, FastMap, IdMap, MatBinds, ProgPlan, StreamPlan};
 use crate::mac_programs::{Programs, StreamSig, Target, ATTR_BUFFER0, MAX_SAMPLERS, SIG_INSTANCE};
 use crate::three::{ProgramMaterialMeta, ShadowRec};
 use crate::xlat;
@@ -81,20 +85,43 @@ struct Mat3State {
     depth: u32,
     /// pipelines built for this instance, per stream signature and target (u32::MAX: the build failed)
     pipes: Vec<(StreamSig, Target, u32)>,
+    /// its bind lists (src/bindlist.rs): built on first use, kept until its textures or the registry change
+    binds: MatBinds,
+    /// the bind list resolved for (prepare stamp, first texture id in `uni_tex`): one lookup per pass, not per draw
+    memo: (u64, u32, u32),
 }
 
-/// a v3 draw this frame
+impl Mat3State {
+    fn new(meta: ProgramMaterialMeta, depth: u32) -> Self { Mat3State { meta, depth, pipes: Vec::new(), binds: MatBinds::default(), memo: (0, 0, 0) } }
+}
+
+/// `Draw3::raster` bits
+const RASTER_NO_CULL: u8 = 1;
+const RASTER_CLOCKWISE: u8 = 2;
+const RASTER_WIREFRAME: u8 = 4;
+
+/// A v3 draw this frame, resolved in prepare: indices and offsets only, so the encoder looks nothing up by name or
+/// by hash (the per-draw record of docs/notes/bind-lists.md; a Metal 4 encoder consumes the same record).
 #[derive(Clone, Copy)]
 struct Draw3 {
     /// index into `draws`
-    i: usize,
+    i: u32,
     /// FrObject offset in the slot's ring
-    obj: usize,
+    obj: u32,
     /// material uniforms: block offset in the ring, first texture id in `uni_tex`
-    block: usize,
-    tex: usize,
+    block: u32,
+    tex: u32,
+    /// the material instance's bind list (`bind_arena`; u32::MAX: nothing to bind)
+    bind: u32,
     pipe: u32,
     depth: u32,
+    /// polygon offset (factor, units)
+    bias: (f32, f32),
+    /// the stream plan of (its geometry, its program): index into `Geo::plans`
+    plan: u16,
+    /// RASTER_*: WebGLState.setMaterial's cull mode / front face (with the mirrored-transform and render-target
+    /// flips applied) and wireframe
+    raster: u8,
 }
 
 /// matches `ThreeObj` in the shader
@@ -120,6 +147,8 @@ struct ThreeMat {
 }
 
 struct Geo {
+    /// v3: how each program that draws this geometry reads it (built on first use, src/bindlist.rs)
+    plans: Vec<StreamPlan>,
     /// v3: every attribute by interned name: (name, buffer, floats per vertex)
     attrs: Vec<(u32, Buffer, u32)>,
     /// v3: per-instance attributes (three's InstancedBufferAttribute, e.g. a building's per-window size or a crowd's
@@ -189,13 +218,13 @@ pub struct ThreeScene {
     /// where frames come from: JavaScriptCore in-process, or the Electron addon's feed (src/host.rs)
     host: Box<dyn FrameSource>,
     pipes: Pipes,
-    geos: HashMap<u32, Geo>,
-    texs: HashMap<u32, (Texture, TextureMeta, Sampler)>,
-    mats: HashMap<u32, Mat>,
+    geos: IdMap<Geo>,
+    texs: IdMap<(Texture, TextureMeta, Sampler)>,
+    mats: IdMap<Mat>,
     mat_rows: Vec<ThreeMat>,
     mat_buf: Buffer,
     mat_dirty: bool,
-    insts: HashMap<u32, Inst>,
+    insts: IdMap<Inst>,
     dummy: Buffer,
     white: Texture,
     white_s: Sampler,
@@ -211,10 +240,26 @@ pub struct ThreeScene {
     pub unsupported_resources: usize,
     // ---- v3
     progs: Programs,
-    mats3: HashMap<u32, Mat3State>,
+    mats3: IdMap<Mat3State>,
     /// material instance id -> (block offset in this frame's ring, first texture id in `uni_tex`)
-    uni: HashMap<u32, (usize, usize)>,
+    uni: FastMap<(usize, usize)>,
     uni_tex: Vec<u32>,
+    /// per program: its texture slots and attributes as enums / indices (built at first use after `Programs::add`)
+    prog_plans: IdMap<ProgPlan>,
+    /// bumped when a program is added: stream plans built before are rebuilt
+    stream_epoch: u32,
+    /// every material instance's bind list (src/bindlist.rs); invalidated in update() when the registry changes
+    bind_arena: BindArena,
+    /// interned names of three's `instanceMatrix` / `instanceColor`
+    inst_names: (u32, u32),
+    /// one per prepare_one() call (a pass of a frame): keys `Mat3State::memo`
+    prep_stamp: u64,
+    /// the entered pass's shadow maps as one number (`shadow_signature`): bind lists with a shadow slot are per value
+    shadow_sig: u64,
+    /// prepare scratch (kept for their capacity): opaque (sort key, draw index, record), transparent (renderOrder,
+    /// distance², record)
+    scratch_opaque: Vec<((i32, u64, u32), u32, Draw3)>,
+    scratch_transparent: Vec<(i32, f32, Draw3)>,
     /// ring regions this frame (src/ring.rs): uniform blocks, main-pass FrFrame and FrPass, the shadow passes' area
     /// (FrFrame/FrPass per pass, VSM blocks), the main pass's FrObjects, the shadow passes' FrObjects (one per draw,
     /// identity view); `layout_slot`: the slot whose ring holds this layout's uniform blocks
@@ -353,16 +398,20 @@ impl ThreeScene {
             };
             t
         };
+        let mut progs = Programs::new(dev)?;
+        progs.depth(dev, &serde_json::from_str::<ProgramMaterialMeta>(r#"{"program":0}"#).map_err(|e| e.to_string())?);
+        let inst_names = (progs.name_id("instanceMatrix"), progs.name_id("instanceColor"));
+        progs.name_id("position");
         Ok(ThreeScene {
             host,
             pipes: pipes(dev, shader_src)?,
-            geos: HashMap::new(),
-            texs: HashMap::new(),
-            mats: HashMap::new(),
+            geos: IdMap::new(),
+            texs: IdMap::new(),
+            mats: IdMap::new(),
             mat_rows: Vec::new(),
             mat_buf: buffer_with(dev, &[ThreeMat::default()]),
             mat_dirty: false,
-            insts: HashMap::new(),
+            insts: IdMap::new(),
             dummy: buffer_with(dev, &[0f32; 64]),
             white_s: sampler(dev, &TextureMeta::default())?,
             white,
@@ -374,14 +423,18 @@ impl ThreeScene {
             view: ThreeView { view: Mat4::IDENTITY, proj: Mat4::IDENTITY, cam_pos: Vec3::ZERO, background: [0.0, 0.0, 0.0, 1.0], fog: None, sun: None, tonemap: (0, 1.0), shadow_vp: None, v3: false },
             error: None,
             unsupported_resources: 0,
-            progs: {
-                let mut p = Programs::new(dev)?;
-                p.depth(dev, &serde_json::from_str::<ProgramMaterialMeta>(r#"{"program":0}"#).map_err(|e| e.to_string())?);
-                p
-            },
-            mats3: HashMap::new(),
-            uni: HashMap::new(),
+            progs,
+            mats3: IdMap::new(),
+            uni: FastMap::default(),
             uni_tex: Vec::new(),
+            prog_plans: IdMap::new(),
+            stream_epoch: 1,
+            bind_arena: BindArena::new(),
+            inst_names,
+            prep_stamp: 0,
+            shadow_sig: 1,
+            scratch_opaque: Vec::new(),
+            scratch_transparent: Vec::new(),
             layout: RingLayout::default(),
             layout_slot: 0,
             shadow_ty: three::shadow_type::PCF,
@@ -432,8 +485,17 @@ impl ThreeScene {
         let result = words.and_then(|words| self.load_frame(dev, slot_i, words));
         // programs first (material uploads refer to them), then the other resources; both are applied even when
         // the frame failed: they describe resources, not the frame
+        let mut added = false;
         for (id, key, p) in self.host.take_programs() {
             self.progs.add(dev, id, key, p);
+            self.prog_plans.remove(&id);
+            added = true;
+        }
+        // a program (re)added: what was resolved against the program table is rebuilt at next use. Bind-list indices
+        // are valid until here only: nothing of the previous frame is encoded after update()
+        if added || self.bind_arena.should_trim() {
+            self.stream_epoch += 1;
+            self.bind_arena.invalidate();
         }
         // releases wait for the frame written before them (three::defer_releases; render targets: mac_targets.rs)
         let res = three::defer_releases(&mut self.targets.pending_releases, self.host.take_resources());
@@ -471,7 +533,7 @@ impl ThreeScene {
         let p = &self.progs;
         self.view.v3.then(|| {
             format!(
-                "three programs: {} compiled (Metal {:.0} ms total), {} pipelines ({:.0} ms), {} material instances; shadows: {} maps, {} passes, {} casters with three's depth programs, {} native depth-only, {} VSM blurs; ring {} KB/frame, {} refused writes",
+                "three programs: {} compiled (Metal {:.0} ms total), {} pipelines ({:.0} ms), {} material instances; shadows: {} maps, {} passes, {} casters with three's depth programs, {} native depth-only, {} VSM blurs; ring {} KB/frame, {} refused writes; {} bind lists ({} built)",
                 p.compiled,
                 p.compile_ms,
                 p.pipelines_built,
@@ -483,7 +545,9 @@ impl ThreeScene {
                 self.shadow_list.iter().filter(|d| d.prog.is_none()).count(),
                 self.vsm_jobs.len(),
                 self.layout.need >> 10,
-                crate::ring::OVERFLOWS.load(std::sync::atomic::Ordering::Relaxed)
+                crate::ring::OVERFLOWS.load(std::sync::atomic::Ordering::Relaxed),
+                self.bind_arena.len(),
+                self.bind_arena.built
             ) + &self.pass_stats().map_or(String::new(), |p| format!("; {p}"))
                 + &format!("\nthree {}", p.compile_line())
         })
@@ -515,7 +579,13 @@ impl ThreeScene {
         self.visible.clear();
         self.casters.clear();
         self.vis3.clear();
-        let v3 = self.view.v3;
+        let n = if self.view.v3 { self.prepare_one_v3(dev, slot_i, planes, cam, projection, viewport_h) } else { self.prepare_one_v2(dev, slot_i, planes, shadow_planes, cam) };
+        self.prepare_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        n
+    }
+
+    /// v2 (`programs: 'native'`): cull, sort, object records for `vs_three` / `fs_three`, lights.
+    fn prepare_one_v2(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], shadow_planes: &[Vec4; 6], cam: Vec3) -> usize {
         // three's painterSortStable / reversePainterSortStable: renderOrder first (then state for opaque draws, back to
         // front for transparent ones); renderer.sortObjects = false keeps the draw order
         let mut opaque: Vec<(i32, u64, usize)> = Vec::new();
@@ -524,12 +594,11 @@ impl ThreeScene {
         let mut is_caster: Vec<bool> = vec![false; self.draws.len()];
         for (i, d) in self.draws.iter().enumerate() {
             let Some(g) = self.geos.get(&d.geometry) else { continue };
-            let known = if v3 { self.mats3.contains_key(&d.material) && self.uni.contains_key(&d.material) } else { self.mats.contains_key(&d.material) };
-            if !known || d.count == 0 {
+            if !self.mats.contains_key(&d.material) || d.count == 0 {
                 continue;
             }
-            // three: the transparent list is material.transparent; shadows from every caster (v2: opaque only)
-            let transparent = if v3 { self.mats3[&d.material].meta.transparent } else { d.flags & flag::TRANSPARENT != 0 };
+            // shadows from opaque casters only
+            let transparent = d.flags & flag::TRANSPARENT != 0;
             let r = &d.rows;
             let c = Vec3::new(
                 r[0][0] * g.sphere[0] + r[0][1] * g.sphere[1] + r[0][2] * g.sphere[2] + r[0][3],
@@ -540,7 +609,7 @@ impl ThreeScene {
             // instanced meshes: the geometry sphere says nothing about where instances are
             let cullable = d.flags & (flag::NO_CULL | flag::INSTANCED) == 0;
             let radius = g.sphere[3] * scale;
-            let casts = d.flags & flag::CAST != 0 && (v3 || !transparent) && (!cullable || sphere_visible(shadow_planes, c, radius));
+            let casts = d.flags & flag::CAST != 0 && !transparent && (!cullable || sphere_visible(shadow_planes, c, radius));
             is_caster[i] = casts;
             if cullable && !sphere_visible(planes, c, radius) {
                 if casts {
@@ -561,9 +630,7 @@ impl ThreeScene {
         transparent.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)));
         let n = opaque.len() + transparent.len() + shadow_only.len();
         if self.slots[slot_i].cap < n {
-            // grow the object records only: the slot's ring already holds this frame's uniform blocks (update()), and
-            // replacing the whole slot here dropped them for a 64 KB ring the v3 writes below then overran (the real
-            // game's EXC_BAD_ACCESS in prepare, run 43698589636)
+            // grow the object records only (the slot's ring is not this path's)
             let cap = n.next_power_of_two();
             let s = &mut self.slots[slot_i];
             s.objects = dev.newBufferWithLength_options(cap * OBJ_BYTES, MTLResourceOptions::StorageModeShared).expect("objects");
@@ -598,15 +665,92 @@ impl ThreeScene {
         }
         let nl = self.light_count();
         unsafe { std::ptr::copy_nonoverlapping(self.lights.as_ptr(), s.lights.contents().as_ptr() as *mut ThreeLight, nl) };
-        if v3 {
-            self.ensure_ring(dev, slot_i);
-            self.prepare_v3(dev, slot_i, projection);
-            // FrPass: gl_FragCoord.y = height - Metal's y; render targets store GL-oriented rows (flip 0, mac_targets.rs)
-            self.ring_writer(slot_i).put(self.layout.pass, [viewport_h, if self.targets.gl_rows { 0.0 } else { 1.0 }, 0.0, 0.0f32]);
-            self.prepare_shadows_v3(dev, slot_i);
-        }
-        self.prepare_ms = t0.elapsed().as_secs_f64() * 1000.0;
         n
+    }
+
+    /// v3 (three's own programs) prepare of one pass: cull; resolve every visible draw to a `Draw3` (its pipeline is
+    /// built on first use: the only place pipelines are created, never inside the encoder loop); sort; write FrFrame,
+    /// FrPass and an FrObject per draw into the ring; the lights; the shadow passes; then attach the bind lists (they
+    /// depend on which shadow maps this pass renders). Returns the draws that will be encoded.
+    fn prepare_one_v3(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], cam: Vec3, projection: Mat4, viewport_h: f32) -> usize {
+        self.prep_stamp += 1;
+        let target = self.targets.pipe_target;
+        let gl_rows = self.targets.gl_rows;
+        let no_cull_ok = self.dbg & 256 == 0;
+        let mut opaque = std::mem::take(&mut self.scratch_opaque);
+        let mut transparent = std::mem::take(&mut self.scratch_transparent);
+        opaque.clear();
+        transparent.clear();
+        for i in 0..self.draws.len() {
+            let d = self.draws[i];
+            if d.count == 0 {
+                continue;
+            }
+            let Some(&(block, tex)) = self.uni.get(&d.material) else { continue };
+            let Some(g) = self.geos.get(&d.geometry) else { continue };
+            let (r, s) = (&d.rows, g.sphere);
+            let c = Vec3::new(
+                r[0][0] * s[0] + r[0][1] * s[1] + r[0][2] * s[2] + r[0][3],
+                r[1][0] * s[0] + r[1][1] * s[1] + r[1][2] * s[2] + r[1][3],
+                r[2][0] * s[0] + r[2][1] * s[1] + r[2][2] * s[2] + r[2][3],
+            );
+            // instanced meshes: the geometry sphere says nothing about where instances are
+            if d.flags & (flag::NO_CULL | flag::INSTANCED) == 0 {
+                let scale = (0..3).map(|k| Vec3::new(r[0][k], r[1][k], r[2][k]).length()).fold(0.0, f32::max);
+                if !sphere_visible(planes, c, s[3] * scale) {
+                    continue;
+                }
+            }
+            let Some(m) = self.mats3.get(&d.material) else { continue };
+            // three: the transparent list is material.transparent
+            let is_transparent = m.meta.transparent;
+            let depth = m.depth;
+            // WebGLState.setMaterial: DoubleSide = no culling; flipSided = BackSide xor mirrored transform; a
+            // render-target pass's y-flipped projection mirrors winding too (mac_targets.rs)
+            let mirrored = Self::winding(&d) == MTLWinding::Clockwise;
+            let raster = if m.meta.side == 2 && no_cull_ok { RASTER_NO_CULL } else { 0 }
+                | if (m.meta.side == 1) != (mirrored != gl_rows) { RASTER_CLOCKWISE } else { 0 }
+                | if m.meta.wireframe { RASTER_WIREFRAME } else { 0 };
+            let bias = m.meta.polygon_offset.map_or((0.0, 0.0), |p| (p[0], p[1]));
+            let Some((pipe, plan)) = self.instance_pipeline(dev, d.material, &d, target) else { continue };
+            let rec = Draw3 { i: i as u32, obj: 0, block: block as u32, tex: tex as u32, bind: u32::MAX, pipe, depth, bias, plan, raster };
+            // three's painterSortStable / reversePainterSortStable: renderOrder first, then state for opaque draws
+            // (pipeline, material instance, geometry: consecutive draws share what is bound), back to front for
+            // transparent ones; renderer.sortObjects = false keeps the draw order
+            let unsorted = d.flags & flag::UNSORTED != 0;
+            if is_transparent {
+                transparent.push(if unsorted { (0, 0.0, rec) } else { (d.render_order, c.distance_squared(cam), rec) });
+            } else {
+                opaque.push((if unsorted { (0, i as u64, 0) } else { bindlist::opaque_key(d.render_order, pipe, d.material, d.geometry) }, i as u32, rec));
+            }
+        }
+        // equal keys keep the draw order, as three's sort ends with the object id
+        opaque.sort_unstable_by_key(|o| (o.0, o.1));
+        transparent.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)));
+        self.ensure_ring(dev, slot_i);
+        let w = self.ring_writer(slot_i);
+        let view = self.view.view;
+        let cp = self.view.cam_pos;
+        w.put(self.layout.frame, FrFrame { projection: projection.to_cols_array(), view: view.to_cols_array(), camera_position: [cp.x, cp.y, cp.z, 0.0] });
+        let mut objs = Bump::new(self.layout.objects, self.layout.shadow_objects);
+        for rec in opaque.iter().map(|o| &o.2).chain(transparent.iter().map(|t| &t.2)) {
+            // one FrObject per draw: the region holds them all (RingLayout), so neither check fails unless the sizing is wrong
+            let Some(obj) = objs.take(std::mem::size_of::<FrObject>()) else { break };
+            if !w.put(obj, fr_object(&view, &self.draws[rec.i as usize].rows)) {
+                break;
+            }
+            self.vis3.push(Draw3 { obj: obj as u32, ..*rec });
+        }
+        self.scratch_opaque = opaque;
+        self.scratch_transparent = transparent;
+        let nl = self.light_count();
+        unsafe { std::ptr::copy_nonoverlapping(self.lights.as_ptr(), self.slots[slot_i].lights.contents().as_ptr() as *mut ThreeLight, nl) };
+        // FrPass: gl_FragCoord.y = height - Metal's y; render targets store GL-oriented rows (flip 0, mac_targets.rs)
+        w.put(self.layout.pass, [viewport_h, if gl_rows { 0.0 } else { 1.0 }, 0.0, 0.0f32]);
+        self.prepare_shadows_v3(dev, slot_i);
+        self.shadow_sig = self.shadow_signature();
+        self.resolve_binds();
+        self.vis3.len()
     }
 
     /// Bounds-checked writer over `slot_i`'s ring.
@@ -634,57 +778,62 @@ impl ThreeScene {
         }
     }
 
-    /// v3: FrFrame + an FrObject per visible draw in the ring, and each draw's pipeline / depth state (built on
-    /// first use: the only place pipelines are created, never inside the encoder loop).
-    fn prepare_v3(&mut self, dev: &Device, slot_i: usize, projection: Mat4) {
-        let w = self.ring_writer(slot_i);
-        let view = self.view.view;
-        let c = self.view.cam_pos;
-        let frame = FrFrame { projection: projection.to_cols_array(), view: view.to_cols_array(), camera_position: [c.x, c.y, c.z, 0.0] };
-        w.put(self.layout.frame, frame);
-        let mut obj = Bump::new(self.layout.objects, self.layout.shadow_objects);
-        self.progs.name_id("instanceMatrix");
-        self.progs.name_id("instanceColor");
-        self.progs.name_id("position");
-        for k in 0..self.visible.len() {
-            let i = self.visible[k].0;
-            let d = self.draws[i];
-            let mat = &self.mats3[&d.material];
-            let Some(&(block, tex)) = self.uni.get(&d.material) else { continue };
-            let depth = mat.depth;
-            let pipe = self.instance_pipeline(dev, d.material, &d, self.targets.pipe_target).unwrap_or(u32::MAX);
-            if pipe == u32::MAX {
-                continue;
+    /// The pipeline of material instance `mat_id` for draw `d` into `target` (built on first use, cached per instance)
+    /// and the draw's stream plan (index into its geometry's `plans`; built on first use of the geometry with the
+    /// instance's program).
+    fn instance_pipeline(&mut self, dev: &Device, mat_id: u32, d: &Draw, target: Target) -> Option<(u32, u16)> {
+        let ThreeScene { mats3, geos, insts, prog_plans, progs, stream_epoch, inst_names, .. } = self;
+        let mat = mats3.get_mut(&mat_id)?;
+        let geo = geos.get_mut(&d.geometry)?;
+        let prog = mat.meta.program;
+        let plan = match geo.plans.iter().position(|p| p.prog == prog && p.epoch == *stream_epoch) {
+            Some(i) => i,
+            None => {
+                let pp = bind::prog_plan(prog_plans, progs, prog)?;
+                let by_name = |list: &[(u32, Buffer, u32)], name: u32| list.iter().position(|x| x.0 == name).map(|i| (i, list[i].2));
+                let sp = bindlist::stream_plan(prog, *stream_epoch, &pp.attrs, |n| by_name(&geo.attrs, n), |n| by_name(&geo.inst_attrs, n), inst_names.0, inst_names.1);
+                // a plan from before the program table changed is replaced in place
+                match geo.plans.iter().position(|p| p.prog == prog) {
+                    Some(i) => {
+                        geo.plans[i] = sp;
+                        i
+                    }
+                    None => {
+                        geo.plans.push(sp);
+                        geo.plans.len() - 1
+                    }
+                }
             }
-            // one FrObject per draw: the region holds them all (RingLayout), so neither check fails unless the sizing is wrong
-            let Some(obj) = obj.take(std::mem::size_of::<FrObject>()) else { break };
-            if !w.put(obj, fr_object(&view, &d.rows)) {
-                break;
-            }
-            self.vis3.push(Draw3 { i, obj, block, tex, pipe, depth });
+        };
+        let inst = if d.flags & flag::INSTANCED != 0 { insts.get(&d.instances) } else { None };
+        let sig: StreamSig = geo.plans[plan].sig[StreamPlan::variant(inst.map(|x| x.colors.is_some()))];
+        if let Some(p) = mat.pipes.iter().find(|p| p.0 == sig && p.1 == target) {
+            return (p.2 != u32::MAX).then_some((p.2, plan as u16));
         }
+        let p = progs.pipeline(dev, &mat.meta, sig, target).unwrap_or(u32::MAX);
+        mat.pipes.push((sig, target, p));
+        (p != u32::MAX).then_some((p, plan as u16))
     }
 
-    /// The pipeline of material instance `mat_id` for draw `d` into `target` (built on first use, cached per instance).
-    fn instance_pipeline(&mut self, dev: &Device, mat_id: u32, d: &Draw, target: Target) -> Option<u32> {
-        let mat = self.mats3.get(&mat_id)?;
-        let prog = self.progs.progs.get(&mat.meta.program)?;
-        let geo = self.geos.get(&d.geometry)?;
-        let sig = self.stream_sig(prog, d, geo);
-        if let Some(p) = mat.pipes.iter().find(|p| p.0 == sig && p.1 == target) {
-            return (p.2 != u32::MAX).then_some(p.2);
+    /// The entered pass's shadow maps as one non-zero number: which SHADOWS entries have a map, which map, and what
+    /// each offers (cube / VSM / packed), with the shadow type. Bind lists with a shadow slot are cached per value.
+    fn shadow_signature(&self) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64 ^ self.shadow_ty as u64;
+        let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+        for &(kind, index, map) in &self.shadow_lookup {
+            let m = &self.shadow_maps[map];
+            mix(kind as u64);
+            mix(index as u64);
+            mix(map as u64);
+            mix(m.cube as u64 | (m.vsm.is_some() as u64) << 1 | (m.packed.is_some() as u64) << 2);
         }
-        let meta = mat.meta.clone();
-        let p = self.progs.pipeline(dev, &meta, sig, target).unwrap_or(u32::MAX);
-        if let Some(m) = self.mats3.get_mut(&mat_id) {
-            m.pipes.push((sig, target, p));
-        }
-        (p != u32::MAX).then_some(p)
+        h | 1
     }
 
     pub fn lights_buffer(&self, slot_i: usize) -> &Buffer { &self.slots[slot_i].lights }
 
-    /// v3 main pass: three's programs, one pipeline / depth state / uniform block per draw as WebGLRenderer would.
+    /// v3 main pass: three's programs, each draw with its pipeline / depth state / uniform block as WebGLRenderer
+    /// would, issuing only the calls whose state differs from the previous draw (`EncState`).
     fn encode_main_v3(&self, enc: &RenderEnc, slot_i: usize) -> usize {
         let t0 = std::time::Instant::now();
         let ring = &self.slots[slot_i].ring;
@@ -697,68 +846,42 @@ impl ThreeScene {
             enc.setFragmentBuffer_offset_atIndex(Some(ring), self.layout.frame, xlat::FRAME_BLOCK_BUFFER as usize);
             enc.setFragmentBuffer_offset_atIndex(Some(ring), self.layout.pass, xlat::PASS_BUFFER as usize);
         }
-        let (mut last_pipe, mut last_depth, mut last_bias, mut last_wire) = (u32::MAX, u32::MAX, (0.0f32, 0.0f32), false);
+        // a fresh state: whatever an earlier pass left bound on a shared encoder is unknown
+        let mut st = bind::EncState::new();
+        let (mut last_bias, mut last_wire) = ((0.0f32, 0.0f32), false);
         let mut drawn = 0;
         for v in self.vis3.iter().take(self.max_draws) {
-            let d = &self.draws[v.i];
-            if self.dbg & 128 != 0 && drawn == 0 {
-                let m = &self.mats3[&d.material].meta;
-                println!(
-                    "v3 first draw: {} prog {} geo {} flags {:#x} start {} count {} inst {} x{} block@{} obj@{} frame@{} pipe {} geo attrs {:?} side {} blend {:?} depth {} {} {}",
-                    m.ty, m.program, d.geometry, d.flags, d.start, d.count, d.instances, d.instance_count, v.block, v.obj, self.layout.frame, v.pipe,
-                    self.geos.get(&d.geometry).map(|g| g.attrs.iter().map(|a| (a.0, a.2)).collect::<Vec<_>>()),
-                    m.side, three::blend_of(m), m.depth_test, m.depth_func, m.depth_write
-                );
-                if let Some(p) = self.progs.progs.get(&m.program) {
-                    let ring = self.slots[slot_i].ring.contents().as_ptr() as *const u8;
-                    let f = |o: u32| unsafe { (ring.add(v.block + o as usize) as *const f32).read_unaligned() };
-                    let u = |o: u32| unsafe { (ring.add(v.block + o as usize) as *const u32).read_unaligned() };
-                    let vals: Vec<String> = p.layout.members.iter().map(|mb| if mb.ty == "uint" || mb.ty == "int" { format!("{}={}", mb.name, u(mb.offset)) } else { format!("{}={:.3}", mb.name, f(mb.offset)) }).collect();
-                    println!("v3 first draw block ({} B): {}", p.layout.size, vals.join(" "));
-                    println!("v3 first draw attrs {:?} textures {:?} ids {:?}", p.attrs.iter().map(|a| (a.name, a.location, a.comps, a.cols)).collect::<Vec<_>>(),
-                        p.layout.textures.iter().map(|t| (t.name.as_str(), t.index, t.kind.as_str(), t.shadow)).collect::<Vec<_>>(),
-                        &self.uni_tex[v.tex..(v.tex + p.layout.textures.len()).min(self.uni_tex.len())]);
-                }
-            }
-            let mat = &self.mats3[&d.material];
-            if (self.dbg & 4 != 0 && d.flags & flag::INSTANCED != 0)
-                || (self.dbg & 8 != 0 && mat.meta.transparent)
-                || (self.dbg & 32 != 0 && !mat.meta.ty.contains("Lambert"))
-            {
+            let d = &self.draws[v.i as usize];
+            if self.dbg != 0 && !self.debug_draw(v, d, slot_i, drawn) {
                 continue;
             }
-            let Some(prog) = self.progs.progs.get(&mat.meta.program) else { continue };
             let Some(pipe) = self.progs.pipeline_at(v.pipe) else { continue };
-            let g = &self.geos[&d.geometry];
-            if v.pipe != last_pipe {
+            let Some(g) = self.geos.get(&d.geometry) else { continue };
+            if v.pipe != st.pipe {
                 enc.setRenderPipelineState(pipe);
-                last_pipe = v.pipe;
+                st.pipe = v.pipe;
             }
-            if v.depth != last_depth {
+            if v.depth != st.depth {
                 enc.setDepthStencilState(Some(self.progs.depth_at(v.depth)));
-                last_depth = v.depth;
+                st.depth = v.depth;
             }
-            // WebGLState.setMaterial: DoubleSide = no culling; flipSided = BackSide xor mirrored transform
-            let m = &mat.meta;
-            enc.setCullMode(if m.side == 2 && self.dbg & 256 == 0 { MTLCullMode::None } else { MTLCullMode::Back });
-            let mirrored = Self::winding(d) == MTLWinding::Clockwise;
-            // a render-target pass's y-flipped projection mirrors winding too (mac_targets.rs)
-            enc.setFrontFacingWinding(if (m.side == 1) != (mirrored != self.targets.gl_rows) { MTLWinding::Clockwise } else { MTLWinding::CounterClockwise });
-            let bias = m.polygon_offset.map_or((0.0, 0.0), |p| (p[0], p[1]));
-            if bias != last_bias {
-                enc.setDepthBias_slopeScale_clamp(bias.1, bias.0, 0.0);
-                last_bias = bias;
+            st.cull(enc, if v.raster & RASTER_NO_CULL != 0 { MTLCullMode::None } else { MTLCullMode::Back });
+            st.winding(enc, if v.raster & RASTER_CLOCKWISE != 0 { MTLWinding::Clockwise } else { MTLWinding::CounterClockwise });
+            if v.bias != last_bias {
+                enc.setDepthBias_slopeScale_clamp(v.bias.1, v.bias.0, 0.0);
+                last_bias = v.bias;
             }
             // three draws wireframe as GL_LINES over the triangle edges: the same edges, rasterised as lines
-            if m.wireframe != last_wire {
-                enc.setTriangleFillMode(if m.wireframe { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
-                last_wire = m.wireframe;
+            let wire = v.raster & RASTER_WIREFRAME != 0;
+            if wire != last_wire {
+                enc.setTriangleFillMode(if wire { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
+                last_wire = wire;
             }
             unsafe {
-                enc.setVertexBufferOffset_atIndex(v.obj, xlat::OBJECT_BLOCK_BUFFER as usize);
-                enc.setFragmentBufferOffset_atIndex(v.obj, xlat::OBJECT_BLOCK_BUFFER as usize);
+                enc.setVertexBufferOffset_atIndex(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
+                enc.setFragmentBufferOffset_atIndex(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
             }
-            self.bind_program_draw(enc, prog, d, g, v.block, v.tex);
+            self.bind_program_draw(enc, &mut st, d, g, v.plan, v.block as usize, v.bind);
             self.draw(enc, d, g);
             drawn += 1;
         }
@@ -770,6 +893,33 @@ impl ThreeScene {
         }
         self.encode_ms.set(t0.elapsed().as_secs_f64() * 1000.0);
         drawn
+    }
+
+    /// FASTRENDER_V3_DEBUG (bisecting): print the first draw (bit 128); false: skip this draw (bits 4, 8, 32).
+    fn debug_draw(&self, v: &Draw3, d: &Draw, slot_i: usize, drawn: usize) -> bool {
+        let Some(mat) = self.mats3.get(&d.material) else { return false };
+        if self.dbg & 128 != 0 && drawn == 0 {
+            let m = &mat.meta;
+            let (block, tex) = (v.block as usize, v.tex as usize);
+            println!(
+                "v3 first draw: {} prog {} geo {} flags {:#x} start {} count {} inst {} x{} block@{} obj@{} frame@{} pipe {} geo attrs {:?} side {} blend {:?} depth {} {} {}",
+                m.ty, m.program, d.geometry, d.flags, d.start, d.count, d.instances, d.instance_count, block, v.obj, self.layout.frame, v.pipe,
+                self.geos.get(&d.geometry).map(|g| g.attrs.iter().map(|a| (a.0, a.2)).collect::<Vec<_>>()),
+                m.side, three::blend_of(m), m.depth_test, m.depth_func, m.depth_write
+            );
+            if let Some(p) = self.progs.progs.get(&m.program) {
+                let ring = self.slots[slot_i].ring.contents().as_ptr() as *const u8;
+                let f = |o: u32| unsafe { (ring.add(block + o as usize) as *const f32).read_unaligned() };
+                let u = |o: u32| unsafe { (ring.add(block + o as usize) as *const u32).read_unaligned() };
+                let vals: Vec<String> = p.layout.members.iter().map(|mb| if mb.ty == "uint" || mb.ty == "int" { format!("{}={}", mb.name, u(mb.offset)) } else { format!("{}={:.3}", mb.name, f(mb.offset)) }).collect();
+                println!("v3 first draw block ({} B): {}", p.layout.size, vals.join(" "));
+                println!("v3 first draw attrs {:?} textures {:?} ids {:?} binds {:?}", p.attrs.iter().map(|a| (a.name, a.location, a.comps, a.cols)).collect::<Vec<_>>(),
+                    p.layout.textures.iter().map(|t| (t.name.as_str(), t.index, t.kind.as_str(), t.shadow)).collect::<Vec<_>>(),
+                    &self.uni_tex[tex.min(self.uni_tex.len())..(tex + p.layout.textures.len()).min(self.uni_tex.len())],
+                    self.bind_arena.list(v.bind));
+            }
+        }
+        !((self.dbg & 4 != 0 && d.flags & flag::INSTANCED != 0) || (self.dbg & 8 != 0 && mat.meta.transparent) || (self.dbg & 32 != 0 && !mat.meta.ty.contains("Lambert")))
     }
 
     pub fn encode_main(&self, enc: &RenderEnc, slot_i: usize, uniforms: &Buffer, shadow_map: &Texture, depth_less: &ProtocolObject<dyn MTLDepthStencilState>, depth_test_only: &ProtocolObject<dyn MTLDepthStencilState>) -> usize {

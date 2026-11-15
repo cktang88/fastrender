@@ -2,6 +2,43 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: WP2, encoder hot path: id tables, per-material bind lists, last-bound filter, sort by pipeline
+
+Perf audit N1-N5 and N8 (`docs/research/perf-audit-2026-11.md`), design in `docs/notes/bind-lists.md`.
+
+- **Tables.** `geos` / `texs` / `mats` / `mats3` / `insts` and the program plans are `IdMap`s (dense `id -> slot`
+  index over a slab); per-pass uniform blocks and render-target textures are `FastMap`s (one multiply, not SipHash).
+  `instanceMatrix` / `instanceColor` are interned once at construction.
+- **Resolved once.** Per program: texture kind / sample type as enums (`ProgPlan`). Per (geometry, program): which
+  buffer feeds each attribute and the pipeline's stream signature (`StreamPlan`). Per material instance: the bind
+  list (texture and sampler handle per stage and slot), rebuilt only when its texture ids, the texture registry, the
+  programs or the pass's shadow maps change. Per draw in prepare: `Draw3` carries indices only (pipeline, depth
+  state, raster bits, ring offsets, stream plan, bind list); winding is computed there, not in the encoder.
+- **Bound on change.** The encoder keeps what it last set (`EncState`): pipeline, depth state, cull, winding, fill
+  mode, each vertex buffer, the uniform block offset, each texture and sampler. A draw of the previous draw's
+  material and geometry issues the two FrObject offsets and the draw call, nothing else. Shadow passes use the same
+  state.
+- **Sort.** Opaque: (renderOrder, pipeline, material instance, geometry). Transparent: unchanged.
+- **Also.** v3 no longer writes the v2 object records; the shadow prep no longer clones a material meta per caster.
+- **The seam.** `src/bindlist.rs` is portable plain data (handles, no Metal objects). The Metal 4 port fills one
+  argument table per stage per bind list from it and replaces only `bind_program_draw` and the handle lookups.
+
+Linux micro-benchmark (`cargo run --release --example bindlist_bench`, mock backend, shared 4-core x86 container,
+so the ms are noisy and only the ratios mean something). "Before" is the old shape of the code rebuilt in the
+benchmark: SipHash maps, per-draw name lookups and string compares, every binding for every draw.
+
+| Frame | prepare logic, before -> after | encode logic, before -> after | backend calls per draw, before -> after |
+|---|---|---|---|
+| 2000 draws, 500 materials, 300 geometries | 0.28-0.49 -> 0.09-0.10 ms | 0.35-0.41 -> 0.04 ms | 27.2 -> 8.9 |
+| 2000 draws, 100 materials, 60 geometries | 0.24 -> 0.08 ms | 0.37 -> 0.02 ms | 27.1 -> 6.2 |
+| 300 draws, 10 materials, 12 geometries | 0.034 -> 0.003 ms | 0.044 -> 0.002 ms | 27.0 -> 4.5 |
+
+A steady frame builds no bind list (asserted by the benchmark; the macOS bench prints `N bind lists (M built)`).
+
+macOS CI, before (run 43717991507, paravirtual GPU): real game after streaming, no validation: prepare 0.652 ms,
+encode 2.010 ms at 1506 draws; three-city golden run (API validation on): prepare 0.160 ms, encode 0.153 ms at 288
+draws. After: see the entry's update below once the run is in.
+
 ## 2026-11-15: Electron host runs the real renderer: three-city 0.97, 3d-world-objects 2.96, JS 14-25 ms/frame (JSC 64-74)
 
 The `fastrender` crate is now a library (`src/lib.rs`); `fastrender::host::FrameSource` is the host boundary (frame

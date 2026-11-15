@@ -101,6 +101,10 @@ impl ThreeScene {
         for r in res {
             match r {
                 Resource::Release { kind: k, id } => {
+                    // bind lists name textures by id: a texture or attachment that goes or comes rebuilds them
+                    if k == kind::TEXTURE || k == kind::RENDER_TARGET {
+                        self.bind_arena.invalidate();
+                    }
                     match k {
                         kind::GEOMETRY => { self.geos.remove(&id); }
                         kind::TEXTURE => { self.texs.remove(&id); }
@@ -111,6 +115,9 @@ impl ThreeScene {
                     }
                 }
                 Resource::Upload { kind: k, id, meta, arrays } => {
+                    if k == kind::TEXTURE || k == kind::RENDER_TARGET {
+                        self.bind_arena.invalidate();
+                    }
                     let ok = match k {
                         kind::GEOMETRY => self.upload_geometry(dev, id, &meta, &arrays),
                         kind::TEXTURE if meta.contains("\"framebuffer\":true") => self.targets.framebuffer_texture(dev, id, &meta),
@@ -182,6 +189,7 @@ impl ThreeScene {
         self.geos.insert(
             id,
             Geo {
+                plans: Vec::new(),
                 attrs,
                 inst_attrs,
                 inst_cap,
@@ -370,7 +378,7 @@ impl ThreeScene {
     fn upload_program_material(&mut self, dev: &Device, id: u32, meta: &str) -> Result<(), String> {
         let m: ProgramMaterialMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
         let depth = self.progs.depth(dev, &m);
-        self.mats3.insert(id, Mat3State { meta: m, depth, pipes: Vec::new() });
+        self.mats3.insert(id, Mat3State::new(m, depth));
         Ok(())
     }
 }
