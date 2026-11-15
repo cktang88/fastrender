@@ -14,7 +14,9 @@
 //              B: renderer.info.render.drawCalls of the frame;  C: FastRenderer's screen draws + the native count
 // Every variant is paced by back-pressure (pacer() below); the time a frame waited for the GPU is
 // `gpu_wait_ms_per_frame` (0 = the CPU side is the limit, large = GPU-bound).
-import { cfg, ipc, realNow, realRaf, native, host, issues, top, count, log, net } from './host.mjs';
+import { cfg, ipc, realNow, realRaf, native, host, issues, top, count, log, net, fatal } from './host.mjs';
+
+export { fatal };
 
 const G = globalThis;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -273,6 +275,3 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
   return r;
 }
 
-export function fatal(e) {
-  ipc.send('fatal', { message: String((e && e.stack) || e), issues: { errors: top(issues.errors), warnings: top(issues.warnings), gpu: top(issues.gpu) }, compat: G.__benchCompat });
-}

@@ -53,6 +53,8 @@ async function main() {
   await benchPrepare();
   const t0 = realNow();
   await import('world-objects-game');
+  // if the run dies (GPU lost), what was in the scene is still reported
+  G.__benchExtra = () => (G.__world && G.__world.scene ? { census: census(G.__world.scene) } : {});
   let boot = 0;
   for (; boot < 20000; boot++) {
     await new Promise(realRaf);

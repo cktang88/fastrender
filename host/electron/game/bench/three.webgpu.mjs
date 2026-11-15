@@ -29,6 +29,8 @@ async function create() {
   await r.init();
   const set = r.setPixelRatio.bind(r);
   if (c.dpr) { set(c.dpr); r.setPixelRatio = () => set(c.dpr); }
+  const dev = r.backend && r.backend.device;
+  if (dev && dev.lost) dev.lost.then((i) => { if (G.__benchLost) G.__benchLost(`WebGPU device lost (${i.reason || 'unknown'}): ${String(i.message).replace(/\s+/g, ' ').slice(0, 300)}`); });
   r.info.autoReset = false; // the harness resets once per display frame (a game on its own rAF never would)
   G.__benchRenderer = r;
   return r;

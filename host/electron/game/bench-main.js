@@ -186,7 +186,7 @@ ipcMain.on('done', (e, r) => {
   log('result', JSON.stringify({ tag, fps: r.fps, frame_ms: r.frame_ms, js_ms: r.js_ms && r.js_ms.p50, render_ms: r.render_ms && r.render_ms.p50, gpu_ms: r.gpu_ms && r.gpu_ms.mean, draws: r.draws && r.draws.p50, cpu: p.total && p.total.cpu_percent, backend: r.backend && r.backend.api }));
   finish(0);
 });
-ipcMain.on('fatal', (e, r) => { Object.assign(results, { issues: r.issues, compat: r.compat }); finish(2, `page: ${r.message}`); });
+ipcMain.on('fatal', (e, r) => { Object.assign(results, r.extra || {}, { issues: r.issues, compat: r.compat }); finish(2, `page: ${r.message}`); });
 
 app.whenReady().then(() => {
   const dsf = screen.getPrimaryDisplay().scaleFactor || 1;
@@ -226,7 +226,13 @@ app.whenReady().then(() => {
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('render-process-gone', (e, d) => finish(2, `renderer gone: ${d.reason}`));
-  app.on('child-process-gone', (e, d) => { if (d.type === 'GPU') { results.gpu_process_crashes = (results.gpu_process_crashes || 0) + 1; log('GPU process gone:', d.reason); } });
+  app.on('child-process-gone', (e, d) => {
+    if (d.type !== 'GPU') return;
+    results.gpu_process_crashes = (results.gpu_process_crashes || 0) + 1;
+    log('GPU process gone:', d.reason);
+    // A / B draw in the GPU process: the run is over (the page usually says why first: context / device lost)
+    if (!fr) setTimeout(() => finish(2, `GPU process gone (${d.reason})`), 3000);
+  });
   if (fr) {
     try {
       const ropt = { scale: 1, upscale: 'bilinear', vsync: vsync ? 1 : 0, ...JSON.parse(opt('renderer', '{}')) };

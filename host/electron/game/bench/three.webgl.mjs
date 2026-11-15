@@ -14,6 +14,7 @@ export class WebGLRenderer extends Base {
     const set = this.setPixelRatio.bind(this); // an instance method of WebGLRenderer
     if (c.dpr) { set(c.dpr); this.setPixelRatio = () => set(c.dpr); }
     G.__benchRenderer = this;
+    this.domElement.addEventListener('webglcontextlost', () => { if (G.__benchLost) G.__benchLost('WebGL context lost'); });
   }
 }
 

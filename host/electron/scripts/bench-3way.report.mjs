@@ -54,6 +54,18 @@ const SCENES = { empty: 'Empty frame (one render() of an empty scene)', city: 't
 const f = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v) ? 'n/a' : v.toFixed(d));
 const area = (px) => px.split('x').reduce((a, b) => a * b, 1);
 
+// a run whose GPU side went away (WebGL context lost, WebGPU device lost) "finished" drawing nothing: not a result
+for (const r of runs) {
+  if (!r.ok) continue;
+  const said = [...((r.issues && r.issues.errors) || []), ...((r.issues && r.issues.gpu) || []), ...(r.console_top || [])].map((x) => x.message).join(' | ');
+  const lost = /device lost|\[Device\] is lost|context lost|CONTEXT_LOST/i.exec(said);
+  if (lost || (r.scene !== 'empty' && r.draws && r.draws.p50 === 0) || r.gpu_process_crashes) {
+    r.ok = false;
+    const why = /Metal command buffer failed[^|]{0,120}/.exec(said);
+    r.error = `GPU lost during the run${why ? `: ${why[0]}` : lost ? `: ${lost[0]}` : ''} (drew ${r.draws ? r.draws.p50 : '?'} draws/frame)`;
+  }
+}
+
 const groups = new Map();
 for (const r of runs) {
   const k = `${r.scene}|${r.px}|${r.vsync ? 'vsync' : 'uncapped'}`;
@@ -110,7 +122,7 @@ for (const k of keys) {
     const bits = [];
     if (r.backend) bits.push(`backend: ${r.backend.api}, ${r.backend.renderer}`);
     if (r.gpu_source) bits.push(`GPU ms: ${r.gpu_source}${r.gpu_ms ? '' : ' (no samples)'}`);
-    if (r.native) bits.push(`render thread: ${r.native.rendered_fps} fps rendered, ${r.native.skipped} skipped, ${f(r.native.render_thread_cpu_ms)} ms CPU/frame; ${r.native.draws} native draws`);
+    if (r.native) bits.push(`render thread: ${r.native.rendered_fps} fps rendered, ${r.native.skipped} skipped, ${f(r.native.render_thread_cpu_ms)} ms/frame on the render thread (wall: encode + waiting for the drawable); ${r.native.draws} native draws`);
     if (r.gpu_wait_ms_per_frame !== undefined) bits.push(`waited for the GPU ${f(r.gpu_wait_ms_per_frame)} ms/frame`);
     if (r.boot_s) bits.push(`boot ${r.boot_s} s`);
     extra.push(`- ${r.variant}${r.aa ? ' aa' : ''}${r.label ? ` (${r.label})` : ''}: ${bits.join('; ')}`);

@@ -47,3 +47,19 @@ for (const [name, map] of [['error', issues.errors], ['warn', issues.warnings]])
 addEventListener('error', (e) => count(issues.errors, `uncaught: ${e.message} (${String(e.filename).split('/').pop()}:${e.lineno})`));
 addEventListener('unhandledrejection', (e) => count(issues.errors, `unhandled rejection: ${String(e.reason && (e.reason.message || e.reason)).slice(0, 250)}`));
 export const top = (m, n = 40) => [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map(([message, n2]) => ({ count: n2, message }));
+
+/**
+ * The run is over with an error: sent once, with what the page complained about so far and (if the scene set
+ * G.__benchExtra) the scene's census. Also called when the GPU side goes away (WebGL context lost, WebGPU device
+ * lost: a GPU-process crash, or Metal's command-buffer timeout on a slow GPU): a renderer that draws nothing must not
+ * be reported as a frame rate.
+ */
+let failed = false;
+export function fatal(e) {
+  if (failed) return;
+  failed = true;
+  let extra;
+  try { extra = G.__benchExtra ? G.__benchExtra() : undefined; } catch { extra = undefined; }
+  ipc.send('fatal', { message: String((e && e.stack) || e), issues: { errors: top(issues.errors), warnings: top(issues.warnings), gpu: top(issues.gpu) }, compat: G.__benchCompat, extra });
+}
+G.__benchLost = (what) => fatal(`GPU lost: ${what}`);
