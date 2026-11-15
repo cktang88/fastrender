@@ -1,0 +1,1 @@
+{"device":"Apple M2","results":[{"label":"three forward memoryless scale=0.50 up=metalfx shadow=cached lights=64 cull=gpu props=150000","frames":300,"fps":15.77,"gpu_avg":63.188,"gpu_p99":76.091,"js_ms":13.727,"skipped":null}]}

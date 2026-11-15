@@ -1,0 +1,30 @@
+[js] [boot] modules loaded 0s
+[js] [boot] quality applied 0s
+[js] [boot] manifest 0s
+[js] [boot] museum data 0s
+[js] [boot] pbr 0s
+[js] [boot] rebuilt index 0s
+[js] [boot] ready 0s
+[js] [boot] level build start 0s
+[js] [boot] level built 0s
+[js] [boot] programs compiled (0) 0s
+[js] [warn] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: fetch blocked (remote, offline run): https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_48d_partly_cloudy_puresky_1k.hdr
+[js] [boot] first frame (0 programs, 1070 calls, 0 ms) 0.02s
+pipeline cache: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-777f2a/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-7dfee6.metallib': expecting 'fragment' stage in pipeline no. '72'
+
+[js] world-objects: 1487 draws, 264 material instances; unsupported per frame: {"texture source without pixels":117.7,"transmission":0.1}; assets: {"local":118,"missing":0,"remote":33,"bytes":15401598} images {"decoded":101,"failed":0} canvases {"real":0,"stub":106}
+frame loop: frames in flight 2.99 avg, 3 max (limit 3); slot wait 47.163 ms avg, 66.56 max, 297 of 300 frames > 1 ms; drawable wait 0.000 ms avg, 0.00 max; fence: completion handler; render thread QoS Some(UserInteractive)
+gpu passes (ms avg over 300 frames, one command buffer per group): targets 0.00, shadow 0.07, main 60.19, upscale 2.93; frame 63.19
+three frame cost: render() CPU 62.80 ms avg (JS 13.73, native apply 0.646, prepare 0.210, encode 0.652), GPU 63.19 ms avg, 1312 draws, programs: three
+three programs: 91 compiled (Metal 13 ms total), 74 pipelines (107 ms), 445 material instances; shadows: 2 maps, 2 passes, 86 casters with three's depth programs, 1475 native depth-only, 0 VSM blurs; ring 1458 KB/frame, 0 refused writes; 229 bind lists (1596 built)
+three compile: blocking (4 workers, built-in shaders: source), 147 libraries in 13 ms of worker time (182 shared), 73 pipelines in 107 ms (68 from the binary archive); manifest at launch 85 programs / 73 pipelines, prewarmed 85 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 359 frames; render-thread waits 91 (0 ms); first frame +4923 ms, first complete frame +4923 ms, last incomplete frame -, all pipelines ready +6581 ms; frames over 50 ms: 355, longest 460 ms; archive: binary archive not serialised: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-777f2a/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-7dfee6.metallib': expecting 'fragment' stage in pipeline no. '72'
+
+
+### fastrender bench: Apple M2
+
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+|---|---:|---:|---:|
+| three forward memoryless scale=0.50 up=metalfx shadow=cached lights=64 cull=gpu props=150000 | 15.8 | 63.19 | 76.09 | JS 13.73 ms/frame |
+
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+(wrote bench-results.json)
