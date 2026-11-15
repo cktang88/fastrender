@@ -74,7 +74,41 @@ or texture / varying cost. MSL of the physical fixture: 0 / 29 / 222 / 490 `half
 
 ## Measured
 
-CI_RESULTS
+CI, macos-26 runner (Apple paravirtual GPU), run 43733720573, `.github/half-precision.sh` (the same script is a
+non-gating step of mac.yml), 1280x800:
+
+**Compile**: every fragment program, every mode, through `xcrun metal -std=metal3.0`: 0 failures, 0 programs
+refused by the pass. Programs that contain half: fixtures 8 / 8 / 15 of 15 (brdf / lit / all), three-city 5 / 5 / 5
+of 5, the real game 57 / 58 / 85 of 85.
+
+**Picture** (MAE, 0-255):
+
+| | city vs browser golden (gate < 1.0) | city vs its own float frame | real game vs browser golden (gate < 10) | real game vs its own float frame |
+|---|--:|--:|--:|--:|
+| off | 0.97 | 0 | 6.58 | 0 |
+| brdf | 0.97 | 0.01 | 6.66 | 0.19 |
+| lit | 0.98 | 0.01 | 6.63 | 0.17 |
+| all | 1.15 | 0.22 | 146.1 | 146.66 |
+
+`brdf` and `lit` stay inside both gates. The real game's 0.17-0.19 against its own float frame is an upper bound
+on half's effect: the game is not frame-deterministic between runs. `all` destroys the real game's frame, as
+expected (positions and UVs in half); it exists for timing only. The `lit` hazards above (very smooth surfaces,
+very bright lights at close range) did not show in these two frames; that is not proof they cannot.
+
+**GPU ms**, main pass, avg, three interleaved rounds:
+
+| | city r1 / r2 / r3 | median | real game r1 / r2 / r3 | median |
+|---|---|--:|---|--:|
+| off | 0.98 / 1.48 / 0.87 | 0.98 | 18.24 / 19.72 / 17.29 | 18.24 |
+| brdf | 1.08 / 0.99 / 0.85 | 0.99 | 19.40 / 17.84 / 18.12 | 18.12 |
+| lit | 1.07 / 0.90 / 0.93 | 0.93 | 18.00 / 19.22 / 16.79 | 18.00 |
+| all | 0.95 / 1.26 / 0.79 | 0.95 | 18.27 / 17.17 / 20.25 | 18.27 |
+
+No difference outside the noise (round-to-round spread of one mode is 10-15 %, the modes differ by about 1 %).
+This says nothing about an Air: the runner's GPU is paravirtual, and even `all` shows nothing there.
+
+**Verdict: stays off.** The picture gates hold for `brdf` and `lit`, but there is no measured win. It needs the
+Air numbers below.
 
 ## A/B on the Air
 

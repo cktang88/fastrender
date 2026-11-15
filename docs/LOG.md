@@ -2,6 +2,28 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+
+## 2026-11-15: WP10, half precision in three's lighting functions: built, picture holds, no win measurable on CI; off by default
+
+Details: docs/notes/half-precision.md.
+
+- **What**: `--half off|brdf|lit|all` / `FASTRENDER_HALF` (`src/xlat_half.rs`): a SPIR-V pass between glslang and
+  SPIRV-Cross that computes three's lighting functions, chosen by GLSL name, in 16-bit float. Parameters, return
+  values, uniforms, varyings, texture lookups, positions, attenuation and shadows stay 32-bit. Off = byte-identical
+  output and cache keys.
+- **Why not `mediump`**: SPIRV-Cross's MSL backend has no RelaxedPrecision -> `half` option (it writes `half` only
+  for 16-bit SPIR-V types), and three's `mediump` would put view positions, UVs and shadow coordinates in half.
+- **Static**: per point light of a MeshStandardMaterial, 124 float component-ops: 32 % half in `brdf`, 79 % in `lit`,
+  100 % in `all`.
+- **CI** (macos-26, paravirtual GPU, run 43733720573): all 105 fragment programs (fixtures, city, real game) compile
+  with Apple's compiler in every mode. MAE vs browser golden, off / brdf / lit / all: city 0.97 / 0.97 / 0.98 / 1.15,
+  real game 6.58 / 6.66 / 6.63 / 146.1. Main-pass GPU ms, median of 3 interleaved rounds: city 0.98 / 0.99 / 0.93 /
+  0.95, real game 18.24 / 18.12 / 18.00 / 18.27: no difference outside the noise, even for `all`.
+- **Verdict**: off by default. `lit` is inside the gates on these frames but three's `D_GGX` cancels and overflows
+  in half on very smooth surfaces; `all` is a timing ceiling with a wrong picture.
+- **Needs the Air**: `scripts/half-ab.sh` (3 interleaved rounds of off / brdf / lit / all at 2940x1912, one
+  screenshot each). If `all` is not clearly below `off` there, drop WP10.
+
 ## 2026-11-15: GPU cost of the real game: 27 dark lights in every lit fragment (Air: ~57 -> 13.7 ms with trimLights), 73 % of instanced triangles off screen (not yet timed)
 
 Details, tables and the Air command: docs/notes/gpu-cost.md.
