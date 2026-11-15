@@ -1,0 +1,26 @@
+[page] [boot] modules loaded 0s
+[page] [boot] quality applied 0s
+[page] [boot] pbr 0.03s
+[page] [boot] manifest 0.03s
+[page] [boot] museum data 0.03s
+[fastrender] renderer 2560x1600 three forward memoryless scale=1.00 up=bilinear shadow=cached lights=64 cull=gpu props=150000 on Apple M2, backend metal3 (auto: Metal4 family true, MTL4CommandQueue true)
+[fastrender] power: thermal fair -> scale <= 1.00, frame cap None
+[page] [boot] rebuilt index 0.05s
+[page] [boot] ready 0.05s
+[page] [boot] level build start 0.05s
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+[page] [seamless] built {"kind":"nyc","seed":20261105,"name":"Manhattan"} in 0.0 ms
+[page] [boot] level built 0.05s
+[page] [boot] programs compiled (0) 0.05s
+[page] [boot] first frame (0 programs, 771 calls, 0 ms) 0.07s
+[page] [bench] world started after 3 frames, 2.1 s; fetch {"inflight":59,"done":24,"failed":0}
+[page] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch
+[page] Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock.
+[fastrender] shot ~/github/fastrender/host/electron/bench-out/bench-world-fastrender-2560x1600-shot.png
+[page] [bench] warmup 10 s
+[page] [bench] warmup drained in 2 ms
+[bench-main] result {"tag":"bench-world-fastrender-2560x1600","fps":108.852,"frame_ms":{"mean":9.187,"p50":8.4,"p95":13.2,"p99":24.7,"max":32.9,"n":2177},"js_ms":5.2,"render_ms":3.9,"gpu_ms":9.107,"draws":1339,"cpu":138,"backend":"Metal (fastrender)"}
+[fastrender] frame loop: frames in flight 1.96 avg, 2 max (limit 2); slot wait 0.504 ms avg, 21.20 max, 617 of 3306 frames > 1 ms; drawable wait 0.432 ms avg, 27.68 max; fence: completion handler; render thread QoS Some(UserInteractive); framebufferOnly true
+[bench-main] DONE bench-world-fastrender-2560x1600 (exit 0)

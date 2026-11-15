@@ -1,0 +1,48 @@
+[js] [boot] modules loaded 0s
+[js] [boot] quality applied 0s
+[js] [boot] manifest 0s
+[js] [boot] museum data 0s
+[js] [boot] pbr 0s
+[js] [boot] rebuilt index 0s
+[js] [boot] ready 0s
+[js] [boot] level build start 0s
+[js] [boot] level built 0s
+[js] [boot] programs compiled (0) 0s
+[js] [warn] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: fetch blocked (remote, offline run): https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_48d_partly_cloudy_puresky_1k.hdr
+[js] [boot] first frame (0 programs, 1133 calls, 0 ms) 0.02s
+[js] world-objects: 1554 draws, 249 material instances; unsupported per frame: {"texture source without pixels":108.3,"transmission":0.1}; assets: {"local":118,"missing":0,"remote":33,"bytes":15401598} images {"decoded":101,"failed":0} canvases {"real":0,"stub":106}
+[js] [census] lights: 31 visible, 4 in three's light state (dir 2, point 0, spot 0, hemi 1); zero intensity: 1 (point 0, spot 0); dropped from the light state: 27
+[js] [census] shadows: 2 shadow lights (dir 2, point 0, spot 0), 1 passes this frame, 1.0 M texels: DirectionalLight 1024x1024, DirectionalLight 1024x1024 (kept)
+[js] [census] draws: 1485 (3.92 M tris); casters 695 (0.76 M tris per shadow pass before culling); transparent 44; opaque with discard 89 (0.23 M tris); opaque without 1352
+[js] [census] programs: 59 in the frame; lit draws 1425, 122 lines of main() per lit draw (after the preprocessor, light loops unrolled)
+[js] [census]   program  draws   tris(k)  main lines  tex  lights d/p/s/h  shadows d/p/s  discard  name
+[js] [census]        65     51      1577         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]        55    164       585         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       837     26       538         111   10         2/0/0/1          2/0/0       no  car-mid
+[js] [census]        61    144       292         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       846     12       139         111   10         2/0/0/1          2/0/0       no  car-far-paint
+[js] [census]      2215      2       136         133   10         2/0/0/1          2/0/0      yes  MeshStandardMaterial
+[js] [census]        97     44       107         124   14         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]        67     11       105         112    9         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       834      9        69          34    0         0/0/0/0          0/0/0       no  car-shadow-proxy
+[js] [census]       202    203        39         161   12         2/0/0/1          2/0/0       no  painted_metal #414234
+[js] [census]       101    321        39         109   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       179      2        35          98   10         2/0/0/1          2/0/0       no  far-shore
+[js] [ablate] none scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":1921,"meshes":14425,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11638,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+backend: metal3 (auto: Metal4 family true, MTL4CommandQueue true)
+frame loop: frames in flight 2.14 avg, 3 max (limit 3); slot wait 0.307 ms avg, 4.57 max, 21 of 180 frames > 1 ms; drawable wait 0.000 ms avg, 0.00 max; fence: completion handler; render thread QoS Some(UserInteractive)
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.22, main 12.99, upscale 0.00; frame 13.21
+three frame cost: render() CPU 14.27 ms avg (JS 11.70, native apply 0.590, prepare 0.218, encode 0.739), GPU 13.21 ms avg, 1370 draws, programs: three
+draws per pass (last frame): main 1241 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 0 of 0 drawn in 0 runs (0 instanced draws out of view)
+clusters: off
+three programs: 86 compiled (Metal 18 ms total), 74 pipelines (485 ms), 411 material instances; shadows: 2 maps, 2 passes, 86 casters with three's depth programs, 1529 native depth-only, 0 VSM blurs; ring 1173 KB/frame, 0 refused writes; 229 bind lists (1614 built); graveyard 672 waiting (53699 buried, 53251 freed)
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 260 libraries in 18 ms of worker time (172 shared), 141 pipelines in 485 ms (136 from the binary archive); manifest at launch 156 programs / 141 pipelines, prewarmed 156 / 141; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5026 ms, first complete frame +5026 ms, last incomplete frame -, all pipelines ready +6672 ms; frames over 50 ms: 36, longest 458 ms; archive: loaded, nothing new to write
+
+### fastrender bench: Apple M2
+
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+|---|---:|---:|---:|
+| three forward memoryless scale=1.00 up=bilinear shadow=cached lights=64 cull=gpu props=150000 | 69.5 | 13.21 | 16.98 | JS 11.70 ms/frame |
+
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+(wrote bench-results.json)

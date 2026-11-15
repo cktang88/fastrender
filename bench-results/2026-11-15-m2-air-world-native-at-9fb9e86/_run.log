@@ -1,0 +1,303 @@
+commit 9fb9e86
+built: 15:37:35
+on AC: 15:42:26
+== ablation 2560x1600 15:42:46
+applying 3d-world-objects-0006-cluster-marks.patch
+== alllights
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.19, main 113.66, upscale 0.00; frame 113.85
+three frame cost: render() CPU 112.55 ms avg (JS 16.57, native apply 0.742, prepare 1.353, encode 0.847), GPU 113.85 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 349 libraries in 29 ms of worker time (182 shared), 196 pipelines in 640 ms (191 from the binary archive); manifest at launch 211 programs / 196 pipelines, prewarmed 211 / 196; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 91 (0 ms); first frame +5092 ms, first complete frame +5092 ms, last incomplete frame -, all pipelines ready +6789 ms; frames over 50 ms: 235, longest 480 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+[js] [census] lights: 31 visible, 31 in three's light state (dir 2, point 17, spot 10, hemi 1); zero intensity: 28 (point 17, spot 10); dropped from the light state: 0
+[js] [census] shadows: 3 shadow lights (dir 2, point 1, spot 0), 1 passes this frame, 1.0 M texels: PointLight 16x16 x6 (kept), DirectionalLight 1024x1024, DirectionalLight 1024x1024 (kept)
+[js] [census] draws: 1485 (3.92 M tris); casters 695 (0.76 M tris per shadow pass before culling); transparent 44; opaque with discard 89 (0.23 M tris); opaque without 1352
+[js] [census] programs: 59 in the frame; lit draws 1425, 221 lines of main() per lit draw (after the preprocessor, light loops unrolled)
+[js] [census]   program  draws   tris(k)  main lines  tex  lights d/p/s/h  shadows d/p/s  discard  name
+[js] [census]        65     51      1577         209   11       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]        55    164       585         209   11       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]       851     26       538         210   11       2/17/10/1          2/1/0       no  car-mid
+[js] [census]        61    144       292         209   11       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]       860     12       139         210   11       2/17/10/1          2/1/0       no  car-far-paint
+[js] [census]      2254      2       136         232   11       2/17/10/1          2/1/0      yes  MeshStandardMaterial
+[js] [census]        97     44       107         223   15       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]        67     11       105         211   10       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]       848      9        69          34    0         0/0/0/0          0/0/0       no  car-shadow-proxy
+[js] [census]       206    203        39         260   13       2/17/10/1          2/1/0       no  painted_metal #414234
+[js] [census]       101    321        39         208   11       2/17/10/1          2/1/0       no  MeshStandardMaterial
+[js] [census]       179      2        35         197   11       2/17/10/1          2/1/0       no  far-shore
+== none
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.92, main 9.91, upscale 0.00; frame 10.84
+three frame cost: render() CPU 11.83 ms avg (JS 9.24, native apply 0.470, prepare 0.854, encode 0.625), GPU 10.84 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 349 libraries in 21 ms of worker time (172 shared), 196 pipelines in 500 ms (191 from the binary archive); manifest at launch 211 programs / 196 pipelines, prewarmed 211 / 196; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +4953 ms, first complete frame +4953 ms, last incomplete frame -, all pipelines ready +6628 ms; frames over 50 ms: 34, longest 466 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+[js] [census] lights: 31 visible, 4 in three's light state (dir 2, point 0, spot 0, hemi 1); zero intensity: 1 (point 0, spot 0); dropped from the light state: 27
+[js] [census] shadows: 2 shadow lights (dir 2, point 0, spot 0), 1 passes this frame, 1.0 M texels: DirectionalLight 1024x1024, DirectionalLight 1024x1024 (kept)
+[js] [census] draws: 1485 (3.92 M tris); casters 695 (0.76 M tris per shadow pass before culling); transparent 44; opaque with discard 89 (0.23 M tris); opaque without 1352
+[js] [census] programs: 59 in the frame; lit draws 1425, 122 lines of main() per lit draw (after the preprocessor, light loops unrolled)
+[js] [census]   program  draws   tris(k)  main lines  tex  lights d/p/s/h  shadows d/p/s  discard  name
+[js] [census]        65     51      1577         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]        55    164       585         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       837     26       538         111   10         2/0/0/1          2/0/0       no  car-mid
+[js] [census]        61    144       292         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       846     12       139         111   10         2/0/0/1          2/0/0       no  car-far-paint
+[js] [census]      2215      2       136         133   10         2/0/0/1          2/0/0      yes  MeshStandardMaterial
+[js] [census]        97     44       107         124   14         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]        67     11       105         112    9         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       834      9        69          34    0         0/0/0/0          0/0/0       no  car-shadow-proxy
+[js] [census]       202    203        39         161   12         2/0/0/1          2/0/0       no  painted_metal #414234
+[js] [census]       101    321        39         109   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       179      2        35          98   10         2/0/0/1          2/0/0       no  far-shore
+== clusters
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.23, shadow 1.25, main 9.12, upscale 0.00; frame 10.60
+three frame cost: render() CPU 12.00 ms avg (JS 9.32, native apply 0.483, prepare 0.875, encode 0.640), GPU 10.60 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: last frame 168 clustered draws, 39609 clusters tested, triangles 930946 -> 196418; threshold 1 px; arena: 259 meshes, 57278 clusters, 1329956 triangles at the finest level, 38.0 MB; builds: 233 built + 26 from the cache + 0 failed, 3275 ms total, longest 89.9 ms, 4 workers (blocking), 0 pending
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 349 libraries in 21 ms of worker time (172 shared), 196 pipelines in 479 ms (191 from the binary archive); manifest at launch 211 programs / 196 pipelines, prewarmed 211 / 196; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +6441 ms, first complete frame +6441 ms, last incomplete frame -, all pipelines ready +8729 ms; frames over 50 ms: 16, longest 793 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== clusters-basic
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.43, shadow 2.79, main 5.31, upscale 0.00; frame 8.54
+three frame cost: render() CPU 15.89 ms avg (JS 13.10, native apply 0.660, prepare 0.941, encode 0.497), GPU 8.54 ms avg, 1935 draws, programs: three
+draws per pass (last frame): main 1206 opaque + 58 discard + 52 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: last frame 176 clustered draws, 39540 clusters tested, triangles 941790 -> 146601; threshold 1 px; arena: 267 meshes, 56787 clusters, 1340800 triangles at the finest level, 38.0 MB; builds: 236 built + 31 from the cache + 0 failed, 2862 ms total, longest 74.6 ms, 4 workers (blocking), 0 pending
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 349 libraries in 21 ms of worker time (162 shared), 196 pipelines in 487 ms (191 from the binary archive); manifest at launch 211 programs / 196 pipelines, prewarmed 211 / 196; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 81 (0 ms); first frame +5958 ms, first complete frame +5958 ms, last incomplete frame -, all pipelines ready +8207 ms; frames over 50 ms: 17, longest 789 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nostatic
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.16, main 10.85, upscale 0.00; frame 12.01
+three frame cost: render() CPU 15.30 ms avg (JS 12.64, native apply 0.499, prepare 0.861, encode 0.627), GPU 12.01 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 349 libraries in 22 ms of worker time (172 shared), 196 pipelines in 489 ms (191 from the binary archive); manifest at launch 211 programs / 196 pipelines, prewarmed 211 / 196; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5235 ms, first complete frame +5235 ms, last incomplete frame -, all pipelines ready +7007 ms; frames over 50 ms: 35, longest 458 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nofarlod
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.76, main 11.17, upscale 0.00; frame 11.92
+three frame cost: render() CPU 13.10 ms avg (JS 10.47, native apply 0.458, prepare 0.876, encode 0.649), GPU 11.92 ms avg, 1912 draws, programs: three
+draws per pass (last frame): main 1163 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47807 of 183498 drawn in 789 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 260 libraries in 18 ms of worker time (172 shared), 141 pipelines in 472 ms (136 from the binary archive); manifest at launch 156 programs / 141 pipelines, prewarmed 156 / 141; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5108 ms, first complete frame +5108 ms, last incomplete frame -, all pipelines ready +6778 ms; frames over 50 ms: 17, longest 448 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+[js] [census] lights: 31 visible, 4 in three's light state (dir 2, point 0, spot 0, hemi 1); zero intensity: 1 (point 0, spot 0); dropped from the light state: 27
+[js] [census] shadows: 2 shadow lights (dir 2, point 0, spot 0), 1 passes this frame, 1.0 M texels: DirectionalLight 1024x1024, DirectionalLight 1024x1024 (kept)
+[js] [census] draws: 1470 (5.05 M tris); casters 695 (0.96 M tris per shadow pass before culling); transparent 44; opaque with discard 89 (0.24 M tris); opaque without 1337
+[js] [census] programs: 59 in the frame; lit draws 1410, 122 lines of main() per lit draw (after the preprocessor, light loops unrolled)
+[js] [census]   program  draws   tris(k)  main lines  tex  lights d/p/s/h  shadows d/p/s  discard  name
+[js] [census]        65     51      1577         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       837     17      1124         111   10         2/0/0/1          2/0/0       no  car-mid
+[js] [census]        55    164       914         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       846      6       336         111   10         2/0/0/1          2/0/0       no  car-far-paint
+[js] [census]        61    144       292         110   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]      2229      2       136         133   10         2/0/0/1          2/0/0      yes  MeshStandardMaterial
+[js] [census]        97     44       108         124   14         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]        67     11       105         112    9         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       834      9        69          34    0         0/0/0/0          0/0/0       no  car-shadow-proxy
+[js] [census]       202    203        39         161   12         2/0/0/1          2/0/0       no  painted_metal #414234
+[js] [census]       101    321        39         109   10         2/0/0/1          2/0/0       no  MeshStandardMaterial
+[js] [census]       179      2        35          98   10         2/0/0/1          2/0/0       no  far-shore
+== none@2048
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.22, main 12.99, upscale 0.00; frame 13.21
+three frame cost: render() CPU 14.27 ms avg (JS 11.70, native apply 0.590, prepare 0.218, encode 0.739), GPU 13.21 ms avg, 1370 draws, programs: three
+draws per pass (last frame): main 1241 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 0 of 0 drawn in 0 runs (0 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 260 libraries in 18 ms of worker time (172 shared), 141 pipelines in 485 ms (136 from the binary archive); manifest at launch 156 programs / 141 pipelines, prewarmed 156 / 141; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5026 ms, first complete frame +5026 ms, last incomplete frame -, all pipelines ready +6672 ms; frames over 50 ms: 36, longest 458 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@4096
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.12, main 12.38, upscale 0.00; frame 12.50
+three frame cost: render() CPU 12.77 ms avg (JS 9.95, native apply 0.516, prepare 0.314, encode 0.630), GPU 12.50 ms avg, 1390 draws, programs: three
+draws per pass (last frame): main 1193 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 10334 of 28350 drawn in 171 runs (48 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 260 libraries in 18 ms of worker time (172 shared), 141 pipelines in 492 ms (136 from the binary archive); manifest at launch 156 programs / 141 pipelines, prewarmed 156 / 141; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5126 ms, first complete frame +5126 ms, last incomplete frame -, all pipelines ready +6996 ms; frames over 50 ms: 35, longest 493 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@512
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.23, main 11.89, upscale 0.00; frame 12.12
+three frame cost: render() CPU 12.64 ms avg (JS 9.99, native apply 0.496, prepare 0.870, encode 0.618), GPU 12.12 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 260 libraries in 17 ms of worker time (172 shared), 141 pipelines in 480 ms (136 from the binary archive); manifest at launch 156 programs / 141 pipelines, prewarmed 156 / 141; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5069 ms, first complete frame +5069 ms, last incomplete frame -, all pipelines ready +6823 ms; frames over 50 ms: 35, longest 532 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@1024
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.17, main 7.85, upscale 0.00; frame 9.02
+three frame cost: render() CPU 12.38 ms avg (JS 9.76, native apply 0.493, prepare 0.892, encode 0.548), GPU 9.02 ms avg, 1840 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 0 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 163 libraries in 8 ms of worker time (172 shared), 92 pipelines in 471 ms (87 from the binary archive); manifest at launch 98 programs / 92 pipelines, prewarmed 98 / 92; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5040 ms, first complete frame +5040 ms, last incomplete frame -, all pipelines ready +6667 ms; frames over 50 ms: 34, longest 460 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@4
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.13, main 7.84, upscale 0.00; frame 8.97
+three frame cost: render() CPU 11.71 ms avg (JS 9.28, native apply 0.483, prepare 0.860, encode 0.456), GPU 8.97 ms avg, 1064 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 163 libraries in 9 ms of worker time (172 shared), 92 pipelines in 467 ms (87 from the binary archive); manifest at launch 98 programs / 92 pipelines, prewarmed 98 / 92; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5002 ms, first complete frame +5002 ms, last incomplete frame -, all pipelines ready +6630 ms; frames over 50 ms: 35, longest 447 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== none@64
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.03, main 9.56, upscale 0.00; frame 10.60
+three frame cost: render() CPU 12.66 ms avg (JS 9.98, native apply 0.505, prepare 0.889, encode 0.601), GPU 10.60 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 163 libraries in 9 ms of worker time (172 shared), 92 pipelines in 465 ms (87 from the binary archive); manifest at launch 98 programs / 92 pipelines, prewarmed 98 / 92; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +4889 ms, first complete frame +4889 ms, last incomplete frame -, all pipelines ready +6494 ms; frames over 50 ms: 34, longest 440 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== lights0
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.78, main 10.23, upscale 0.00; frame 11.01
+three frame cost: render() CPU 11.94 ms avg (JS 9.32, native apply 0.482, prepare 0.864, encode 0.627), GPU 11.01 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 140 libraries in 10 ms of worker time (172 shared), 73 pipelines in 506 ms (68 from the binary archive); manifest at launch 81 programs / 73 pipelines, prewarmed 81 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5116 ms, first complete frame +5116 ms, last incomplete frame -, all pipelines ready +6725 ms; frames over 50 ms: 35, longest 453 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nopoint
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.91, main 10.27, upscale 0.00; frame 11.18
+three frame cost: render() CPU 12.42 ms avg (JS 9.75, native apply 0.493, prepare 0.887, encode 0.634), GPU 11.18 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 140 libraries in 12 ms of worker time (172 shared), 73 pipelines in 499 ms (68 from the binary archive); manifest at launch 81 programs / 73 pipelines, prewarmed 81 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5016 ms, first complete frame +5016 ms, last incomplete frame -, all pipelines ready +6622 ms; frames over 50 ms: 35, longest 456 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nolights
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 0.00, main 8.31, upscale 0.00; frame 8.31
+three frame cost: render() CPU 10.65 ms avg (JS 8.39, native apply 0.475, prepare 0.801, encode 0.541), GPU 8.31 ms avg, 1922 draws, programs: three
+draws per pass (last frame): main 1174 opaque + 86 discard + 43 transparent; shadow 0 passes, 0 draws; instances 47729 of 178983 drawn in 796 runs (31 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 229 libraries in 12 ms of worker time (125 shared), 128 pipelines in 483 ms (123 from the binary archive); manifest at launch 81 programs / 73 pipelines, prewarmed 81 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 162 (15 ms); first frame +4867 ms, first complete frame +4867 ms, last incomplete frame -, all pipelines ready +6473 ms; frames over 50 ms: 34, longest 439 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== notransparent
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.04, main 9.38, upscale 0.00; frame 10.42
+three frame cost: render() CPU 11.82 ms avg (JS 9.29, native apply 0.455, prepare 0.852, encode 0.564), GPU 10.42 ms avg, 1889 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 6 transparent; shadow 2 passes, 1613 draws; instances 47666 of 183326 drawn in 792 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 229 libraries in 12 ms of worker time (162 shared), 128 pipelines in 480 ms (123 from the binary archive); manifest at launch 136 programs / 128 pipelines, prewarmed 136 / 128; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 81 (0 ms); first frame +4887 ms, first complete frame +4887 ms, last incomplete frame -, all pipelines ready +6497 ms; frames over 50 ms: 34, longest 441 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== noenv
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.03, main 9.22, upscale 0.00; frame 10.25
+three frame cost: render() CPU 11.65 ms avg (JS 9.02, native apply 0.489, prepare 0.862, encode 0.604), GPU 10.25 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 312 libraries in 21 ms of worker time (133 shared), 176 pipelines in 484 ms (123 from the binary archive); manifest at launch 136 programs / 128 pipelines, prewarmed 136 / 128; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 156 (23 ms); first frame +4984 ms, first complete frame +4984 ms, last incomplete frame -, all pipelines ready +6696 ms; frames over 50 ms: 34, longest 482 ms; archive: 171 pipelines (5 new) in 789 ms, 15897 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== nomaps
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.05, main 9.61, upscale 0.00; frame 10.65
+three frame cost: render() CPU 12.13 ms avg (JS 9.53, native apply 0.485, prepare 0.863, encode 0.593), GPU 10.65 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 331 libraries in 18 ms of worker time (159 shared), 186 pipelines in 388 ms (171 from the binary archive); manifest at launch 185 programs / 176 pipelines, prewarmed 185 / 176; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 99 (7 ms); first frame +4832 ms, first complete frame +4832 ms, last incomplete frame -, all pipelines ready +6478 ms; frames over 50 ms: 34, longest 470 ms; archive: 181 pipelines (1 new) in 784 ms, 17107 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== lambert
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.65, main 9.42, upscale 0.00; frame 11.07
+three frame cost: render() CPU 16.21 ms avg (JS 13.54, native apply 0.620, prepare 0.889, encode 0.508), GPU 11.07 ms avg, 1926 draws, programs: three
+draws per pass (last frame): main 1206 opaque + 58 discard + 43 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 389 libraries in 26 ms of worker time (140 shared), 226 pipelines in 428 ms (181 from the binary archive); manifest at launch 195 programs / 186 pipelines, prewarmed 195 / 186; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 139 (20 ms); first frame +4799 ms, first complete frame +4799 ms, last incomplete frame -, all pipelines ready +6499 ms; frames over 50 ms: 34, longest 483 ms; archive: 221 pipelines (3 new) in 936 ms, 19844 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== basic
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 2.23, main 6.05, upscale 0.00; frame 8.28
+three frame cost: render() CPU 15.04 ms avg (JS 12.49, native apply 0.624, prepare 0.884, encode 0.438), GPU 8.28 ms avg, 1935 draws, programs: three
+draws per pass (last frame): main 1206 opaque + 58 discard + 52 transparent; shadow 2 passes, 1615 draws; instances 47729 of 183463 drawn in 796 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 412 libraries in 19 ms of worker time (139 shared), 245 pipelines in 610 ms (221 from the binary archive); manifest at launch 235 programs / 226 pipelines, prewarmed 235 / 226; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 100 (6 ms); first frame +4798 ms, first complete frame +4798 ms, last incomplete frame -, all pipelines ready +6438 ms; frames over 50 ms: 35, longest 466 ms; archive: 240 pipelines (1 new) in 981 ms, 20472 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+== notransparent,noenv
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.05, main 8.79, upscale 0.00; frame 9.84
+three frame cost: render() CPU 11.75 ms avg (JS 9.24, native apply 0.457, prepare 0.855, encode 0.564), GPU 9.84 ms avg, 1889 draws, programs: three
+draws per pass (last frame): main 1178 opaque + 86 discard + 6 transparent; shadow 2 passes, 1613 draws; instances 47666 of 183326 drawn in 792 runs (63 instanced draws out of view)
+clusters: off
+three compile: blocking (4 workers, built-in shaders: precompiled metallib), 412 libraries in 20 ms of worker time (202 shared), 245 pipelines in 710 ms (240 from the binary archive); manifest at launch 252 programs / 245 pipelines, prewarmed 252 / 245; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 101 (0 ms); first frame +4836 ms, first complete frame +4836 ms, last incomplete frame -, all pipelines ready +6440 ms; frames over 50 ms: 34, longest 454 ms; archive: loaded, nothing new to write
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+logs: bench-results/2026-11-15-gpu-ablate-Mac14,2-2560x1600 (commit and push this folder)
+== electron world bench 15:48:49
+Now drawing from 'AC Power'
+
+== the game: cktang88/3d-world-objects @ 073aa9e + patches/
+
+== npm ci + addon (cargo, release)
+
+> fastrender-electron@0.1.0 build
+> napi build --release --platform --manifest-path native/Cargo.toml --output-dir native
+
+   Compiling glslang-sys v0.9.2+e1b562a
+   Compiling spirv-cross-sys v0.7.4+aa217ae
+   Compiling meshopt v0.7.0
+   Compiling float-cmp v0.10.0
+   Compiling fastrender v0.1.0 (~/github/fastrender)
+   Compiling fastrender-electron v0.1.0 (~/github/fastrender/host/electron/native)
+   Compiling spirv-cross2 v0.7.2
+   Compiling glslang v0.9.1
+    Finished `release` profile [optimized] target(s) in 43.59s
+
+== bundles
+bundled game/dist/bench-city-webgl.js
+bundled ~/github/fastrender/host/electron/.bench/3d-world-objects/src/main.ts -> game/dist/bench-world-webgl.js
+bundled game/dist/bench-city-webgpu.js
+bundled ~/github/fastrender/host/electron/.bench/3d-world-objects/src/main.ts -> game/dist/bench-world-webgpu.js
+bundled game/dist/bench-city-fastrender.js
+bundled ~/github/fastrender/host/electron/.bench/3d-world-objects/src/main.ts -> game/dist/bench-world-fastrender.js
+
+== runs: vsync off (uncapped), 10 s warmup + 20 s measured each
+ 1  bench-world-webgl-1280x800                   7.6 fps  frame p50 128.9 ms  JS 15.8 ms  GPU 158.192 ms  CPU 51.5%  [WebGL2]
+ 2  bench-world-fastrender-1280x800              110.0 fps  frame p50 7.5 ms  JS 5 ms  GPU 8.261 ms  CPU 135.6%  [Metal (fastrender)]
+ 3  bench-world-webgl-1280x800-aa                6.9 fps  frame p50 145 ms  JS 16.1 ms  GPU 171.274 ms  CPU 49.1%  [WebGL2]
+ 4  bench-world-fastrender-1280x800-fx           111.9 fps  frame p50 7.6 ms  JS 5 ms  GPU 7.223 ms  CPU 141.5%  [Metal (fastrender)]
+ 5  bench-world-webgl-2560x1600                  3.0 fps  frame p50 328.6 ms  JS 16.4 ms  GPU 443.241 ms  CPU 37.5%  [WebGL2]
+ 6  bench-world-fastrender-2560x1600             108.9 fps  frame p50 8.4 ms  JS 5.2 ms  GPU 9.107 ms  CPU 138%  [Metal (fastrender)]
+ 7  bench-world-webgl-2560x1600-aa               2.8 fps  frame p50 356.8 ms  JS 16.4 ms  GPU 474.392 ms  CPU 37.1%  [WebGL2]
+ 8  bench-world-fastrender-2560x1600-fx          112.9 fps  frame p50 7.6 ms  JS 5.2 ms  GPU 8.308 ms  CPU 137.4%  [Metal (fastrender)]
+
+== report
+# 3-way renderer benchmark: three WebGLRenderer vs three WebGPURenderer vs fastrender
+
+Electron 45.3.2 (Chromium 156.0.8078.100), darwin arm64; display scale 2, 60.00239944458008 Hz. Same app, same scene bundle per variant, colour buffer = the pixel size given, no MSAA unless a row says `aa`.
+
+> Apple M2, macOS 27.0; 2026-11-15 15:56
+
+## 3d-world-objects, 5 Av street view, quality=low, 1280x800 px, vsync off (uncapped)
+
+| variant | fps | frame ms p50 / p95 / p99 | JS ms p50: total = update + render | GPU ms mean | draws | CPU %: main / GPU proc / page = total | CPU ms/frame | mem MB: main / GPU proc / page | vs A (MAE) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A three WebGLRenderer (ANGLE -> Metal) | 7.6 | 128.90 / 145.90 / 153.30 | 15.80 = 1.80 + 13.80 | 158.19 | 3038 | 1 / 13 / 38 = 52 | 67.68 | 163 (53) / 443 (2382) / 1458 (1786) |  |
+| A three WebGLRenderer (ANGLE -> Metal), aa (MSAA 4x) | 6.9 | 145.00 / 150.60 / 154.20 | 16.10 = 1.90 + 14.20 | 171.27 | 3042 | 0 / 12 / 37 = 49 | 70.88 | 161 (54) / 440 (2482) / 1660 (1933) | 2.24 |
+| C fastrender (Metal, addon) | 110.0 | 7.50 / 16.80 / 23.60 | 5.00 = 1.20 + 3.70 | 8.26 | 1349 (native 1796) | 44 / 0 / 92 = 136 | 12.33 | 1113 (1271) / 165 (276) / 2151 (1987) | 11.69 |
+| C fastrender (Metal, addon), MetalFX-spatial-from-0.5x-per-axis | 111.9 | 7.60 / 16.70 / 22.70 | 5.00 = 1.20 + 3.80 | 7.22 | 1332 (native 1778) | 46 / 0 / 96 = 142 | 12.65 | 1204 (1184) / 175 (274) / 2388 (1979) | 15.33 |
+
+- webgl: backend: WebGL2, ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version); GPU ms: EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame); waited for the GPU 113.59 ms/frame; boot 3.7 s
+- webgl aa: backend: WebGL2, ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version); GPU ms: EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame); waited for the GPU 125.86 ms/frame; boot 3.9 s
+- fastrender: backend: Metal (fastrender), fastrender render thread, main process; GPU ms: Metal command buffer GPUEndTime - GPUStartTime (mean); render thread: 109.953 fps rendered, 0 skipped, 3.65 ms/frame on the render thread (wall: encode + waiting for the drawable); 1796 native draws; waited for the GPU 3.73 ms/frame; boot 2.2 s
+- fastrender (MetalFX-spatial-from-0.5x-per-axis): backend: Metal (fastrender), fastrender render thread, main process; GPU ms: Metal command buffer GPUEndTime - GPUStartTime (mean); render thread: 111.852 fps rendered, 0 skipped, 3.38 ms/frame on the render thread (wall: encode + waiting for the drawable); 1778 native draws; waited for the GPU 3.49 ms/frame; boot 2.5 s
+
+## 3d-world-objects, 5 Av street view, quality=low, 2560x1600 px, vsync off (uncapped)
+
+| variant | fps | frame ms p50 / p95 / p99 | JS ms p50: total = update + render | GPU ms mean | draws | CPU %: main / GPU proc / page = total | CPU ms/frame | mem MB: main / GPU proc / page | vs A (MAE) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A three WebGLRenderer (ANGLE -> Metal) | 3.0 | 328.60 / 331.20 / 345.00 | 16.40 = 1.80 + 14.50 | 443.24 | 3106 | 0 / 6 / 32 = 38 | 123.36 | 159 (54) / 474 (2780) / 1628 (1751) |  |
+| A three WebGLRenderer (ANGLE -> Metal), aa (MSAA 4x) | 2.8 | 356.80 / 363.40 / 368.70 | 16.40 = 1.80 + 14.50 | 474.39 | 3102 | 0 / 5 / 32 = 37 | 132.64 | 162 (55) / 515 (2953) / 1688 (1752) | 1.13 |
+| C fastrender (Metal, addon) | 108.9 | 8.40 / 13.20 / 24.70 | 5.20 = 1.30 + 3.90 | 9.11 | 1339 (native 1771) | 44 / 0 / 94 = 138 | 12.68 | 1217 (1306) / 179 (316) / 2358 (1968) | 11.69 |
+| C fastrender (Metal, addon), MetalFX-spatial-from-0.5x-per-axis | 112.9 | 7.60 / 16.60 / 23.80 | 5.20 = 1.30 + 3.90 | 8.31 | 1331 (native 1763) | 45 / 0 / 92 = 137 | 12.17 | 1218 (1284) / 178 (316) / 2702 (2206) | 13.81 |
+
+- webgl: backend: WebGL2, ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version); GPU ms: EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame); waited for the GPU 301.70 ms/frame; boot 4.1 s
+- webgl aa: backend: WebGL2, ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version); GPU ms: EXT_disjoint_timer_query_webgl2 (TIME_ELAPSED around the frame); waited for the GPU 328.41 ms/frame; boot 4.2 s
+- fastrender: backend: Metal (fastrender), fastrender render thread, main process; GPU ms: Metal command buffer GPUEndTime - GPUStartTime (mean); render thread: 108.852 fps rendered, 0 skipped, 3.45 ms/frame on the render thread (wall: encode + waiting for the drawable); 1771 native draws; waited for the GPU 3.58 ms/frame; boot 2.1 s
+- fastrender (MetalFX-spatial-from-0.5x-per-axis): backend: Metal (fastrender), fastrender render thread, main process; GPU ms: Metal command buffer GPUEndTime - GPUStartTime (mean); render thread: 112.931 fps rendered, 0 skipped, 3.28 ms/frame on the render thread (wall: encode + waiting for the drawable); 1763 native draws; waited for the GPU 3.36 ms/frame; boot 2.4 s
+
+
+wrote ~/github/fastrender/host/electron/bench-out/bench-3way.md and ~/github/fastrender/host/electron/bench-out/bench-3way.json (per-run JSON, logs and screenshots next to them)
+ALL DONE 15:56:34
+gpuarchiver folders:        0
+/dev/disk3s1s1   460Gi    13Gi   142Gi     9%    484k  1.5G    0%   /

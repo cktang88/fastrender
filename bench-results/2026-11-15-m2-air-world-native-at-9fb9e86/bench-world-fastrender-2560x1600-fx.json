@@ -1,0 +1,306 @@
+{
+  "tag": "bench-world-fastrender-2560x1600-fx",
+  "label": "MetalFX-spatial-from-0.5x-per-axis",
+  "variant": "fastrender",
+  "scene": "world",
+  "px": "2560x1600",
+  "aa": false,
+  "vsync": false,
+  "electron": "45.3.2",
+  "chrome": "156.0.8078.100",
+  "platform": "darwin arm64",
+  "isolated": true,
+  "requests": {
+    "local": 123,
+    "missing": 0,
+    "remote": 33
+  },
+  "display": {
+    "scaleFactor": 2,
+    "size": {
+      "width": 1470,
+      "height": 956
+    },
+    "refresh": 60.00239944458008,
+    "window_points": "1280x800"
+  },
+  "gpu_feature_status": {
+    "2d_canvas": "disabled_software",
+    "direct_rendering_display_compositor": "disabled_off_ok",
+    "gpu_compositing": "disabled_software",
+    "multiple_raster_threads": "enabled_on",
+    "opengl": "disabled_off",
+    "rasterization": "disabled_software",
+    "raw_draw": "disabled_off_ok",
+    "skia_graphite": "disabled_off",
+    "trees_in_viz": "disabled_off",
+    "video_decode": "disabled_software",
+    "video_encode": "disabled_software",
+    "webgl": "disabled_off",
+    "webgpu": "disabled_off",
+    "webnn": "disabled_off"
+  },
+  "renderer_options": {
+    "scale": 0.5,
+    "upscale": "metalfx",
+    "vsync": 0
+  },
+  "shm": "/frb-23466",
+  "shot": "bench-world-fastrender-2560x1600-fx-shot.png",
+  "processes": {
+    "wall_s": 20,
+    "main": {
+      "cpu_percent": 45.3,
+      "cpu_s": 9.06,
+      "working_set_mb": 1217.6,
+      "peak_working_set_mb": 1224.3,
+      "footprint_mb": 1284,
+      "processes": 1
+    },
+    "gpu": {
+      "cpu_percent": 0,
+      "cpu_s": 0.002,
+      "working_set_mb": 178.3,
+      "peak_working_set_mb": 281.1,
+      "footprint_mb": 316,
+      "processes": 1
+    },
+    "other": {
+      "cpu_percent": 0,
+      "cpu_s": 0,
+      "working_set_mb": 47.4,
+      "peak_working_set_mb": 47.5,
+      "footprint_mb": 7,
+      "processes": 1
+    },
+    "page": {
+      "cpu_percent": 92.1,
+      "cpu_s": 18.425,
+      "working_set_mb": 2701.8,
+      "peak_working_set_mb": 2741.6,
+      "footprint_mb": 2206,
+      "processes": 1
+    },
+    "total": {
+      "cpu_percent": 137.4,
+      "cpu_s": 27.487,
+      "working_set_mb": 4145.1,
+      "footprint_mb": 3813
+    },
+    "main_process_cpu_percent_node": 45.3
+  },
+  "pace": "gpu",
+  "warmup_s": 10,
+  "measure_s": 20.003,
+  "backend": {
+    "api": "Metal (fastrender)",
+    "renderer": "fastrender render thread, main process",
+    "antialias": false,
+    "samples": 1,
+    "drawingBuffer": "2560x1600"
+  },
+  "frames": 2259,
+  "fps": 112.931,
+  "drain_ms": 2.4,
+  "frame_ms": {
+    "mean": 8.855,
+    "p50": 7.6,
+    "p95": 16.6,
+    "p99": 23.8,
+    "max": 39.8,
+    "n": 2258
+  },
+  "js_ms": {
+    "mean": 5.478,
+    "p50": 5.2,
+    "p95": 7.6,
+    "p99": 10.4,
+    "max": 12.3,
+    "n": 2259
+  },
+  "render_ms": {
+    "mean": 3.919,
+    "p50": 3.9,
+    "p95": 4.3,
+    "p99": 4.7,
+    "max": 10.8,
+    "n": 2259
+  },
+  "update_ms": {
+    "mean": 1.559,
+    "p50": 1.3,
+    "p95": 3.6,
+    "p99": 6.6,
+    "max": 8.6,
+    "n": 2259
+  },
+  "flush_ms": {
+    "mean": 0.072,
+    "p50": 0.1,
+    "p95": 0.2,
+    "p99": 0.2,
+    "max": 0.2,
+    "n": 2259
+  },
+  "gpu_ms": {
+    "mean": 8.308,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null,
+    "n": 2259
+  },
+  "gpu_source": "Metal command buffer GPUEndTime - GPUStartTime (mean)",
+  "draws": {
+    "mean": 1468.18,
+    "p50": 1331,
+    "p95": 1909,
+    "p99": 1960,
+    "max": 1963,
+    "n": 2259
+  },
+  "triangles": 3835955,
+  "render_calls_per_frame": 1,
+  "raf_ticks": 554410,
+  "waited_ticks": 552151,
+  "gpu_wait_ms_per_frame": 3.361,
+  "issues": {
+    "errors": [
+      {
+        "count": 1,
+        "message": "unhandled rejection: The root document of this element is not valid for pointer lock."
+      }
+    ],
+    "warnings": [
+      {
+        "count": 1,
+        "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky Failed to fetch"
+      }
+    ],
+    "gpu": []
+  },
+  "net": {
+    "inflight": 0,
+    "done": 189,
+    "failed": 33
+  },
+  "native": {
+    "rendered": 2259,
+    "skipped": 0,
+    "rendered_fps": 112.931,
+    "render_thread_cpu_ms": 3.284,
+    "draws": 1763,
+    "programs": 91,
+    "gpu_errors": 0,
+    "drawable": "2560x1600",
+    "xlat": {
+      "count": 91,
+      "avg_ms": 0.049
+    },
+    "images": {
+      "calls": 95,
+      "cached": 9,
+      "failed": 0,
+      "ms": 347.4000000208616,
+      "bytes": 363479040,
+      "maxMs": 30.5
+    }
+  },
+  "unsupported": {
+    "texture source without pixels": 12,
+    "transmission": 1
+  },
+  "boot_frames": 3,
+  "boot_s": 2.4,
+  "census": {
+    "objects": 25696,
+    "meshes": 15336,
+    "visible_meshes": 2432,
+    "instanced": 978,
+    "skinned": 270,
+    "batched": 50,
+    "sprites": 52,
+    "lights": 38,
+    "materials": 503,
+    "material_types": {
+      "ShaderMaterial": 6,
+      "MeshBasicMaterial": 34,
+      "LineBasicMaterial": 2,
+      "MeshStandardMaterial": 276,
+      "MeshPhysicalMaterial": 142,
+      "SpriteMaterial": 43
+    },
+    "glsl": {
+      "shader_material": 6,
+      "on_before_compile": 419,
+      "plain": 78,
+      "objects_shader_material": 13,
+      "objects_on_before_compile": 2778,
+      "objects_plain": 94
+    },
+    "glsl_materials": {
+      "MeshStandardMaterial+onBeforeCompile: (unnamed)": 140,
+      "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Male": 46,
+      "MeshStandardMaterial+onBeforeCompile: MI_Superhero_Female": 44,
+      "MeshPhysicalMaterial+onBeforeCompile: painted_metal": 36,
+      "MeshPhysicalMaterial+onBeforeCompile: oak": 17,
+      "MeshPhysicalMaterial+onBeforeCompile: steel": 15,
+      "MeshPhysicalMaterial+onBeforeCompile: plastic": 15,
+      "MeshPhysicalMaterial+onBeforeCompile: paint": 12,
+      "MeshPhysicalMaterial+onBeforeCompile: rubber": 11,
+      "MeshStandardMaterial+onBeforeCompile: charger:material_": 7,
+      "MeshStandardMaterial+onBeforeCompile: suburban:Material__": 7,
+      "MeshPhysicalMaterial+onBeforeCompile: walnut": 6,
+      "MeshPhysicalMaterial+onBeforeCompile: plastic roughness": 6,
+      "ShaderMaterial: (unnamed)": 5,
+      "MeshPhysicalMaterial+onBeforeCompile: aluminium": 5,
+      "MeshPhysicalMaterial+onBeforeCompile: concrete": 4,
+      "MeshPhysicalMaterial+onBeforeCompile: ceramic": 3,
+      "MeshPhysicalMaterial+onBeforeCompile: (unnamed)": 3,
+      "MeshStandardMaterial+onBeforeCompile: car-plastic": 2,
+      "MeshStandardMaterial+onBeforeCompile: car-lamp": 2,
+      "MeshPhysicalMaterial+onBeforeCompile: car-glass": 2,
+      "MeshStandardMaterial+onBeforeCompile: car-rubber": 2,
+      "MeshStandardMaterial+onBeforeCompile: car-chrome": 2,
+      "MeshPhysicalMaterial+onBeforeCompile: fabric": 2,
+      "ShaderMaterial: SkyShader": 1,
+      "MeshStandardMaterial+onBeforeCompile: river": 1,
+      "MeshStandardMaterial+onBeforeCompile: far-shore": 1,
+      "MeshStandardMaterial+onBeforeCompile: car-wheel": 1,
+      "MeshStandardMaterial+onBeforeCompile: car-brake": 1,
+      "MeshStandardMaterial+onBeforeCompile: sprinter:Phare": 1,
+      "MeshStandardMaterial+onBeforeCompile: sprinter:Carrosserie": 1,
+      "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis": 1,
+      "MeshStandardMaterial+onBeforeCompile: sprinter:Autre": 1,
+      "MeshStandardMaterial+onBeforeCompile: sprinter:material": 1,
+      "MeshStandardMaterial+onBeforeCompile: sprinter:Chassis_": 1,
+      "MeshStandardMaterial+onBeforeCompile: accord:material": 1,
+      "MeshStandardMaterial+onBeforeCompile: suburban:Chrome": 1,
+      "MeshStandardMaterial+onBeforeCompile: suburban:frlight": 1,
+      "MeshStandardMaterial+onBeforeCompile: suburban:tyre": 1,
+      "MeshStandardMaterial+onBeforeCompile: taxi_cv:main_frame": 1
+    }
+  },
+  "programs": 0,
+  "rt_renders": {
+    "cube render target (RoomEnvironment)": 6,
+    "cube render target (object pass)": 84,
+    "cube render target (scene pass)": 6,
+    "render target (fullscreen/ortho pass)": 120
+  },
+  "ok": true,
+  "console_top": [
+    {
+      "count": 3,
+      "message": "Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently"
+    },
+    {
+      "count": 1,
+      "message": "HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: Failed to fetch"
+    },
+    {
+      "count": 1,
+      "message": "Uncaught (in promise) SecurityError: The root document of this element is not valid for pointer lock."
+    }
+  ]
+}
