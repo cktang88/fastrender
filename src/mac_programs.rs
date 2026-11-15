@@ -4,8 +4,9 @@
 //! LUT, neutral textures of every type). `mac_three.rs` drives it per draw.
 //!
 //! Binding convention (src/xlat.rs): default uniform block buffer(1), FrObject buffer(2), FrFrame buffer(3), both
-//! stages; vertex attribute at location L reads vertex buffer 4 + L (a mat4 attribute's 4 columns share one buffer);
-//! texture slot i = texture(i) + sampler(i) in both stages.
+//! stages, FrPass (gl_FragCoord origin) fragment buffer(0); vertex attribute at location L reads vertex buffer 4 + L
+//! (a mat4 attribute's 4 columns share one buffer); texture slots carry per-stage texture / sampler indices (a fixed
+//! sampler state is a constexpr sampler: nothing to bind).
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -58,12 +59,24 @@ pub struct Prog {
 pub type StreamSig = u64;
 pub const SIG_INSTANCE: u64 = 8;
 
+/// What a pipeline renders into.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Target {
+    /// the main pass: OUT_FORMAT colour + Depth32Float
+    Main,
+    /// a shadow map: Depth32Float only (three's depth programs; their colour output is discarded)
+    Depth,
+    /// a VSM blur pass: RG16Float colour, no depth
+    Rg16,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PipeKey {
     prog: u32,
     blend: Option<[u32; 6]>,
     color_write: bool,
     sig: StreamSig,
+    target: Target,
 }
 
 /// The neutral textures bound where a program samples something we do not have.
@@ -282,8 +295,11 @@ impl Programs {
                     let nid = self.name_id(&a.name);
                     attrs.push(ProgAttr { name: nid, location: a.location, comps, cols });
                 }
-                if let Some(t) = p.layout.textures.iter().find(|t| t.index >= MAX_SAMPLERS) {
-                    self.report(format!("program {name}: texture {} needs sampler {} (Metal allows {MAX_SAMPLERS} per stage): left unbound", t.name, t.index));
+                for (stage, f) in [("vertex", false), ("fragment", true)] {
+                    let n = p.layout.textures.iter().filter(|t| (if f { t.fragment } else { t.vertex }).is_some_and(|b| b.sampler.is_some())).count();
+                    if n > MAX_SAMPLERS as usize {
+                        self.report(format!("program {name}: {n} samplers in the {stage} stage (Metal allows {MAX_SAMPLERS}): the rest are left unbound"));
+                    }
                 }
                 self.compiled += 1;
                 self.progs.insert(id, Prog { key, layout: p.layout, attrs, vfn, ffn });
@@ -296,8 +312,12 @@ impl Programs {
 
     /// The pipeline for a material instance drawn with `sig` streams (built on first use, then cached; a failed
     /// build is cached too, so it is attempted once).
-    pub fn pipeline(&mut self, dev: &Device, m: &ProgramMaterialMeta, sig: StreamSig) -> Option<u32> {
-        let key = PipeKey { prog: m.program, blend: three::blend_of(m), color_write: m.color_write, sig };
+    pub fn pipeline(&mut self, dev: &Device, m: &ProgramMaterialMeta, sig: StreamSig, target: Target) -> Option<u32> {
+        let key = match target {
+            Target::Main => PipeKey { prog: m.program, blend: three::blend_of(m), color_write: m.color_write, sig, target },
+            // WebGLShadowMap: NoBlending; the colour attachment is not there (Depth) or always written (Rg16)
+            _ => PipeKey { prog: m.program, blend: None, color_write: true, sig, target },
+        };
         if let Some(&i) = self.pipe_index.get(&key) {
             return self.pipes[i as usize].as_ref().map(|_| i);
         }
@@ -426,7 +446,15 @@ fn build_pipeline(dev: &Device, p: &Prog, key: &PipeKey) -> Result<RenderPipelin
     d.setVertexFunction(Some(&p.vfn));
     d.setFragmentFunction(Some(&p.ffn));
     d.setVertexDescriptor(Some(&vd));
+    if key.target == Target::Depth {
+        d.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
+        return dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string());
+    }
     let a = unsafe { d.colorAttachments().objectAtIndexedSubscript(0) };
+    if key.target == Target::Rg16 {
+        a.setPixelFormat(MTLPixelFormat::RG16Float);
+        return dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string());
+    }
     a.setPixelFormat(OUT_FORMAT);
     if !key.color_write {
         a.setWriteMask(MTLColorWriteMask::empty());

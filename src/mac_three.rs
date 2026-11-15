@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::mac_programs::{Programs, StreamSig, ATTR_BUFFER0, MAX_SAMPLERS, SIG_INSTANCE};
+use crate::mac_programs::{Programs, StreamSig, Target, ATTR_BUFFER0, MAX_SAMPLERS, SIG_INSTANCE};
 use crate::three::{ProgramMaterialMeta, ShadowRec};
 use crate::xlat;
 use std::ffi::c_void;
@@ -25,7 +25,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::*;
 
-use crate::core::sphere_visible;
+use crate::core::{frustum_planes, sphere_visible};
 use crate::jsc::ScriptHost;
 use crate::mac::{buffer_with, Buffer, Device, Texture, FRAME_SLOTS, OUT_FORMAT};
 use crate::three::{self, flag, light, kind, Array, Draw, GeometryMeta, InstancesMeta, MaterialMeta, Resource, TextureMeta, ThreeLight};
@@ -62,8 +62,8 @@ struct FrFrame {
 struct Mat3State {
     meta: ProgramMaterialMeta,
     depth: u32,
-    /// pipelines built for this instance, per stream signature (u32::MAX: the build failed)
-    pipes: Vec<(StreamSig, u32)>,
+    /// pipelines built for this instance, per stream signature and target (u32::MAX: the build failed)
+    pipes: Vec<(StreamSig, Target, u32)>,
 }
 
 /// a v3 draw this frame
@@ -130,6 +130,8 @@ struct Pipes {
     opaque: RenderPipeline,
     blend: RenderPipeline,
     shadow: RenderPipeline,
+    /// v3: the native depth-only caster path of every shadow map
+    depth3: RenderPipeline,
 }
 
 /// Per-frame-slot buffers: object records for every visible draw, and the lights.
@@ -188,9 +190,28 @@ pub struct ThreeScene {
     /// material instance id -> (block offset in this frame's ring, first texture id in `uni_tex`)
     uni: HashMap<u32, (usize, usize)>,
     uni_tex: Vec<u32>,
-    /// ring offset of FrFrame and of the first FrObject this frame
+    /// ring offsets this frame: main-pass FrFrame and FrPass, the shadow passes' area (FrFrame/FrPass per pass, VSM
+    /// blocks), the main pass's FrObjects, the shadow passes' FrObjects (one per draw, identity view)
     frame_off: usize,
+    pass_off: usize,
+    shadow_area_off: usize,
     objects_off: usize,
+    shadow_objects_off: usize,
+    /// SHADOW_PASS / SHADOW_DRAWS of the last frame
+    shadow_ty: u32,
+    shadow_depth_textures: bool,
+    shadow_vsm: Vec<[u32; 2]>,
+    shadow_ids: Vec<[u32; 2]>,
+    shadow_maps: Vec<ShadowMap>,
+    /// (SHADOWS kind, index) -> shadow_maps index, this frame
+    shadow_lookup: Vec<(u32, u32, usize)>,
+    shadow_jobs: Vec<ShadowJob>,
+    shadow_list: Vec<ShadowDraw3>,
+    vsm_jobs: Vec<VsmJob>,
+    /// three's VSM full-screen triangle (position attribute)
+    fullscreen: Buffer,
+    /// LessEqual + depth write (the native depth-only casters)
+    depth_le: u32,
     vis3: Vec<Draw3>,
     shadows: Vec<ShadowRec>,
     /// FASTRENDER_V3_DEBUG bits (bisecting on CI): 1 shadow slots bind the lit texture, 2 no v3 shadow pass,
@@ -227,7 +248,12 @@ fn pipes(dev: &Device, src: &str) -> Result<Pipes, String> {
         d.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
         dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| format!("pipeline {vs}: {}", e.localizedDescription()))
     };
-    Ok(Pipes { opaque: make("vs_three", Some("fs_three"), false)?, blend: make("vs_three", Some("fs_three"), true)?, shadow: make("vs_three_shadow", None, false)? })
+    Ok(Pipes {
+        opaque: make("vs_three", Some("fs_three"), false)?,
+        blend: make("vs_three", Some("fs_three"), true)?,
+        shadow: make("vs_three_shadow", None, false)?,
+        depth3: make("vs_three_depth", None, false)?,
+    })
 }
 
 fn slot(dev: &Device, cap: usize) -> Slot {
@@ -257,6 +283,199 @@ fn fr_object(view: &Mat4, rows: &[[f32; 4]; 3]) -> FrObject {
     let n = Mat3::from_mat4(mv).inverse().transpose();
     let c = |v: Vec3| [v.x, v.y, v.z, 0.0];
     FrObject { model: model.to_cols_array(), model_view: mv.to_cols_array(), normal: [c(n.x_axis), c(n.y_axis), c(n.z_axis)] }
+}
+
+/// A CompressedTexture's mip chain (KTX2Loader's ASTC / BC / ETC output) as a Metal texture, blocks uploaded unchanged.
+fn compressed_texture(dev: &Device, m: &TextureMeta, a: &[Option<Array>]) -> Result<Texture, String> {
+    use three::objc2_metal_format::Fmt;
+    let (f, bw, bh, bb) = three::compressed_format(m.format, m.srgb).ok_or_else(|| format!("compressed format {} not supported", m.format))?;
+    let bc = !matches!(f, Fmt::Astc { .. } | Fmt::Etc2Rgb | Fmt::Etc2RgbSrgb | Fmt::Etc2Rgba | Fmt::Etc2RgbaSrgb | Fmt::EacR11 | Fmt::EacR11Snorm | Fmt::EacRg11 | Fmt::EacRg11Snorm);
+    if bc && !dev.supportsBCTextureCompression() {
+        return Err("BC texture compression is not supported by this GPU".into());
+    }
+    if !bc && !dev.supportsFamily(MTLGPUFamily::Apple2) {
+        return Err("ASTC / ETC2 textures need an Apple GPU".into());
+    }
+    let fmt = match f {
+        Fmt::Bc1 => MTLPixelFormat::BC1_RGBA,
+        Fmt::Bc1Srgb => MTLPixelFormat::BC1_RGBA_sRGB,
+        Fmt::Bc2 => MTLPixelFormat::BC2_RGBA,
+        Fmt::Bc2Srgb => MTLPixelFormat::BC2_RGBA_sRGB,
+        Fmt::Bc3 => MTLPixelFormat::BC3_RGBA,
+        Fmt::Bc3Srgb => MTLPixelFormat::BC3_RGBA_sRGB,
+        Fmt::Bc4 => MTLPixelFormat::BC4_RUnorm,
+        Fmt::Bc4Snorm => MTLPixelFormat::BC4_RSnorm,
+        Fmt::Bc5 => MTLPixelFormat::BC5_RGUnorm,
+        Fmt::Bc5Snorm => MTLPixelFormat::BC5_RGSnorm,
+        Fmt::Bc6hSigned => MTLPixelFormat::BC6H_RGBFloat,
+        Fmt::Bc6hUnsigned => MTLPixelFormat::BC6H_RGBUfloat,
+        Fmt::Bc7 => MTLPixelFormat::BC7_RGBAUnorm,
+        Fmt::Bc7Srgb => MTLPixelFormat::BC7_RGBAUnorm_sRGB,
+        Fmt::Etc2Rgb => MTLPixelFormat::ETC2_RGB8,
+        Fmt::Etc2RgbSrgb => MTLPixelFormat::ETC2_RGB8_sRGB,
+        Fmt::Etc2Rgba => MTLPixelFormat::EAC_RGBA8,
+        Fmt::Etc2RgbaSrgb => MTLPixelFormat::EAC_RGBA8_sRGB,
+        Fmt::EacR11 => MTLPixelFormat::EAC_R11Unorm,
+        Fmt::EacR11Snorm => MTLPixelFormat::EAC_R11Snorm,
+        Fmt::EacRg11 => MTLPixelFormat::EAC_RG11Unorm,
+        Fmt::EacRg11Snorm => MTLPixelFormat::EAC_RG11Snorm,
+        Fmt::Astc { w, h, srgb } => {
+            // MTLPixelFormatASTC_*_sRGB = 186.. (no 189), *_LDR = sRGB + 18
+            const SIZES: [(u32, u32); 14] = [(4, 4), (5, 4), (5, 5), (6, 5), (6, 6), (8, 5), (8, 6), (8, 8), (10, 5), (10, 6), (10, 8), (10, 10), (12, 10), (12, 12)];
+            const SRGB: [usize; 14] = [186, 187, 188, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200];
+            let k = SIZES.iter().position(|s| *s == (w, h)).ok_or("ASTC block size")?;
+            MTLPixelFormat(SRGB[k] + if srgb { 0 } else { 18 })
+        }
+    };
+    let levels = m.levels.max(1).min(a.len());
+    let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(fmt, m.width, m.height, false) };
+    unsafe { d.setMipmapLevelCount(levels) };
+    d.setUsage(MTLTextureUsage::ShaderRead);
+    let t = dev.newTextureWithDescriptor(&d).ok_or("texture alloc")?;
+    for l in 0..levels {
+        let (w, h) = ((m.width >> l).max(1), (m.height >> l).max(1));
+        let (bx, by) = (w.div_ceil(bw as usize), h.div_ceil(bh as usize));
+        let row = bx * bb as usize;
+        let data = match &a[l] {
+            Some(Array::U8(v)) if v.len() >= row * by => v,
+            _ => return Err(format!("compressed level {l}: needs {} bytes", row * by)),
+        };
+        unsafe {
+            t.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: w, height: h, depth: 1 } },
+                l,
+                NonNull::new(data.as_ptr() as *mut c_void).unwrap(),
+                row,
+            );
+        }
+    }
+    Ok(t)
+}
+
+/// Bytes reserved per VSM blur program's uniform block (resolution, radius: 16 bytes in practice).
+const VSM_BLOCK: usize = 512;
+
+/// One rendered shadow map (a SHADOWS entry), kept across frames while its kind / index / size stay the same.
+struct ShadowMap {
+    kind: u32,
+    index: u32,
+    size: (usize, usize),
+    cube: bool,
+    /// Depth32Float: what PCF (compare sampler) and Basic (nearest) read; VSM's blur input
+    depth: Texture,
+    /// VSM: (map: RG16F mean / std-dev that three's programs sample, mapPass: the blur's intermediate)
+    vsm: Option<(Texture, Texture)>,
+}
+
+impl ShadowMap {
+    fn new(dev: &Device, kind: u32, index: u32, size: (usize, usize), cube: bool, vsm: bool) -> ShadowMap {
+        let make = |fmt: MTLPixelFormat, ty: MTLTextureType| -> Texture {
+            let d = MTLTextureDescriptor::new();
+            d.setTextureType(ty);
+            d.setPixelFormat(fmt);
+            unsafe {
+                d.setWidth(size.0);
+                d.setHeight(size.1);
+            }
+            d.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
+            d.setStorageMode(MTLStorageMode::Private);
+            dev.newTextureWithDescriptor(&d).expect("shadow map")
+        };
+        let depth = make(MTLPixelFormat::Depth32Float, if cube { MTLTextureType::TypeCube } else { MTLTextureType::Type2D });
+        let vsm = vsm.then(|| (make(MTLPixelFormat::RG16Float, MTLTextureType::Type2D), make(MTLPixelFormat::RG16Float, MTLTextureType::Type2D)));
+        ShadowMap { kind, index, size, cube, depth, vsm }
+    }
+}
+
+/// A caster drawn with three's own depth / distance program.
+#[derive(Clone, Copy)]
+struct ShadowProg {
+    block: usize,
+    tex: usize,
+    pipe: u32,
+    depth: u32,
+    /// the depth material instance id
+    mat: u32,
+    side: u32,
+    wireframe: bool,
+}
+
+/// One caster in one shadow pass.
+#[derive(Clone, Copy)]
+struct ShadowDraw3 {
+    /// index into `draws`
+    i: usize,
+    /// its FrObject (identity view) in the ring
+    obj: usize,
+    /// None: the native depth-only path (`vs_three_depth`)
+    prog: Option<ShadowProg>,
+    /// side rendered: 0 front, 1 back, 2 both
+    side: u32,
+    wireframe: bool,
+    /// depth state of the native path
+    depth: u32,
+}
+
+/// One depth pass: a 2D map, or one face of a cube map.
+struct ShadowJob {
+    map: usize,
+    face: usize,
+    /// ring offsets of this pass's FrFrame and FrPass
+    frame: usize,
+    pass: usize,
+    draws: std::ops::Range<usize>,
+}
+
+/// three's VSMPass for one map: two of three's own programs (vertical, horizontal blur).
+struct VsmJob {
+    map: usize,
+    pass: usize,
+    blocks: [usize; 2],
+    pipes: [u32; 2],
+    progs: [u32; 2],
+}
+
+/// World-space bounding sphere of a draw (geometry sphere through its 3x4 rows; scale = the largest axis).
+fn world_sphere(r: &[[f32; 4]; 3], s: [f32; 4]) -> (Vec3, f32) {
+    let c = Vec3::new(
+        r[0][0] * s[0] + r[0][1] * s[1] + r[0][2] * s[2] + r[0][3],
+        r[1][0] * s[0] + r[1][1] * s[1] + r[1][2] * s[2] + r[1][3],
+        r[2][0] * s[0] + r[2][1] * s[1] + r[2][2] * s[2] + r[2][3],
+    );
+    let scale = (0..3).map(|k| Vec3::new(r[0][k], r[1][k], r[2][k]).length()).fold(0.0, f32::max);
+    (c, s[3] * scale)
+}
+
+/// The view-projection (OpenGL clip space) three renders cube face `face` of a point light's shadow with
+/// (WebGLShadowMap: PerspectiveCamera(90, 1, near, far) at the light, looking down _cubeDirections[face] with
+/// _cubeUps[face]).
+fn point_face_vp(pos: Vec3, near: f32, far: f32, face: usize) -> Mat4 {
+    const DIRS: [[f32; 3]; 6] = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
+    const UPS: [[f32; 3]; 6] = [[0.0, -1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [0.0, -1.0, 0.0]];
+    let proj = glam::camera::rh::proj::opengl::perspective(std::f32::consts::FRAC_PI_2, 1.0, near, far);
+    let view = glam::camera::rh::view::look_to_mat4(pos, Vec3::from(DIRS[face]), Vec3::from(UPS[face]));
+    proj * view
+}
+
+#[cfg(test)]
+mod shadow_tests {
+    use super::*;
+
+    #[test]
+    fn point_faces_cover_their_axis() {
+        let pos = Vec3::new(1.0, 2.0, 3.0);
+        for (face, dir) in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z].into_iter().enumerate() {
+            let vp = point_face_vp(pos, 0.5, 30.0, face);
+            let c = vp * (pos + dir * 5.0).extend(1.0);
+            assert!((c.x / c.w).abs() < 1e-5 && (c.y / c.w).abs() < 1e-5, "face {face}: the axis is the centre");
+            let z = c.z / c.w;
+            assert!(z > -1.0 && z < 1.0, "face {face}: inside the depth range");
+        }
+        // +X face: up is -Y, so a point above the axis lands at negative clip y (three's _cubeUps)
+        let vp = point_face_vp(Vec3::ZERO, 0.5, 30.0, 0);
+        let c = vp * Vec4::new(5.0, 1.0, 0.0, 1.0);
+        assert!(c.y / c.w < 0.0);
+    }
 }
 
 fn f32s(a: &Option<Array>) -> Option<&[f32]> { if let Some(Array::F32(v)) = a { Some(v) } else { None } }
@@ -329,12 +548,30 @@ impl ThreeScene {
             view: ThreeView { view: Mat4::IDENTITY, proj: Mat4::IDENTITY, cam_pos: Vec3::ZERO, background: [0.0, 0.0, 0.0, 1.0], fog: None, sun: None, tonemap: (0, 1.0), shadow_vp: None, v3: false },
             error: None,
             unsupported_resources: 0,
-            progs: Programs::new(dev)?,
+            progs: {
+                let mut p = Programs::new(dev)?;
+                p.depth(dev, &serde_json::from_str::<ProgramMaterialMeta>(r#"{"program":0}"#).map_err(|e| e.to_string())?);
+                p
+            },
             mats3: HashMap::new(),
             uni: HashMap::new(),
             uni_tex: Vec::new(),
             frame_off: 0,
+            pass_off: 0,
+            shadow_area_off: 0,
             objects_off: 0,
+            shadow_objects_off: 0,
+            shadow_ty: three::shadow_type::PCF,
+            shadow_depth_textures: false,
+            shadow_vsm: Vec::new(),
+            shadow_ids: Vec::new(),
+            shadow_maps: Vec::new(),
+            shadow_lookup: Vec::new(),
+            shadow_jobs: Vec::new(),
+            shadow_list: Vec::new(),
+            vsm_jobs: Vec::new(),
+            fullscreen: buffer_with(dev, &[-1.0f32, -1.0, 0.5, 3.0, -1.0, 0.5, -1.0, 3.0, 0.5]),
+            depth_le: 0,
             vis3: Vec::new(),
             shadows: Vec::new(),
             dbg: std::env::var("FASTRENDER_V3_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
@@ -362,12 +599,18 @@ impl ThreeScene {
         self.progs.ensure_lit_depth(dev, queue);
         let (slots, uni, uni_tex, shadows) = (&mut self.slots, &mut self.uni, &mut self.uni_tex, &mut self.shadows);
         let (frame_off, objects_off) = (&mut self.frame_off, &mut self.objects_off);
+        let (pass_off, shadow_area_off, shadow_objects_off) = (&mut self.pass_off, &mut self.shadow_area_off, &mut self.shadow_objects_off);
+        let (shadow_ty, shadow_depth_textures, shadow_vsm, shadow_ids) = (&mut self.shadow_ty, &mut self.shadow_depth_textures, &mut self.shadow_vsm, &mut self.shadow_ids);
         let result = self.host.frame(t as f64, dt as f64).and_then(|words| {
             let f = three::decode(words)?;
             if f.v3 {
-                // ring layout: uniform blocks, FrFrame, then one FrObject per draw (visible or shadow caster)
+                // ring layout: uniform blocks, main FrFrame + FrPass, the shadow passes (FrFrame + FrPass per 2D map or cube
+                // face, a FrPass and two blocks per VSM blur), then FrObjects: one per draw for the main pass, one per draw
+                // for the shadow passes (identity view)
                 let blocks: usize = f.uniforms.map(|u| align(u.block.len() * 4)).sum();
-                let need = blocks + align(std::mem::size_of::<FrFrame>()) + f.draws.len() * align(std::mem::size_of::<FrObject>());
+                let faces: usize = f.shadows.iter().map(|s| if s.kind == three::tex::POINT { 6 } else { 1 }).sum();
+                let shadow_area = (2 * faces + f.shadows.len()) * RING_ALIGN + f.shadows.len() * 2 * VSM_BLOCK;
+                let need = blocks + 2 * RING_ALIGN + shadow_area + 2 * f.draws.len() * align(std::mem::size_of::<FrObject>());
                 let s = &mut slots[slot_i];
                 if s.ring_cap < need {
                     s.ring_cap = need.next_power_of_two();
@@ -384,9 +627,19 @@ impl ThreeScene {
                     off += align(u.block.len() * 4);
                 }
                 *frame_off = off;
-                *objects_off = off + align(std::mem::size_of::<FrFrame>());
+                *pass_off = off + RING_ALIGN;
+                *shadow_area_off = off + 2 * RING_ALIGN;
+                *objects_off = *shadow_area_off + shadow_area;
+                *shadow_objects_off = *objects_off + f.draws.len() * align(std::mem::size_of::<FrObject>());
                 shadows.clear();
                 shadows.extend_from_slice(f.shadows);
+                let sp = f.shadow_pass.unwrap_or_default();
+                *shadow_ty = sp.ty;
+                *shadow_depth_textures = sp.depth_textures && f.shadow_pass.is_some();
+                shadow_vsm.clear();
+                shadow_vsm.extend_from_slice(sp.vsm);
+                shadow_ids.clear();
+                shadow_ids.extend_from_slice(f.shadow_draws);
             }
             self.view.view = Mat4::from_cols_array(&f.view);
             self.view.proj = Mat4::from_cols_array(&f.proj);
@@ -395,14 +648,8 @@ impl ThreeScene {
             self.view.fog = f.fog;
             self.view.tonemap = f.tonemap;
             self.view.v3 = f.v3;
-            // v3: the directional shadow map three's programs sample as directionalShadowMap[0] (SHADOWS entry
-            // kind 1, index 0); rendered y-flipped so its rows are stored as WebGL stores them
-            let v3_sun = f.shadows.iter().find(|s| s.kind == three::tex::DIRECTIONAL && s.index == 0).map(|s| s.vp);
-            self.view.shadow_vp = match (f.v3, v3_sun) {
-                (true, Some(vp)) => Some(Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)) * three::gl_to_metal(&Mat4::from_cols_array(&vp))),
-                (true, None) => None,
-                _ => f.shadow_vp.map(|m| three::gl_to_metal(&Mat4::from_cols_array(&m))),
-            };
+            // v2: the game's shadow camera for mac.rs's shadow pass; v3 renders every map itself (prepare_shadows_v3)
+            self.view.shadow_vp = if f.v3 { None } else { f.shadow_vp.map(|m| three::gl_to_metal(&Mat4::from_cols_array(&m))) };
             self.lights.clear();
             self.lights.extend_from_slice(&f.lights[..f.lights.len().min(MAX_LIGHTS)]);
             self.draws.clear();
@@ -517,14 +764,23 @@ impl ThreeScene {
 
     fn upload_texture(&mut self, dev: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>, id: u32, meta: &str, a: &[Option<Array>], cb: &mut Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>) -> Result<(), String> {
         let m: TextureMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
+        if m.compressed {
+            let t = compressed_texture(dev, &m, a)?;
+            let s = sampler(dev, &m)?;
+            self.texs.insert(id, (t, m, s));
+            return Ok(());
+        }
         let px = match a.first().unwrap_or(&None) {
             Some(Array::U8(v)) => v,
             _ => return Err("texture pixels must come as bytes".into()),
         };
         let (channels, bytes) = m.texel().ok_or_else(|| format!("texture format {} type {} not supported", m.format, m.ty))?;
         let bpp = channels * bytes;
-        if px.len() < m.width * m.height * bpp {
-            return Err(format!("texture {}x{} needs {} bytes, got {}", m.width, m.height, m.width * m.height * bpp, px.len()));
+        // DataArrayTexture (dim 2: morph targets in r187) and Data3DTexture (dim 3): `depth` layers / slices
+        let layers = if m.dim == 2 || m.dim == 3 { m.depth.max(1) } else { 1 };
+        let image = m.width * m.height * bpp;
+        if px.len() < image * layers {
+            return Err(format!("texture {}x{}x{layers} needs {} bytes, got {}", m.width, m.height, image * layers, px.len()));
         }
         let fmt = match (channels, bytes) {
             (4, 1) if m.srgb => MTLPixelFormat::RGBA8Unorm_sRGB,
@@ -538,34 +794,76 @@ impl ThreeScene {
             (2, 4) => MTLPixelFormat::RG32Float,
             _ => MTLPixelFormat::R32Float,
         };
-        // WebGL's UNPACK_FLIP_Y (v3 asks for it: three's shaders sample the texture as stored)
+        // WebGL's UNPACK_FLIP_Y (v3 asks for it: three's shaders sample the texture as stored), per layer
         let flipped: Vec<u8>;
         let px: &[u8] = if m.flip_rows {
             let row = m.width * bpp;
-            flipped = px[..row * m.height].chunks_exact(row).rev().flatten().copied().collect();
+            flipped = px[..image * layers].chunks_exact(image).flat_map(|l| l.chunks_exact(row).rev().flatten().copied()).collect();
             &flipped
         } else {
             px
         };
-        // three: mips only when generateMipmaps and the min filter uses them (DataTexture defaults to neither)
-        let mips = m.mipmaps && m.min_filter_mips() && m.width > 1 && m.height > 1 && bpp == 4 && bytes == 1;
-        let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(fmt, m.width, m.height, mips) };
-        d.setUsage(MTLTextureUsage::ShaderRead);
-        let t = dev.newTextureWithDescriptor(&d).ok_or("texture alloc")?;
-        unsafe {
-            t.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: m.width, height: m.height, depth: 1 } },
-                0,
-                NonNull::new(px.as_ptr() as *mut c_void).unwrap(),
-                m.width * bpp,
-            );
-        }
-        if mips {
-            let c = cb.get_or_insert_with(|| queue.commandBuffer().expect("cb"));
-            let b = c.blitCommandEncoder().ok_or("blit")?;
-            b.generateMipmapsForTexture(&t);
-            b.endEncoding();
-        }
+        let t = if m.dim == 2 || m.dim == 3 {
+            let d = MTLTextureDescriptor::new();
+            d.setTextureType(if m.dim == 3 { MTLTextureType::Type3D } else { MTLTextureType::Type2DArray });
+            d.setPixelFormat(fmt);
+            unsafe {
+                d.setWidth(m.width);
+                d.setHeight(m.height);
+                if m.dim == 3 {
+                    d.setDepth(layers);
+                } else {
+                    d.setArrayLength(layers);
+                }
+            }
+            d.setUsage(MTLTextureUsage::ShaderRead);
+            let t = dev.newTextureWithDescriptor(&d).ok_or("texture alloc")?;
+            unsafe {
+                if m.dim == 3 {
+                    t.replaceRegion_mipmapLevel_slice_withBytes_bytesPerRow_bytesPerImage(
+                        MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: m.width, height: m.height, depth: layers } },
+                        0,
+                        0,
+                        NonNull::new(px.as_ptr() as *mut c_void).unwrap(),
+                        m.width * bpp,
+                        image,
+                    );
+                } else {
+                    for l in 0..layers {
+                        t.replaceRegion_mipmapLevel_slice_withBytes_bytesPerRow_bytesPerImage(
+                            MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: m.width, height: m.height, depth: 1 } },
+                            0,
+                            l,
+                            NonNull::new(px[l * image..].as_ptr() as *mut c_void).unwrap(),
+                            m.width * bpp,
+                            0,
+                        );
+                    }
+                }
+            }
+            t
+        } else {
+            // three: mips only when generateMipmaps and the min filter uses them (DataTexture defaults to neither)
+            let mips = m.mipmaps && m.min_filter_mips() && m.width > 1 && m.height > 1 && bpp == 4 && bytes == 1;
+            let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(fmt, m.width, m.height, mips) };
+            d.setUsage(MTLTextureUsage::ShaderRead);
+            let t = dev.newTextureWithDescriptor(&d).ok_or("texture alloc")?;
+            unsafe {
+                t.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                    MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: m.width, height: m.height, depth: 1 } },
+                    0,
+                    NonNull::new(px.as_ptr() as *mut c_void).unwrap(),
+                    m.width * bpp,
+                );
+            }
+            if mips {
+                let c = cb.get_or_insert_with(|| queue.commandBuffer().expect("cb"));
+                let b = c.blitCommandEncoder().ok_or("blit")?;
+                b.generateMipmapsForTexture(&t);
+                b.endEncoding();
+            }
+            t
+        };
         // materials referencing this texture carry its transform; refresh them
         for mat in self.mats.values() {
             if mat.meta.map == id {
@@ -630,9 +928,6 @@ impl ThreeScene {
 
     fn upload_program_material(&mut self, dev: &Device, id: u32, meta: &str) -> Result<(), String> {
         let m: ProgramMaterialMeta = serde_json::from_str(meta).map_err(|e| e.to_string())?;
-        if m.wireframe {
-            self.progs.report(format!("{} {}: wireframe is drawn filled", m.ty, m.name));
-        }
         let depth = self.progs.depth(dev, &m);
         self.mats3.insert(id, Mat3State { meta: m, depth, pipes: Vec::new() });
         Ok(())
@@ -648,8 +943,17 @@ impl ThreeScene {
         let p = &self.progs;
         self.view.v3.then(|| {
             format!(
-                "three programs: {} compiled (Metal {:.0} ms total), {} pipelines ({:.0} ms), {} material instances",
-                p.compiled, p.compile_ms, p.pipelines_built, p.pipeline_ms, self.mats3.len()
+                "three programs: {} compiled (Metal {:.0} ms total), {} pipelines ({:.0} ms), {} material instances; shadows: {} maps, {} passes, {} casters with three's depth programs, {} native depth-only, {} VSM blurs",
+                p.compiled,
+                p.compile_ms,
+                p.pipelines_built,
+                p.pipeline_ms,
+                self.mats3.len(),
+                self.shadow_lookup.len(),
+                self.shadow_jobs.len(),
+                self.shadow_list.iter().filter(|d| d.prog.is_some()).count(),
+                self.shadow_list.iter().filter(|d| d.prog.is_none()).count(),
+                self.vsm_jobs.len()
             )
         })
     }
@@ -666,7 +970,8 @@ impl ThreeScene {
 
     /// Cull, sort and write object records + lights for `slot`. Returns the number of draws.
     /// `projection`: v3's FrFrame projectionMatrix (three's, with this frame's MetalFX jitter applied).
-    pub fn prepare(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], shadow_planes: &[Vec4; 6], cam: Vec3, projection: Mat4) -> usize {
+    /// `viewport_h`: the main pass's render height (gl_FragCoord.y = height - Metal's y, FrPass).
+    pub fn prepare(&mut self, dev: &Device, slot_i: usize, planes: &[Vec4; 6], shadow_planes: &[Vec4; 6], cam: Vec3, projection: Mat4, viewport_h: f32) -> usize {
         let t0 = std::time::Instant::now();
         self.visible.clear();
         self.casters.clear();
@@ -746,6 +1051,9 @@ impl ThreeScene {
         unsafe { std::ptr::copy_nonoverlapping(self.lights.as_ptr(), s.lights.contents().as_ptr() as *mut ThreeLight, nl) };
         if v3 {
             self.prepare_v3(dev, slot_i, projection);
+            let ring = self.slots[slot_i].ring.contents().as_ptr() as *mut u8;
+            unsafe { (ring.add(self.pass_off) as *mut [f32; 4]).write_unaligned([viewport_h, 1.0, 0.0, 0.0]) };
+            self.prepare_shadows_v3(dev, slot_i);
         }
         self.prepare_ms = t0.elapsed().as_secs_f64() * 1000.0;
         n
@@ -761,39 +1069,16 @@ impl ThreeScene {
         let frame = FrFrame { projection: projection.to_cols_array(), view: view.to_cols_array(), camera_position: [c.x, c.y, c.z, 0.0] };
         unsafe { (ring.add(self.frame_off) as *mut FrFrame).write_unaligned(frame) };
         let mut obj = self.objects_off;
-        let inst_names = (self.progs.name_id("instanceMatrix"), self.progs.name_id("instanceColor"));
+        self.progs.name_id("instanceMatrix");
+        self.progs.name_id("instanceColor");
+        self.progs.name_id("position");
         for k in 0..self.visible.len() {
             let i = self.visible[k].0;
             let d = self.draws[i];
             let mat = &self.mats3[&d.material];
             let Some(&(block, tex)) = self.uni.get(&d.material) else { continue };
-            let Some(prog) = self.progs.progs.get(&mat.meta.program) else { continue };
-            let geo = &self.geos[&d.geometry];
-            let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
-            // how each attribute the program reads is fed (see mac_programs::StreamSig)
-            let mut sig: StreamSig = 0;
-            for (a_i, a) in prog.attrs.iter().enumerate() {
-                let s = if a.name == inst_names.0 {
-                    if inst.is_some() { SIG_INSTANCE | 4 } else { 0 }
-                } else if a.name == inst_names.1 {
-                    if inst.is_some_and(|x| x.colors.is_some()) { SIG_INSTANCE | 3 } else { 0 }
-                } else {
-                    geo.attrs.iter().find(|g| g.0 == a.name).map_or(0, |g| g.2 as u64)
-                };
-                sig |= s << (4 * a_i);
-            }
             let depth = mat.depth;
-            let pipe = match mat.pipes.iter().find(|p| p.0 == sig) {
-                Some(p) => p.1,
-                None => {
-                    let meta = mat.meta.clone();
-                    let p = self.progs.pipeline(dev, &meta, sig).unwrap_or(u32::MAX);
-                    if let Some(m) = self.mats3.get_mut(&d.material) {
-                        m.pipes.push((sig, p));
-                    }
-                    p
-                }
-            };
+            let pipe = self.instance_pipeline(dev, d.material, &d, Target::Main).unwrap_or(u32::MAX);
             if pipe == u32::MAX {
                 continue;
             }
@@ -803,6 +1088,323 @@ impl ThreeScene {
             unsafe { (ring.add(obj) as *mut FrObject).write_unaligned(fr_object(&view, &d.rows)) };
             self.vis3.push(Draw3 { i, obj, block, tex, pipe, depth });
             obj += align(std::mem::size_of::<FrObject>());
+        }
+    }
+
+    /// How a program reads each of its attributes for draw `d` (see mac_programs::StreamSig).
+    fn stream_sig(&self, prog: &crate::mac_programs::Prog, d: &Draw, geo: &Geo) -> StreamSig {
+        let inst_names = (self.progs.name_id_get("instanceMatrix"), self.progs.name_id_get("instanceColor"));
+        let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
+        let mut sig: StreamSig = 0;
+        for (a_i, a) in prog.attrs.iter().enumerate() {
+            let s = if Some(a.name) == inst_names.0 {
+                if inst.is_some() { SIG_INSTANCE | 4 } else { 0 }
+            } else if Some(a.name) == inst_names.1 {
+                if inst.is_some_and(|x| x.colors.is_some()) { SIG_INSTANCE | 3 } else { 0 }
+            } else {
+                geo.attrs.iter().find(|g| g.0 == a.name).map_or(0, |g| g.2 as u64)
+            };
+            sig |= s << (4 * a_i);
+        }
+        sig
+    }
+
+    /// The pipeline of material instance `mat_id` for draw `d` into `target` (built on first use, cached per instance).
+    fn instance_pipeline(&mut self, dev: &Device, mat_id: u32, d: &Draw, target: Target) -> Option<u32> {
+        let mat = self.mats3.get(&mat_id)?;
+        let prog = self.progs.progs.get(&mat.meta.program)?;
+        let geo = self.geos.get(&d.geometry)?;
+        let sig = self.stream_sig(prog, d, geo);
+        if let Some(p) = mat.pipes.iter().find(|p| p.0 == sig && p.1 == target) {
+            return (p.2 != u32::MAX).then_some(p.2);
+        }
+        let meta = mat.meta.clone();
+        let p = self.progs.pipeline(dev, &meta, sig, target).unwrap_or(u32::MAX);
+        if let Some(m) = self.mats3.get_mut(&mat_id) {
+            m.pipes.push((sig, target, p));
+        }
+        (p != u32::MAX).then_some(p)
+    }
+
+    /// v3 shadow maps for this frame: one per SHADOWS entry three renders (r180+ depth textures: directional and spot
+    /// lights a 2D map, point lights a cube; VSM: plus an RG16F map blurred by three's VSM programs), each caster drawn
+    /// with three's depth program (alphaTest, skinning, morphs, custom depth materials) or the native depth-only path.
+    /// FrFrame per pass: projectionMatrix = the shadow camera's view-projection, y-flipped so the rows are stored as WebGL
+    /// stores them (three's shadow matrices then sample them unchanged); FrObject per caster with an identity view.
+    fn prepare_shadows_v3(&mut self, dev: &Device, slot_i: usize) {
+        self.shadow_jobs.clear();
+        self.shadow_list.clear();
+        self.vsm_jobs.clear();
+        self.shadow_lookup.clear();
+        if !self.shadow_depth_textures || self.dbg & 2 != 0 {
+            return; // older three (RGBA-packed maps) or bisecting: every shadow slot samples a lit map
+        }
+        let ring = self.slots[slot_i].ring.contents().as_ptr() as *mut u8;
+        let vsm = self.shadow_ty == three::shadow_type::VSM;
+        let mut area = self.shadow_area_off;
+        let mut take = |n: usize| {
+            let o = area;
+            area += n;
+            o
+        };
+        // native depth-only caster: three's MeshDepthMaterial state (LessEqual, depth write)
+        let depth_le = self.depth_le;
+        let flip_y = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
+        let mut written: Vec<bool> = vec![false; self.draws.len()];
+        let shadows = self.shadows.clone();
+        for (k, rec) in shadows.iter().enumerate() {
+            let point = rec.kind == three::tex::POINT;
+            if point && vsm {
+                continue; // three: "VSM shadow maps are not supported for PointLights"
+            }
+            let (w, h) = ((rec.map_size[0].max(1.0) as usize).min(8192), (rec.map_size[1].max(1.0) as usize).min(8192));
+            let (w, h) = if point { (w, w) } else { (w, h) };
+            let want_vsm = vsm && self.shadow_vsm.get(k).is_some_and(|p| p[0] != 0 && p[1] != 0);
+            let map = match self.shadow_maps.iter().position(|m| m.kind == rec.kind && m.index == rec.index) {
+                Some(m) if self.shadow_maps[m].size == (w, h) && self.shadow_maps[m].vsm.is_some() == want_vsm => m,
+                found => {
+                    let m = ShadowMap::new(dev, rec.kind, rec.index, (w, h), point, want_vsm);
+                    match found {
+                        Some(i) => {
+                            self.shadow_maps[i] = m;
+                            i
+                        }
+                        None => {
+                            self.shadow_maps.push(m);
+                            self.shadow_maps.len() - 1
+                        }
+                    }
+                }
+            };
+            self.shadow_lookup.push((rec.kind, rec.index, map));
+            let pos = Vec3::from(rec.pos);
+            for face in 0..if point { 6 } else { 1 } {
+                let vp = if point { point_face_vp(pos, rec.near, rec.far, face) } else { Mat4::from_cols_array(&rec.vp) };
+                let planes = frustum_planes(&three::gl_to_metal(&vp));
+                let frame = take(RING_ALIGN);
+                let pass = take(RING_ALIGN);
+                let fr = FrFrame { projection: (flip_y * vp).to_cols_array(), view: Mat4::IDENTITY.to_cols_array(), camera_position: [pos.x, pos.y, pos.z, 0.0] };
+                unsafe {
+                    (ring.add(frame) as *mut FrFrame).write_unaligned(fr);
+                    (ring.add(pass) as *mut [f32; 4]).write_unaligned([h as f32, 0.0, 0.0, 0.0]);
+                }
+                let first = self.shadow_list.len();
+                for i in 0..self.draws.len() {
+                    let d = self.draws[i];
+                    if d.flags & flag::CAST == 0 && !(vsm && d.flags & flag::RECEIVE != 0) || d.count == 0 {
+                        continue;
+                    }
+                    let Some(g) = self.geos.get(&d.geometry) else { continue };
+                    let Some(main) = self.mats3.get(&d.material) else { continue };
+                    if d.flags & (flag::NO_CULL | flag::INSTANCED) == 0 {
+                        let (c, r) = world_sphere(&d.rows, g.sphere);
+                        if !sphere_visible(&planes, c, r) {
+                            continue;
+                        }
+                    }
+                    let main_meta = main.meta.clone();
+                    let id = self.shadow_ids.get(i).map_or(0, |p| if point { p[1] } else { p[0] });
+                    let prog = if id != 0 {
+                        match (self.uni.get(&id).copied(), self.instance_pipeline(dev, id, &d, Target::Depth)) {
+                            (Some((block, tex)), Some(pipe)) => {
+                                let m = &self.mats3[&id].meta;
+                                Some(ShadowProg { block, tex, pipe, depth: self.mats3[&id].depth, mat: id, side: m.side, wireframe: m.wireframe })
+                            }
+                            _ => None, // the depth program failed (reported): native depth-only
+                        }
+                    } else {
+                        None
+                    };
+                    let obj = self.shadow_objects_off + i * align(std::mem::size_of::<FrObject>());
+                    if !written[i] {
+                        written[i] = true;
+                        unsafe { (ring.add(obj) as *mut FrObject).write_unaligned(fr_object(&Mat4::IDENTITY, &d.rows)) };
+                    }
+                    // side rendered (WebGLShadowMap.getDepthMaterial): shadowSide, else the opposite side (VSM: the same)
+                    let side = match &prog {
+                        Some(p) => p.side,
+                        None => main_meta.shadow_side.unwrap_or(if vsm { main_meta.side } else { match main_meta.side { 0 => 1, 1 => 0, s => s } }),
+                    };
+                    self.shadow_list.push(ShadowDraw3 { i, obj, prog, side, wireframe: prog.map_or(main_meta.wireframe, |p| p.wireframe), depth: depth_le });
+                }
+                self.shadow_jobs.push(ShadowJob { map, face, frame, pass, draws: first..self.shadow_list.len() });
+            }
+            if want_vsm {
+                // three's VSMPass: vertical blur of the depth map into mapPass, horizontal back into map (RG16F)
+                let ids = self.shadow_vsm[k];
+                let pass = take(RING_ALIGN);
+                unsafe { (ring.add(pass) as *mut [f32; 4]).write_unaligned([h as f32, 0.0, 0.0, 0.0]) };
+                let mut job = VsmJob { map, pass, blocks: [0; 2], pipes: [u32::MAX; 2], progs: ids };
+                for (n, &pid) in ids.iter().enumerate() {
+                    let block = take(VSM_BLOCK);
+                    job.blocks[n] = block;
+                    let Some(p) = self.progs.progs.get(&pid) else { continue };
+                    if p.layout.size as usize > VSM_BLOCK {
+                        continue;
+                    }
+                    unsafe { std::ptr::write_bytes(ring.add(block), 0, VSM_BLOCK) };
+                    for m in &p.layout.members {
+                        let at = unsafe { ring.add(block + m.offset as usize) as *mut f32 };
+                        match m.name.as_str() {
+                            "resolution" => unsafe { (at as *mut [f32; 2]).write_unaligned([w as f32, h as f32]) },
+                            "radius" => unsafe { at.write_unaligned(rec.radius) },
+                            _ => {}
+                        }
+                    }
+                    let pos_name = self.progs.name_id_get("position");
+                    let sig = p.attrs.iter().enumerate().fold(0, |s, (a_i, a)| s | if Some(a.name) == pos_name { 3u64 << (4 * a_i) } else { 0 });
+                    let meta: ProgramMaterialMeta = serde_json::from_str(&format!("{{\"program\":{pid},\"name\":\"VSM\",\"type\":\"ShaderMaterial\"}}")).expect("meta");
+                    job.pipes[n] = self.progs.pipeline(dev, &meta, sig, Target::Rg16).unwrap_or(u32::MAX);
+                }
+                self.vsm_jobs.push(job);
+            }
+        }
+    }
+
+    /// v3: render every shadow map prepared for `slot_i` (before the main pass, in the same command buffer).
+    pub fn encode_shadows_v3(&self, cb: &ProtocolObject<dyn MTLCommandBuffer>, slot_i: usize) {
+        if !self.view.v3 {
+            return;
+        }
+        let ring = &self.slots[slot_i].ring;
+        for job in &self.shadow_jobs {
+            let map = &self.shadow_maps[job.map];
+            let rp = MTLRenderPassDescriptor::new();
+            let da = rp.depthAttachment();
+            da.setTexture(Some(&map.depth));
+            if map.cube {
+                da.setSlice(job.face);
+            }
+            da.setLoadAction(MTLLoadAction::Clear);
+            da.setStoreAction(MTLStoreAction::Store);
+            da.setClearDepth(1.0);
+            let Some(enc) = cb.renderCommandEncoderWithDescriptor(&rp) else { continue };
+            enc.setViewport(MTLViewport { originX: 0.0, originY: 0.0, width: map.size.0 as f64, height: map.size.1 as f64, znear: 0.0, zfar: 1.0 });
+            unsafe {
+                for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER] {
+                    enc.setVertexBuffer_offset_atIndex(Some(ring), 0, b as usize);
+                    enc.setFragmentBuffer_offset_atIndex(Some(ring), 0, b as usize);
+                }
+                enc.setVertexBuffer_offset_atIndex(Some(ring), job.frame, xlat::FRAME_BLOCK_BUFFER as usize);
+                enc.setFragmentBuffer_offset_atIndex(Some(ring), job.frame, xlat::FRAME_BLOCK_BUFFER as usize);
+                enc.setFragmentBuffer_offset_atIndex(Some(ring), job.pass, xlat::PASS_BUFFER as usize);
+            }
+            let mut last_depth = u32::MAX;
+            for sd in &self.shadow_list[job.draws.clone()] {
+                let d = &self.draws[sd.i];
+                let g = &self.geos[&d.geometry];
+                // side rendered: 0 front (cull back), 1 back (cull front), 2 both; the y-flipped projection mirrors winding
+                enc.setCullMode(match sd.side { 0 => MTLCullMode::Back, 1 => MTLCullMode::Front, _ => MTLCullMode::None });
+                let mirrored = Self::winding(d) == MTLWinding::Clockwise;
+                enc.setFrontFacingWinding(if mirrored { MTLWinding::CounterClockwise } else { MTLWinding::Clockwise });
+                enc.setTriangleFillMode(if sd.wireframe { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
+                let depth = sd.prog.map_or(sd.depth, |p| p.depth);
+                if depth != last_depth {
+                    enc.setDepthStencilState(Some(self.progs.depth_at(depth)));
+                    last_depth = depth;
+                }
+                unsafe { enc.setVertexBufferOffset_atIndex(sd.obj, xlat::OBJECT_BLOCK_BUFFER as usize) };
+                match sd.prog {
+                    Some(p) => {
+                        let Some(pipe) = self.progs.pipeline_at(p.pipe) else { continue };
+                        let Some(prog) = self.mats3.get(&p.mat).and_then(|m| self.progs.progs.get(&m.meta.program)) else { continue };
+                        enc.setRenderPipelineState(pipe);
+                        unsafe { enc.setFragmentBufferOffset_atIndex(sd.obj, xlat::OBJECT_BLOCK_BUFFER as usize) };
+                        self.bind_program_draw(&enc, prog, d, g, p.block, p.tex);
+                    }
+                    None => {
+                        enc.setRenderPipelineState(&self.pipes.depth3);
+                        let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
+                        let instanced: u32 = inst.is_some() as u32;
+                        unsafe {
+                            enc.setVertexBuffer_offset_atIndex(Some(&g.pos), 0, 4);
+                            enc.setVertexBuffer_offset_atIndex(Some(inst.map_or(&self.progs.defaults, |x| &x.cols)), 0, 5);
+                            enc.setVertexBytes_length_atIndex(NonNull::new(&instanced as *const u32 as *mut c_void).unwrap(), 4, 6);
+                        }
+                    }
+                }
+                self.draw(&enc, d, g);
+            }
+            enc.setTriangleFillMode(MTLTriangleFillMode::Fill);
+            enc.endEncoding();
+        }
+        for job in &self.vsm_jobs {
+            let map = &self.shadow_maps[job.map];
+            let Some((vmap, vpass)) = &map.vsm else { continue };
+            let p = &self.progs;
+            // vertical: depth (nearest) -> mapPass; horizontal: mapPass (linear) -> map
+            for (n, (src, dst, smp)) in [(&map.depth, vpass, &p.nearest_clamp), (vpass, vmap, &p.linear_clamp)].into_iter().enumerate() {
+                let (Some(pipe), Some(prog)) = (p.pipeline_at(job.pipes[n]), p.progs.get(&job.progs[n])) else { continue };
+                let rp = MTLRenderPassDescriptor::new();
+                let a = unsafe { rp.colorAttachments().objectAtIndexedSubscript(0) };
+                a.setTexture(Some(dst));
+                a.setLoadAction(MTLLoadAction::DontCare);
+                a.setStoreAction(MTLStoreAction::Store);
+                let Some(enc) = cb.renderCommandEncoderWithDescriptor(&rp) else { continue };
+                enc.setRenderPipelineState(pipe);
+                enc.setCullMode(MTLCullMode::None);
+                unsafe {
+                    for b in [xlat::DEFAULT_BLOCK_BUFFER, xlat::OBJECT_BLOCK_BUFFER, xlat::FRAME_BLOCK_BUFFER] {
+                        let off = if b == xlat::DEFAULT_BLOCK_BUFFER { job.blocks[n] } else { self.frame_off };
+                        enc.setVertexBuffer_offset_atIndex(Some(ring), off, b as usize);
+                        enc.setFragmentBuffer_offset_atIndex(Some(ring), off, b as usize);
+                    }
+                    enc.setFragmentBuffer_offset_atIndex(Some(ring), job.pass, xlat::PASS_BUFFER as usize);
+                    for a in &prog.attrs {
+                        enc.setVertexBuffer_offset_atIndex(Some(&self.fullscreen), 0, ATTR_BUFFER0 + a.location as usize);
+                    }
+                    for t in &prog.layout.textures {
+                        if let Some(b) = t.fragment {
+                            enc.setFragmentTexture_atIndex(Some(src), b.texture as usize);
+                            if let Some(s) = b.sampler {
+                                enc.setFragmentSamplerState_atIndex(Some(smp), s as usize);
+                            }
+                        }
+                    }
+                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+                }
+                enc.endEncoding();
+            }
+        }
+    }
+
+    /// Vertex streams, uniform block, textures of a three program draw (main pass and shadow passes).
+    fn bind_program_draw(&self, enc: &RenderEnc, prog: &crate::mac_programs::Prog, d: &Draw, g: &Geo, block: usize, tex: usize) {
+        let inst_names = (self.progs.name_id_get("instanceMatrix"), self.progs.name_id_get("instanceColor"));
+        let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
+        unsafe {
+            for a in &prog.attrs {
+                let b = ATTR_BUFFER0 + a.location as usize;
+                let (buf, off) = if Some(a.name) == inst_names.0 {
+                    inst.map_or((&self.progs.defaults, 16), |x| (&x.cols, 0))
+                } else if Some(a.name) == inst_names.1 {
+                    inst.and_then(|x| x.colors.as_ref()).map_or((&self.progs.defaults, 0), |c| (c, 0))
+                } else {
+                    g.attrs.iter().find(|x| x.0 == a.name).map_or((&self.progs.defaults, if a.cols == 4 { 16 } else { 0 }), |x| (&x.1, 0))
+                };
+                enc.setVertexBuffer_offset_atIndex(Some(buf), off, b);
+            }
+            enc.setVertexBufferOffset_atIndex(block, xlat::DEFAULT_BLOCK_BUFFER as usize);
+            enc.setFragmentBufferOffset_atIndex(block, xlat::DEFAULT_BLOCK_BUFFER as usize);
+            if self.dbg & 64 != 0 {
+                return;
+            }
+            for (k, t) in prog.layout.textures.iter().enumerate() {
+                let id = self.uni_tex.get(tex + k).copied().unwrap_or(0);
+                let (tx, smp) = self.resolve(id, t);
+                if let Some(b) = t.fragment {
+                    enc.setFragmentTexture_atIndex(Some(tx), b.texture as usize);
+                    if let Some(s) = b.sampler.filter(|s| *s < MAX_SAMPLERS) {
+                        enc.setFragmentSamplerState_atIndex(Some(smp), s as usize);
+                    }
+                }
+                if let Some(b) = t.vertex {
+                    enc.setVertexTexture_atIndex(Some(tx), b.texture as usize);
+                    if let Some(s) = b.sampler.filter(|s| *s < MAX_SAMPLERS) {
+                        enc.setVertexSamplerState_atIndex(Some(smp), s as usize);
+                    }
+                }
+            }
         }
     }
 
@@ -846,20 +1448,24 @@ impl ThreeScene {
     }
 
     /// The texture + sampler for texture slot `t` of a v3 program, given the id JS packed for it.
-    fn resolve<'a>(&'a self, id: u32, t: &xlat::Texture, shadow_map: &'a Texture) -> (&'a Texture, &'a Sampler) {
+    fn resolve(&self, id: u32, t: &xlat::Texture) -> (&Texture, &Sampler) {
         let p = &self.progs;
         let n = &p.neutral;
         use three::tex;
         if id & 0xFF00_0000 == tex::SHADOW {
             let (kind, index) = ((id >> 16) & 0xFF, id & 0xFFFF);
-            // only the first directional shadow map is rendered natively today; the rest are lit
-            let ours = kind == tex::DIRECTIONAL && index == 0 && self.view.shadow_vp.is_some() && t.kind == "2d" && self.dbg & 1 == 0;
-            let smp = if t.shadow { &p.compare } else { &p.nearest_clamp };
+            let vsm = self.shadow_ty == three::shadow_type::VSM;
+            // PCF: compare sampler; Basic: nearest; VSM: the blurred RG16F map, linear (fixed states are constexpr
+            // samplers in the MSL: these only matter for programs that kept a sampler array)
+            let smp = if t.shadow { &p.compare } else if vsm { &p.linear_clamp } else { &p.nearest_clamp };
+            let ours = self.shadow_lookup.iter().find(|m| m.0 == kind && m.1 == index).map(|m| &self.shadow_maps[m.2]).filter(|_| self.dbg & 1 == 0);
+            if let Some(m) = ours.filter(|m| m.cube == (t.kind == "cube")) {
+                return (m.vsm.as_ref().map_or(&m.depth, |v| &v.0), smp);
+            }
             let lit = if t.kind == "cube" { n.lit_cube.as_ref() } else { n.lit_2d.as_ref() };
-            return match (ours, lit) {
-                (true, _) => (shadow_map, smp),
-                (false, Some(l)) => (l, smp),
-                (false, None) => (&n.white_2d, &p.linear_clamp),
+            return match lit {
+                Some(l) => (l, smp),
+                None => (&n.white_2d, &p.linear_clamp),
             };
         }
         if self.dbg & 16 != 0 {
@@ -868,8 +1474,16 @@ impl ThreeScene {
         if id == tex::DFG_LUT && t.kind == "2d" {
             return (&p.dfg, &p.linear_clamp);
         }
-        if t.kind == "2d" {
-            if let Some((tx, _, s)) = self.texs.get(&id) {
+        if let Some((tx, _, s)) = self.texs.get(&id) {
+            let ty = tx.textureType();
+            let fits = match t.kind.as_str() {
+                "2d" => ty == MTLTextureType::Type2D,
+                "2dArray" => ty == MTLTextureType::Type2DArray,
+                "3d" => ty == MTLTextureType::Type3D,
+                "cube" => ty == MTLTextureType::TypeCube,
+                _ => false,
+            };
+            if fits {
                 return (tx, s);
             }
         }
@@ -883,7 +1497,7 @@ impl ThreeScene {
     }
 
     /// v3 main pass: three's programs, one pipeline / depth state / uniform block per draw as WebGLRenderer would.
-    fn encode_main_v3(&self, enc: &RenderEnc, slot_i: usize, shadow_map: &Texture) -> usize {
+    fn encode_main_v3(&self, enc: &RenderEnc, slot_i: usize) -> usize {
         let t0 = std::time::Instant::now();
         let ring = &self.slots[slot_i].ring;
         unsafe {
@@ -893,9 +1507,9 @@ impl ThreeScene {
             }
             enc.setVertexBuffer_offset_atIndex(Some(ring), self.frame_off, xlat::FRAME_BLOCK_BUFFER as usize);
             enc.setFragmentBuffer_offset_atIndex(Some(ring), self.frame_off, xlat::FRAME_BLOCK_BUFFER as usize);
+            enc.setFragmentBuffer_offset_atIndex(Some(ring), self.pass_off, xlat::PASS_BUFFER as usize);
         }
-        let (mut last_pipe, mut last_depth, mut last_bias) = (u32::MAX, u32::MAX, (0.0f32, 0.0f32));
-        let inst_names = (self.progs.name_id_get("instanceMatrix"), self.progs.name_id_get("instanceColor"));
+        let (mut last_pipe, mut last_depth, mut last_bias, mut last_wire) = (u32::MAX, u32::MAX, (0.0f32, 0.0f32), false);
         let mut drawn = 0;
         for v in self.vis3.iter().take(self.max_draws) {
             let d = &self.draws[v.i];
@@ -946,41 +1560,24 @@ impl ThreeScene {
                 enc.setDepthBias_slopeScale_clamp(bias.1, bias.0, 0.0);
                 last_bias = bias;
             }
-            let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
+            // three draws wireframe as GL_LINES over the triangle edges: the same edges, rasterised as lines
+            if m.wireframe != last_wire {
+                enc.setTriangleFillMode(if m.wireframe { MTLTriangleFillMode::Lines } else { MTLTriangleFillMode::Fill });
+                last_wire = m.wireframe;
+            }
             unsafe {
-                for a in &prog.attrs {
-                    let b = ATTR_BUFFER0 + a.location as usize;
-                    let (buf, off) = if Some(a.name) == inst_names.0 {
-                        inst.map_or((&self.progs.defaults, 16), |x| (&x.cols, 0))
-                    } else if Some(a.name) == inst_names.1 {
-                        inst.and_then(|x| x.colors.as_ref()).map_or((&self.progs.defaults, 0), |c| (c, 0))
-                    } else {
-                        g.attrs.iter().find(|x| x.0 == a.name).map_or((&self.progs.defaults, if a.cols == 4 { 16 } else { 0 }), |x| (&x.1, 0))
-                    };
-                    enc.setVertexBuffer_offset_atIndex(Some(buf), off, b);
-                }
-                enc.setVertexBufferOffset_atIndex(v.block, xlat::DEFAULT_BLOCK_BUFFER as usize);
-                enc.setFragmentBufferOffset_atIndex(v.block, xlat::DEFAULT_BLOCK_BUFFER as usize);
                 enc.setVertexBufferOffset_atIndex(v.obj, xlat::OBJECT_BLOCK_BUFFER as usize);
                 enc.setFragmentBufferOffset_atIndex(v.obj, xlat::OBJECT_BLOCK_BUFFER as usize);
-                for (k, t) in prog.layout.textures.iter().enumerate() {
-                    if t.index >= MAX_SAMPLERS || self.dbg & 64 != 0 {
-                        continue; // reported when the program was added
-                    }
-                    let id = self.uni_tex.get(v.tex + k).copied().unwrap_or(0);
-                    let (tex, smp) = self.resolve(id, t, shadow_map);
-                    let i = t.index as usize;
-                    enc.setFragmentTexture_atIndex(Some(tex), i);
-                    enc.setFragmentSamplerState_atIndex(Some(smp), i);
-                    enc.setVertexTexture_atIndex(Some(tex), i);
-                    enc.setVertexSamplerState_atIndex(Some(smp), i);
-                }
             }
+            self.bind_program_draw(enc, prog, d, g, v.block, v.tex);
             self.draw(enc, d, g);
             drawn += 1;
         }
         if last_bias != (0.0, 0.0) {
             enc.setDepthBias_slopeScale_clamp(0.0, 0.0, 0.0);
+        }
+        if last_wire {
+            enc.setTriangleFillMode(MTLTriangleFillMode::Fill);
         }
         self.encode_ms.set(t0.elapsed().as_secs_f64() * 1000.0);
         drawn
@@ -988,7 +1585,7 @@ impl ThreeScene {
 
     pub fn encode_main(&self, enc: &RenderEnc, slot_i: usize, uniforms: &Buffer, shadow_map: &Texture, depth_less: &ProtocolObject<dyn MTLDepthStencilState>, depth_test_only: &ProtocolObject<dyn MTLDepthStencilState>) -> usize {
         if self.view.v3 {
-            return self.encode_main_v3(enc, slot_i, shadow_map);
+            return self.encode_main_v3(enc, slot_i);
         }
         let s = &self.slots[slot_i];
         unsafe {
@@ -1039,30 +1636,16 @@ impl ThreeScene {
             enc.setVertexBuffer_offset_atIndex(Some(uniforms), 0, 3);
             enc.setVertexBuffer_offset_atIndex(Some(&s.objects), 0, 5);
         }
-        // every caster inside the shadow camera's frustum, on screen or not (culled in prepare)
+        // every caster inside the shadow camera's frustum, on screen or not (culled in prepare); v2 only (v3 renders
+        // its maps in encode_shadows_v3)
         let _ = shadow_planes;
         if self.view.v3 {
-            // three's WebGLShadowMap: no polygon offset (shadow.bias is applied in the shader), and the side
-            // rendered is material.shadowSide, else the opposite of material.side (front-facing materials cast from
-            // their back faces). The map is rendered y-flipped (see ThreeView::shadow_vp), which mirrors winding.
-            enc.setDepthBias_slopeScale_clamp(0.0, 0.0, 0.0);
+            return;
         }
         for &(i, k) in &self.casters {
             let d = &self.draws[i];
             let g = &self.geos[&d.geometry];
-            if self.view.v3 && self.dbg & 2 != 0 {
-                continue;
-            }
-            if self.view.v3 {
-                let Some(m) = self.mats3.get(&d.material) else { continue };
-                let side = m.meta.shadow_side.unwrap_or(match m.meta.side { 0 => 1, 1 => 0, s => s });
-                // side rendered: 0 front (cull back), 1 back (cull front), 2 both
-                enc.setCullMode(match side { 0 => MTLCullMode::Back, 1 => MTLCullMode::Front, _ => MTLCullMode::None });
-                let mirrored = Self::winding(d) == MTLWinding::Clockwise;
-                enc.setFrontFacingWinding(if mirrored { MTLWinding::CounterClockwise } else { MTLWinding::Clockwise });
-            } else {
-                enc.setFrontFacingWinding(Self::winding(d));
-            }
+            enc.setFrontFacingWinding(Self::winding(d));
             self.bind_geometry(enc, d, g);
             unsafe { enc.setVertexBufferOffset_atIndex(k * OBJ_BYTES, 5) };
             self.draw(enc, d, g);

@@ -25,7 +25,7 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
-use spirv_cross2::compile::msl::{BindTarget, CompilerOptions as MslOptions, MslVersion, ResourceBinding};
+use spirv_cross2::compile::msl::{BindTarget, CompilerOptions as MslOptions, ConstexprSampler, MslVersion, ResourceBinding, SamplerCompareFunc, SamplerFilter};
 use spirv_cross2::reflect::{ArrayDimension, DecorationValue, ScalarKind, TypeInner};
 use spirv_cross2::spirv::{Decoration, ExecutionModel};
 use spirv_cross2::{targets, Compiler, Module};
@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 /// Bumped whenever the translation output (MSL or layout) can change, so stale cache entries are never used.
 /// The `xlat-N` part is bumped by hand when this module's output changes; the crate versions are checked against
 /// Cargo.lock by the `translator_version_matches_lockfile` test.
-pub const TRANSLATOR_VERSION: &str = "xlat-4 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
+pub const TRANSLATOR_VERSION: &str = "xlat-5 glslang-sys 0.9.2+e1b562a spirv-cross-sys 0.7.4+aa217ae spirv-cross2 0.7.2";
 
 pub const DEFAULT_BLOCK_BUFFER: u32 = 1;
 pub const OBJECT_BLOCK_BUFFER: u32 = 2;
@@ -213,11 +213,27 @@ pub struct Block {
     pub members: Vec<Member>,
 }
 
+/// Where one texture slot is bound in one stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageBinding {
+    /// `[[texture(n)]]` in this stage (numbered per stage: Metal allows 128 textures per stage on Apple GPUs)
+    pub texture: u32,
+    /// `[[sampler(n)]]` in this stage, numbered per stage (Metal: 16 per stage). `None`: the sampler state is fixed by
+    /// three (shadow maps, DFG/LTC LUTs, bone/morph/batching data textures) and compiled in as a `constexpr sampler`.
+    pub sampler: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Texture {
     pub name: String,
-    /// `texture(index)` and `sampler(index)`, in every stage that uses it.
+    /// The slot's ordinal in `Layout::textures` (fragment-stage textures first, then vertex-only ones). The JS packer
+    /// writes one texture id per slot in this order.
     pub index: u32,
+    /// Binding in the vertex / fragment stage (None: not used by that stage).
+    #[serde(default)]
+    pub vertex: Option<StageBinding>,
+    #[serde(default)]
+    pub fragment: Option<StageBinding>,
     /// `2d`, `2dArray`, `3d` or `cube` (what the native side must bind: a mismatched texture type is a Metal error).
     #[serde(default = "kind_2d")]
     pub kind: String,
@@ -573,7 +589,8 @@ fn stage_outputs(words: &[u32]) -> Result<Vec<(String, u32)>, String> {
 /// are assigned per stage in declaration order, and three declares varyings in a different order in each stage
 /// (Lambert: vViewPosition/vFogDepth/vNormal vs vFogDepth/vNormal/vViewPosition), while Metal matches
 /// `[[user(locnN)]]` by number: fragment inputs are renumbered to the vertex outputs of the same name.
-fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture], varyings: &[(String, u32)]) -> Result<String, String> {
+/// `fixed`: per texture slot, the constexpr sampler of slots whose sampler state three fixes (see [`fixed_sampler`]).
+fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture], fixed: &[Option<ConstexprSampler>], varyings: &[(String, u32)]) -> Result<String, String> {
     let mut c: Msl = sc(Compiler::new(Module::from_words(words)))?;
     let all = sc(sc(c.shader_resources_for_active_variables(sc(c.active_interface_variables())?))?.all_resources())?;
     if model == ExecutionModel::Fragment {
@@ -605,25 +622,31 @@ fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture
         set_key(&mut c, ub.id, key)?;
         sc(c.add_resource_binding(model, ResourceBinding::Qualified { set: 0, binding: key }, &BindTarget { buffer, texture: 0, sampler: 0, count: None }))?;
     }
-    for r in &all.sampled_images {
-        let name = r.name.to_string();
-        let index = textures
+    for (k, r) in all.sampled_images.iter().enumerate() {
+        let name = unsplit_name(&r.name.to_string());
+        let slot = textures
             .iter()
-            .find(|t| t.name == name || t.name == format!("{name}[0]"))
-            .map(|t| t.index)
+            .position(|t| t.name == name || t.name == format!("{name}[0]"))
             .ok_or_else(|| format!("texture `{name}` missing from the program table"))?;
+        let b = if model == ExecutionModel::Fragment { textures[slot].fragment } else { textures[slot].vertex };
+        let b = b.ok_or_else(|| format!("texture `{name}` has no binding in this stage"))?;
         let t = sc(c.type_description(r.type_id))?;
         let count = match &t.inner {
             TypeInner::Array { dimensions, .. } => Some(array_len(dimensions)?),
             _ => None,
         };
-        let key = KEY_TEXTURE0 + index;
+        // keys only need to be unique per resource within the stage
+        let key = KEY_TEXTURE0 + k as u32;
         set_key(&mut c, r.id, key)?;
         sc(c.add_resource_binding(
             model,
             ResourceBinding::Qualified { set: 0, binding: key },
-            &BindTarget { buffer: 0, texture: index, sampler: index, count: count.and_then(NonZeroU32::new) },
+            &BindTarget { buffer: 0, texture: b.texture, sampler: b.sampler.unwrap_or(0), count: count.and_then(NonZeroU32::new) },
         ))?;
+        if b.sampler.is_none() {
+            let s = fixed[slot].as_ref().ok_or_else(|| format!("texture `{name}`: no sampler binding and no fixed sampler state"))?;
+            sc(c.remap_constexpr_sampler(r.id, s, None))?;
+        }
     }
     sc(c.rename_entry_point("main", entry, model))?;
     let mut o = MslOptions::default();
@@ -633,11 +656,13 @@ fn to_msl(words: &[u32], model: ExecutionModel, entry: &str, textures: &[Texture
     o.common.fixup_clipspace = model == ExecutionModel::Vertex;
     o.common.flip_vertex_y = false;
     let out = sc(c.compile(&o))?;
-    Ok(gl_derivatives(&out.to_string()))
+    let msl = gl_derivatives(&out.to_string());
+    if model == ExecutionModel::Fragment { gl_frag_coord(&msl) } else { Ok(msl) }
 }
 
 /// The MSL option set `to_msl` uses, part of every cache key (a change in the options is a change in the output).
-pub const MSL_OPTIONS: &str = "msl3.0 macos no-argument-buffers fixup_clipspace(vertex) no-flip-y dfdy-gl";
+pub const MSL_OPTIONS: &str =
+    "msl3.0 macos no-argument-buffers fixup_clipspace(vertex) no-flip-y dfdy-gl fragcoord-gl(buffer0) per-stage-bindings constexpr-fixed-samplers split-sampler-arrays";
 
 /// Metal's window y axis points down, GL's up: `dfdy` has the opposite sign of GLSL's `dFdy`. three relies on the GL
 /// sign (flat shading: `cross(dFdx(p), dFdy(p))`; normal mapping without tangents: `getTangentFrame`), so every
@@ -658,6 +683,180 @@ fn gl_derivatives(msl: &str) -> String {
     }
 }
 
+/// `FrPass` at fragment `buffer(0)`: `float4(render target height, flip, 0, 0)`, written natively per pass.
+pub const PASS_BUFFER: u32 = 0;
+
+/// GL's `gl_FragCoord` has its origin at the bottom left, Metal's `[[position]]` at the top left. three reads it for its
+/// PCF shadow noise (interleaved gradient noise), dithering, transmission and the VSM blur UVs; custom shaders use it
+/// for screen-space UVs. The entry point's `[[position]]` input is renamed and `gl_FragCoord` rebuilt from it with
+/// `FrPass` (buffer(0)): `y = flip ? height - y : y`. Passes whose target is stored GL-oriented (shadow maps, VSM: the
+/// projection is y-flipped so rows land where WebGL puts them) use flip = 0; the main pass uses flip = 1.
+fn gl_frag_coord(msl: &str) -> Result<String, String> {
+    const DECL: &str = "float4 gl_FragCoord [[position]]";
+    let Some(at) = msl.find(DECL) else { return Ok(msl.to_string()) };
+    let entry = msl[..at].rfind("fragment ").ok_or("gl_FragCoord outside the fragment entry point")?;
+    if !msl[entry..at].contains(FRAGMENT_ENTRY) {
+        return Err("gl_FragCoord [[position]] not on the entry point".into());
+    }
+    let open = at + msl[at..].find("\n{\n").ok_or("fragment entry point without a body")? + 3;
+    let mut out = String::with_capacity(msl.len() + 256);
+    out.push_str(&msl[..at]);
+    out.push_str(&format!("float4 fr_FragCoordMtl [[position]], constant float4& fr_pass [[buffer({PASS_BUFFER})]]"));
+    out.push_str(&msl[at + DECL.len()..open]);
+    out.push_str("    float4 gl_FragCoord = float4(fr_FragCoordMtl.x, fr_pass.y != 0.0 ? fr_pass.x - fr_FragCoordMtl.y : fr_FragCoordMtl.y, fr_FragCoordMtl.zw);\n");
+    out.push_str(&msl[open..]);
+    Ok(out)
+}
+
+/// Sampler arrays that are only ever indexed by an integer literal (three's shadow map arrays, after its loop
+/// unrolling) become one uniform per element, `NAME_frs_K`, keeping every line in place. MSL then has one sampler per
+/// element, which can be a `constexpr sampler` (SPIRV-Cross cannot make an array of samplers constexpr), so shadow
+/// maps cost no sampler slots. [`unsplit_name`] maps the names back (`NAME[K]`, as WebGL names array elements).
+fn split_sampler_arrays(src: &str) -> String {
+    // declarations: `uniform [precision] <sampler type> NAME[ N ];` alone on a line
+    let decl = |line: &str| -> Option<(Option<String>, String, String, u32)> {
+        let code = line.split("//").next().unwrap_or("").trim();
+        let body = code.strip_prefix("uniform")?.strip_suffix(';')?;
+        if !body.starts_with(|c: char| c.is_whitespace()) {
+            return None;
+        }
+        let mut toks = body.split_whitespace();
+        let mut ty = toks.next()?.to_string();
+        let mut prec = None;
+        if is_precision_qualifier(&ty) {
+            prec = Some(ty);
+            ty = toks.next()?.to_string();
+        }
+        if !(ty.starts_with("sampler") || ty.starts_with("isampler") || ty.starts_with("usampler")) {
+            return None;
+        }
+        let rest: String = toks.collect::<Vec<_>>().join("");
+        let (name, n) = rest.strip_suffix(']')?.split_once('[')?;
+        let n: u32 = n.parse().ok()?;
+        (is_ident(name) && n > 0).then(|| (prec, ty, name.to_string(), n))
+    };
+    let lines: Vec<&str> = src.lines().collect();
+    let mut arrays: Vec<(String, u32)> = Vec::new();
+    let mut bad: Vec<String> = Vec::new();
+    for l in &lines {
+        if let Some((_, _, name, n)) = decl(l) {
+            match arrays.iter().find(|a| a.0 == name) {
+                Some(a) if a.1 != n => bad.push(name),
+                Some(_) => {}
+                None => arrays.push((name, n)),
+            }
+        }
+    }
+    // every use must be `NAME [ <digits> ]`
+    for (name, _) in &arrays {
+        for l in lines.iter().filter(|l| decl(l).is_none()) {
+            for i in ident_matches(l, name) {
+                if literal_index(&l[i + name.len()..]).is_none() {
+                    bad.push(name.clone());
+                }
+            }
+        }
+    }
+    arrays.retain(|a| !bad.contains(&a.0));
+    if arrays.is_empty() {
+        return src.to_string();
+    }
+    let mut out = String::with_capacity(src.len() + 256);
+    for l in &lines {
+        match decl(l) {
+            Some((prec, ty, name, n)) if arrays.iter().any(|a| a.0 == name) => {
+                let names: Vec<String> = (0..n).map(|k| format!("{name}{SPLIT}{k}")).collect();
+                out.push_str(&format!("uniform {}{ty} {};", prec.map(|p| p + " ").unwrap_or_default(), names.join(", ")));
+            }
+            _ => {
+                let mut line = l.to_string();
+                for (name, _) in &arrays {
+                    while let Some((i, (len, k))) = ident_matches(&line, name).into_iter().find_map(|i| literal_index(&line[i + name.len()..]).map(|x| (i, x))) {
+                        line = format!("{}{name}{SPLIT}{k}{}", &line[..i], &line[i + name.len() + len..]);
+                    }
+                }
+                out.push_str(&line);
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+const SPLIT: &str = "_frs_";
+
+/// `NAME_frs_K` (a split sampler array element) -> `NAME[K]`; other names unchanged.
+fn unsplit_name(name: &str) -> String {
+    if let Some((base, k)) = name.rsplit_once(SPLIT) {
+        if !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()) {
+            return format!("{base}[{k}]");
+        }
+    }
+    name.to_string()
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut b = s.bytes();
+    matches!(b.next(), Some(c) if c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// byte offsets where `name` occurs as a whole identifier in `line`
+fn ident_matches(line: &str, name: &str) -> Vec<usize> {
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(p) = line[from..].find(name) {
+        let i = from + p;
+        let end = i + name.len();
+        if (i == 0 || !word(bytes[i - 1])) && (end == bytes.len() || !word(bytes[end])) {
+            out.push(i);
+        }
+        from = end;
+    }
+    out
+}
+
+/// `  [ 12 ]...` -> (bytes consumed, 12)
+fn literal_index(s: &str) -> Option<(usize, u32)> {
+    let t = s.trim_start();
+    let t2 = t.strip_prefix('[')?.trim_start();
+    let digits = t2.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let k: u32 = t2[..digits].parse().ok()?;
+    let rest = t2[digits..].trim_start().strip_prefix(']')?;
+    Some((s.len() - rest.len(), k))
+}
+
+/// The sampler state three fixes for a texture slot, compiled in as a `constexpr sampler` (no sampler slot):
+/// shadow maps (PCF: LessEqual compare + linear; VSM: linear; Basic: nearest; all clamped), the DFG / LTC lookup tables
+/// (linear, clamp) and the data textures three reads with texelFetch (bones, morph targets, batching: nearest, clamp).
+fn fixed_sampler(name: &str, shadow: bool, vsm: bool) -> Option<ConstexprSampler> {
+    let root = name.split('[').next().unwrap_or(name);
+    let mut s = ConstexprSampler::default();
+    let linear = |s: &mut ConstexprSampler| {
+        s.min_filter = SamplerFilter::Linear;
+        s.mag_filter = SamplerFilter::Linear;
+    };
+    match root {
+        "directionalShadowMap" | "spotShadowMap" | "pointShadowMap" | "sunShadowMap" => {
+            if shadow {
+                linear(&mut s);
+                s.compare_enable = true;
+                s.compare_func = SamplerCompareFunc::LessEqual;
+            } else if vsm {
+                linear(&mut s);
+            }
+        }
+        "dfgLUT" | "ltc_1" | "ltc_2" => linear(&mut s),
+        "boneTexture" | "morphTargetsTexture" | "morphTexture" | "batchingTexture" | "batchingIdTexture" | "batchingColorTexture" => {}
+        _ => return None,
+    }
+    Some(s)
+}
+
 /// The first translation in a process also pays glslang's one-time setup (process init + built-in symbol tables,
 /// ~120 ms in release). Call this on a background thread at startup to take it off the first program's path.
 pub fn warm_up() {
@@ -672,7 +871,8 @@ pub fn translate(vertex: &str, fragment: &str) -> Result<Program, String> {
 }
 
 fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String> {
-    let (vw, fw) = glsl::compile(vertex, fragment)?;
+    let (vertex, fragment) = (split_sampler_arrays(vertex), split_sampler_arrays(fragment));
+    let (vw, fw) = glsl::compile(&vertex, &fragment)?;
     let vi = reflect(&vw, ExecutionModel::Vertex)?;
     let fi = reflect(&fw, ExecutionModel::Fragment)?;
 
@@ -690,29 +890,57 @@ fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String>
         (a, b) => a.clone().or_else(|| b.clone()),
     };
 
+    // texture slots: fragment-stage textures first (binding order), then vertex-only ones; array elements expanded
+    let expand = |list: &[(String, Option<u32>, String, bool)]| -> Vec<(String, bool, String, bool)> {
+        let mut out = Vec::new();
+        for (name, count, kind, shadow) in list {
+            let name = unsplit_name(name);
+            match count {
+                Some(n) => out.extend((0..*n).map(|i| (format!("{name}[{i}]"), true, kind.clone(), *shadow))),
+                None => out.push((name, false, kind.clone(), *shadow)),
+            }
+        }
+        out
+    };
+    let (fused, vused) = (expand(&fi.textures), expand(&vi.textures));
     let mut textures: Vec<Texture> = Vec::new();
-    let mut next = 0;
-    for (name, count, kind, shadow) in fi.textures.iter().chain(vi.textures.iter()) {
-        if textures.iter().any(|t| t.name == *name || t.name == format!("{name}[0]")) {
+    let mut array_slot: Vec<bool> = Vec::new();
+    for (name, arr, kind, shadow) in fused.iter().chain(vused.iter()) {
+        if textures.iter().any(|t| t.name == *name) {
             continue;
         }
-        match count {
-            Some(n) => {
-                for i in 0..*n {
-                    textures.push(Texture { name: format!("{name}[{i}]"), index: next, kind: kind.clone(), shadow: *shadow });
-                    next += 1;
-                }
+        textures.push(Texture { name: name.clone(), index: textures.len() as u32, vertex: None, fragment: None, kind: kind.clone(), shadow: *shadow });
+        array_slot.push(*arr);
+    }
+    let vsm = fragment.lines().any(|l| l.trim() == "#define SHADOWMAP_TYPE_VSM");
+    let fixed: Vec<Option<ConstexprSampler>> =
+        textures.iter().zip(&array_slot).map(|(t, arr)| if *arr { None } else { fixed_sampler(&t.name, t.shadow, vsm) }).collect();
+    // per-stage numbering: textures 0.. and samplers 0.. in slot order, among the slots the stage uses
+    for (frag, used) in [(true, &fused), (false, &vused)] {
+        let (mut tn, mut sn) = (0, 0);
+        for (i, t) in textures.iter_mut().enumerate() {
+            if !used.iter().any(|u| u.0 == t.name) {
+                continue;
             }
-            None => {
-                textures.push(Texture { name: name.clone(), index: next, kind: kind.clone(), shadow: *shadow });
-                next += 1;
+            let sampler = if fixed[i].is_some() {
+                None
+            } else {
+                sn += 1;
+                Some(sn - 1)
+            };
+            let b = StageBinding { texture: tn, sampler };
+            tn += 1;
+            if frag {
+                t.fragment = Some(b)
+            } else {
+                t.vertex = Some(b)
             }
         }
     }
 
     let varyings = stage_outputs(&vw)?;
-    let vertex_msl = to_msl(&vw, ExecutionModel::Vertex, VERTEX_ENTRY, &textures, &[])?;
-    let fragment_msl = to_msl(&fw, ExecutionModel::Fragment, FRAGMENT_ENTRY, &textures, &varyings)?;
+    let vertex_msl = to_msl(&vw, ExecutionModel::Vertex, VERTEX_ENTRY, &textures, &fixed, &[])?;
+    let fragment_msl = to_msl(&fw, ExecutionModel::Fragment, FRAGMENT_ENTRY, &textures, &fixed, &varyings)?;
     Ok(Program {
         vertex_msl,
         fragment_msl,
@@ -1233,19 +1461,37 @@ mod tests {
         for msl in [&p.vertex_msl, &p.fragment_msl] {
             assert!(!msl.replace("fr_gl_dfdy(", "").replace("return -dfdy(x)", "").contains("dfdy("), "{name}: raw dfdy");
         }
-        // textures: unique contiguous indices, bound as texture(i) + sampler(i) in some stage
-        let mut idx: Vec<u32> = l.textures.iter().map(|t| t.index).collect();
-        idx.sort();
-        assert_eq!(idx, (0..l.textures.len() as u32).collect::<Vec<_>>(), "{name}");
-        let both = format!("{}\n{}", p.vertex_msl, p.fragment_msl);
-        for t in &l.textures {
-            if let Some(base) = t.name.strip_suffix("[0]") {
-                assert!(both.contains(&format!("> {base} [[texture({})]]", t.index)), "{name}: texture array {}", t.name);
-                assert!(both.contains(&format!("> {base}Smplr [[sampler({})]]", t.index)), "{name}: sampler array {}", t.name);
-            } else if !t.name.ends_with(']') {
-                assert!(both.contains(&format!("> {} [[texture({})]]", t.name, t.index)), "{name}: texture {}", t.name);
-                assert!(both.contains(&format!("sampler {}Smplr [[sampler({})]]", t.name, t.index)), "{name}: sampler {}", t.name);
+        // textures: slots in order; per stage, contiguous texture(n) and sampler(n) numbering (<= 16 samplers), each slot
+        // bound where the MSL says (split sampler-array elements as NAME_frs_K, fixed sampler states as constexpr)
+        assert!(l.textures.iter().enumerate().all(|(i, t)| t.index == i as u32), "{name}: slot order");
+        for (frag, msl) in [(false, &p.vertex_msl), (true, &p.fragment_msl)] {
+            let bs: Vec<(&Texture, StageBinding)> = l.textures.iter().filter_map(|t| (if frag { t.fragment } else { t.vertex }).map(|b| (t, b))).collect();
+            assert!(bs.iter().enumerate().all(|(i, (_, b))| b.texture == i as u32), "{name}: per-stage texture numbering");
+            let smp: Vec<u32> = bs.iter().filter_map(|(_, b)| b.sampler).collect();
+            assert_eq!(smp, (0..smp.len() as u32).collect::<Vec<_>>(), "{name}: per-stage sampler numbering");
+            assert!(smp.len() <= 16, "{name}: {} samplers in one stage", smp.len());
+            for (t, b) in &bs {
+                let split = t.name.replace('[', SPLIT).replace(']', "");
+                let arr = t.name.strip_suffix("[0]");
+                let (tex, smpl) = if msl.contains(&format!("> {split} [[texture(")) {
+                    (format!("> {split} [[texture({})]]", b.texture), split.clone())
+                } else if let Some(base) = arr {
+                    (format!("> {base} [[texture({})]]", b.texture), base.to_string())
+                } else if t.name.ends_with(']') {
+                    continue; // a later element of an array kept as an array
+                } else {
+                    (format!("> {} [[texture({})]]", t.name, b.texture), t.name.clone())
+                };
+                assert!(msl.contains(&tex), "{name}: {tex}");
+                match b.sampler {
+                    Some(s) => assert!(msl.contains(&format!("{smpl}Smplr [[sampler({s})]]")), "{name}: sampler {} @{s}", t.name),
+                    None => assert!(msl.contains(&format!("constexpr sampler {smpl}Smplr")), "{name}: constexpr sampler {}", t.name),
+                }
             }
+        }
+        // gl_FragCoord is GL's (bottom-left origin) through FrPass at buffer(0)
+        if p.fragment_msl.contains("[[position]]") {
+            assert!(p.fragment_msl.contains("fr_FragCoordMtl [[position]], constant float4& fr_pass [[buffer(0)]]") && p.fragment_msl.contains("float4 gl_FragCoord = "), "{name}: gl_FragCoord");
         }
         // attributes: stage_in at the reflected location (matrices split into columns _0.._3)
         for a in &l.attributes {
@@ -1311,7 +1557,28 @@ mod tests {
         // uHeight is vertex-only, uMap fragment-only: fragment textures first
         let names: Vec<_> = p.layout.textures.iter().map(|t| (t.name.as_str(), t.index)).collect();
         assert_eq!(names, [("uMap", 0), ("uHeight", 1)]);
-        assert!(p.vertex_msl.contains("uHeight [[texture(1)]]") && p.vertex_msl.contains("uHeightSmplr [[sampler(1)]]"));
+        // numbered per stage: the vertex stage binds its only texture at 0
+        assert!(p.vertex_msl.contains("uHeight [[texture(0)]]") && p.vertex_msl.contains("uHeightSmplr [[sampler(0)]]"));
+        assert_eq!(p.layout.textures[1].vertex, Some(StageBinding { texture: 0, sampler: Some(0) }));
+        assert_eq!((p.layout.textures[1].fragment, p.layout.textures[0].fragment), (None, Some(StageBinding { texture: 0, sampler: Some(0) })));
+    }
+
+    #[test]
+    fn split_sampler_arrays_and_frag_coord() {
+        let src = "uniform sampler2DShadow sm[ 2 ];\nuniform highp sampler2D other[2]; // c\nvoid f() { x(sm[ 0 ], sm[1]); y(other[i]); }\nuniform sampler2D none[ 0 ];\n";
+        let out = split_sampler_arrays(src);
+        assert_eq!(out, "uniform sampler2DShadow sm_frs_0, sm_frs_1;\nuniform highp sampler2D other[2]; // c\nvoid f() { x(sm_frs_0, sm_frs_1); y(other[i]); }\nuniform sampler2D none[ 0 ];\n");
+        assert_eq!(out.lines().count(), src.lines().count());
+        assert_eq!(unsplit_name("sm_frs_1"), "sm[1]");
+        assert_eq!(unsplit_name("map"), "map");
+        assert_eq!(split_sampler_arrays("void main() {}\n"), "void main() {}\n");
+        // the physical program: every shadow map is its own texture with a constexpr compare sampler
+        let p = program("physical-instanced");
+        for t in p.layout.textures.iter().filter(|t| t.name.contains("ShadowMap")) {
+            assert_eq!(t.fragment.unwrap().sampler, None, "{}", t.name);
+        }
+        assert!(p.fragment_msl.contains("constexpr sampler directionalShadowMap_frs_1Smplr(filter::linear, compare_func::less_equal)"));
+        assert!(p.fragment_msl.contains("float4 gl_FragCoord = float4(fr_FragCoordMtl.x, fr_pass.y != 0.0 ? fr_pass.x - fr_FragCoordMtl.y"));
     }
 
     #[test]

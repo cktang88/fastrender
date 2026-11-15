@@ -1092,13 +1092,19 @@ impl Renderer {
         if let Content::Three(s) = &mut self.content {
             // three's own programs read projectionMatrix from FrFrame: three's matrix with this frame's jitter
             let proj = if temporal { jittered(s.view.proj, self.jitter, (cw as f32, ch as f32)) } else { s.view.proj };
-            self.last_draws = s.prepare(&self.dev, slot, &planes, &shadow_planes, eye, proj);
+            self.last_draws = s.prepare(&self.dev, slot, &planes, &shadow_planes, eye, proj, ch as f32);
         }
         if self.cfg.gpu_cull {
             let f = &self.frames[slot];
             self.content.encode_cull(&cb, &self.pipes, (&f.visible, &f.args), &planes, eye, PROP_CULL_M);
         }
-        if shadow {
+        // three.js's own programs (v3) render every shadow map of the frame themselves (directional, spot, point cube,
+        // VSM blur), with three's depth programs where the native depth-only path would be wrong
+        let three_v3 = matches!(&self.content, Content::Three(s) if s.view.v3);
+        if let Content::Three(s) = &self.content {
+            s.encode_shadows_v3(&cb, slot);
+        }
+        if shadow && !three_v3 {
             if self.cfg.gpu_cull {
                 let f = &self.frames[slot];
                 self.content.encode_cull(&cb, &self.pipes, (&f.shadow_visible, &f.shadow_args), &shadow_planes, eye, SHADOW_HALF);

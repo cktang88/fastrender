@@ -442,6 +442,27 @@ vertex ShadowOut vs_three_shadow(uint vid [[vertex_id]], uint iid [[instance_id]
     return out;
 }
 
+// three.js's own programs (protocol v3): the native depth-only caster path of every shadow map (directional, spot,
+// point-cube faces). Bound like three's translated depth program (src/xlat.rs): FrObject buffer(2) (filled with an
+// identity view, so modelViewMatrix = modelMatrix), FrFrame buffer(3) (projectionMatrix = the shadow camera's
+// view-projection, y-flipped so the map is stored as WebGL stores it), position at buffer(4), instanceMatrix columns
+// at buffer(5). Same arithmetic as three's project_vertex + SPIRV-Cross's clip-space fixup.
+struct FrObject3 { float4x4 model; float4x4 model_view; float4 normal[3]; };
+struct FrFrame3 { float4x4 projection; float4x4 view; float4 camera; };
+vertex ShadowOut vs_three_depth(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                device const packed_float3* pos [[buffer(4)]],
+                                constant FrObject3& o [[buffer(2)]],
+                                constant FrFrame3& f [[buffer(3)]],
+                                device const float4x4* inst [[buffer(5)]],
+                                constant uint& instanced [[buffer(6)]]) {
+    float4 p = float4(float3(pos[vid]), 1.0);
+    if (instanced != 0u) p = inst[iid] * p;
+    ShadowOut out;
+    out.pos = f.projection * (o.model_view * p);
+    out.pos.z = (out.pos.z + out.pos.w) * 0.5;
+    return out;
+}
+
 static float pow2(float x) { return x * x; }
 
 // three.js r170 tone mapping (tonemapping_pars_fragment) and sRGB OETF, so native output matches

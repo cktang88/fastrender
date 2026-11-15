@@ -20,7 +20,7 @@
 // per frame, the uniform values three's own code computes, packed per material instance
 // (js/three-programs.js, docs/PROTOCOL.md).
 
-import { ThreePrograms, TEX, SHADOW_KIND } from './three-programs.js';
+import { ThreePrograms, TEX, shadowDraw, writeShadows, writeShadowDraws, textureDim, uploadCompressedTexture } from './three-programs.js';
 
 export const PROTOCOL = 2;
 const MAGIC = 0x46524d32; // 'FRM2'
@@ -198,15 +198,21 @@ export class FastRenderer {
     if (!t) return 0;
     const id = this._id(t);
     if (this._versions.get(id) === t.version) return id;
+    if (t.isCompressedTexture && this._tp) return this._uploaded(id, t, uploadCompressedTexture(this, t, id)); // ASTC/BC/ETC mip chains (KTX2Loader)
     const img = t.image;
     let px = null, w = 0, h = 0;
     if (img && img.data && img.width && img.height) { px = img.data; w = img.width; h = img.height; }
     else if (img && this.host.imagePixels) { const r = this.host.imagePixels(img); if (r) ({ data: px, width: w, height: h } = r); }
     if (!px) { this._unsupported('texture source without pixels'); return 0; }
-    const meta = { width: w, height: h, srgb: t.colorSpace === 'srgb', repeat: [t.repeat.x, t.repeat.y], offset: [t.offset.x, t.offset.y], wrap: [t.wrapS, t.wrapT], flipY: !!t.flipY, mipmaps: t.generateMipmaps !== false, magFilter: t.magFilter, minFilter: t.minFilter, anisotropy: t.anisotropy || 1, format: t.format, type: t.type, depth: (img && img.depth) || 1 };
+    const meta = { width: w, height: h, srgb: t.colorSpace === 'srgb', repeat: [t.repeat.x, t.repeat.y], offset: [t.offset.x, t.offset.y], wrap: [t.wrapS, t.wrapT], flipY: !!t.flipY, mipmaps: t.generateMipmaps !== false, magFilter: t.magFilter, minFilter: t.minFilter, anisotropy: t.anisotropy || 1, format: t.format, type: t.type, depth: (img && img.depth) || 1, dim: textureDim(t) };
     // v3: three's shaders sample the texture as WebGL stores it (UNPACK_FLIP_Y flips rows at upload); v2 flips in its shader
     if (this._tp && t.flipY) meta.flipRows = true;
     this.host.upload(KIND.TEXTURE, id, meta, px instanceof Uint8Array || px instanceof Uint8ClampedArray ? px : new Uint8Array(px.buffer, px.byteOffset, px.byteLength));
+    return this._uploaded(id, t, true);
+  }
+
+  _uploaded(id, t, ok) {
+    if (!ok) return 0;
     this._versions.set(id, t.version);
     this.info.memory.textures++;
     return id;
@@ -380,6 +386,7 @@ export class FastRenderer {
       w += DRAW_WORDS;
       tris += (d.count / 3) * Math.max(1, d.instanceCount);
     }
+    if (this._tp) w = writeShadowDraws(this, w, draws);
     u[0] = this._tp ? MAGIC3 : MAGIC; u[1] = w;
     this.info.render.calls = draws.length; this.info.render.triangles = tris | 0; this.info.render.frame++;
     if (this.host.present) this.host.present(w);
@@ -388,19 +395,7 @@ export class FastRenderer {
   /** v3 ops: SHADOWS (three's shadow casters, in lights-state order) and MATERIAL_UNIFORMS (a packed block per instance in use) */
   _writePrograms(w) {
     const u = this.u32, f = this.f32, tp = this._tp;
-    const casters = tp.shadowCasters();
-    if (casters.length && this.shadowMap.enabled) {
-      u[w++] = OP.SHADOWS; u[w++] = 1 + casters.length * 28; u[w++] = casters.length;
-      const vp = this._shadowVP3 || (this._shadowVP3 = casters[0].light.shadow.camera.projectionMatrix.clone());
-      for (const c of casters) {
-        const l = c.light, s = l.shadow, cam = s.camera, m = l.matrixWorld.elements;
-        u[w++] = SHADOW_KIND[c.kind]; u[w++] = c.index;
-        f[w++] = s.mapSize.x; f[w++] = s.mapSize.y; f[w++] = s.bias; f[w++] = s.normalBias; f[w++] = s.radius;
-        f[w++] = cam.near; f[w++] = cam.far; f[w++] = m[12]; f[w++] = m[13]; f[w++] = m[14];
-        vp.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
-        f.set(vp.elements, w); w += 16;
-      }
-    }
+    w = writeShadows(this, w); // SHADOWS + SHADOW_PASS (three-programs.js, shadow section)
     const used = this._used;
     u[w++] = OP.MATERIAL_UNIFORMS; const at = w++; const start = w;
     u[w++] = used.length;
@@ -443,11 +438,13 @@ export class FastRenderer {
       if (inst) flags |= F.INSTANCED;
       const material = this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT));
       if (!material) continue; // v3: the host could not translate this program
-      out.push({
+      const d = {
         geometry, material, flags, instances: inst,
         start: grp.start, count: Math.min(grp.count, indexCount - grp.start), instanceCount: inst ? o.count : 1,
         renderOrder: o.renderOrder, matrix: o.matrixWorld.elements,
-      });
+      };
+      if (this._tp) shadowDraw(this, o, m, d); // v3: how three would draw it into shadow maps
+      out.push(d);
     }
   }
 }

@@ -690,3 +690,196 @@ function objectSignature(material, object, clipping) {
   const morph = ma.position || ma.normal || ma.color;
   return s + (morph ? morph.length : 0) * 16384 + clipping.numPlanes * 16384 * 1024 + clipping.numIntersection * 16384 * 1024 * 256;
 }
+
+// ================================================================== shadow pass (mirrors three's WebGLShadowMap)
+// Kept in its own section (shadow maps are rendered natively; this decides HOW each caster is drawn into them and
+// hands the native side what it needs). FastRenderer calls: shadowDraw() per draw in _collect, writeShadows() in
+// place of the old SHADOWS writer, writeShadowDraws() after DRAWS.
+//
+// r180+ shadow maps are depth textures (WebGLShadowMap: DepthTexture for directional/spot, CubeDepthTexture for point
+// lights; VSM: an RG16F colour map blurred from the depth texture by two ShaderMaterials). Casters are drawn with
+// MeshDepthMaterial (MeshDistanceMaterial for point lights; customDepthMaterial / customDistanceMaterial when set);
+// their colour output is discarded, so only the vertex stage and discards (alphaTest, clipping) shape the map.
+// The native side keeps a fast depth-only path for the common caster (no skinning, morphs, batching, custom depth
+// material, alphaTest cut-out, displacement or clipping): three's depth program computes exactly
+// projection * modelView * position there, and the native shader is cheaper on a TBDR GPU.
+import { MeshDepthMaterial } from 'three/src/materials/MeshDepthMaterial.js';
+import { MeshDistanceMaterial } from 'three/src/materials/MeshDistanceMaterial.js';
+import { ShaderMaterial } from 'three/src/materials/ShaderMaterial.js';
+import { BufferGeometry } from 'three/src/core/BufferGeometry.js';
+import { BufferAttribute } from 'three/src/core/BufferAttribute.js';
+import { Mesh } from 'three/src/objects/Mesh.js';
+import * as VSM_GLSL from 'three/src/renderers/shaders/ShaderLib/vsm.glsl.js';
+
+export const OP_SHADOWS = 9;
+/** SHADOW_PASS: shadowMap.type, depth-texture maps (1: r180+), count, per SHADOWS entry: VSM vertical + horizontal program ids */
+export const OP_SHADOW_PASS = 10;
+/** SHADOW_DRAWS: per draw of DRAWS (same order): depth and distance material instance ids (0: native depth-only path) */
+export const OP_SHADOW_DRAWS = 11;
+export const SHADOW_WORDS = 28;
+/** three's shadow map types (renderer.shadowMap.type) */
+export const SHADOW_TYPE = { BASIC: 0, PCF: 1, PCF_SOFT: 2, VSM: 3 };
+/** r180+: shadow maps are depth textures (point lights: a cube); older three packs depth into RGBA (not rendered natively) */
+export const DEPTH_TEXTURE_SHADOWS = ShaderChunk.shadowmap_pars_fragment.includes('samplerCubeShadow');
+const SHADOW_SIDE = { 0: 1, 1: 0, 2: 2 };
+
+/** WebGLShadowMap.getDepthMaterial's "needs a unique material instance" test, plus what the native fast path cannot do */
+function needsDepthProgram(renderer, object, material) {
+  if (object.customDepthMaterial !== undefined || object.customDistanceMaterial !== undefined) return true;
+  if (object.isSkinnedMesh || object.isBatchedMesh || (object.isInstancedMesh && object.morphTexture)) return true;
+  const ma = object.geometry.morphAttributes;
+  if (ma && (ma.position !== undefined || ma.normal !== undefined)) return true;
+  if (renderer.clippingPlanes && renderer.clippingPlanes.length) return true;
+  return !!((renderer.localClippingEnabled && material.clipShadows === true && Array.isArray(material.clippingPlanes) && material.clippingPlanes.length !== 0)
+    || (material.displacementMap && material.displacementScale !== 0)
+    || (material.alphaMap && material.alphaTest > 0)
+    || (material.map && material.alphaTest > 0)
+    || material.alphaToCoverage === true);
+}
+
+/** WebGLShadowMap.getDepthMaterial: the depth (or distance) material three draws `object` with, state copied from `material` */
+function depthMaterialFor(tp, object, material, distance, type) {
+  let result = distance ? object.customDistanceMaterial : object.customDepthMaterial;
+  if (result === undefined) {
+    // three shares one material (or one clone per caster material when it must); here one per caster material always,
+    // so per-material state (side, map) never switches a shared material's program between draws
+    const cache = tp._depthMats || (tp._depthMats = new WeakMap());
+    let pair = cache.get(material);
+    if (!pair) {
+      cache.set(material, (pair = [null, null]));
+      material.addEventListener('dispose', () => { for (const m of pair) if (m) m.dispose(); cache.delete(material); });
+    }
+    const k = distance ? 1 : 0;
+    result = pair[k] || (pair[k] = distance ? new MeshDistanceMaterial() : new MeshDepthMaterial());
+  }
+  // what selects a different depth program (three relies on its per-variant clones for this)
+  const sig = `${!!material.map}|${!!material.alphaMap}|${material.alphaTest > 0 || material.alphaToCoverage === true}|${!!material.displacementMap}|${material.side}|${material.shadowSide}|${material.clipShadows}|${material.wireframe}`;
+  if (result._frShadowSig !== sig) { result._frShadowSig = sig; result.needsUpdate = true; }
+  result.visible = material.visible;
+  result.wireframe = material.wireframe;
+  result.side = type === SHADOW_TYPE.VSM ? (material.shadowSide !== null ? material.shadowSide : material.side) : (material.shadowSide !== null ? material.shadowSide : SHADOW_SIDE[material.side]);
+  result.alphaMap = material.alphaMap;
+  result.alphaTest = material.alphaToCoverage === true ? 0.5 : material.alphaTest;
+  result.map = material.map;
+  result.clipShadows = material.clipShadows;
+  result.clippingPlanes = material.clippingPlanes;
+  result.clipIntersection = material.clipIntersection;
+  result.displacementMap = material.displacementMap;
+  result.displacementScale = material.displacementScale;
+  result.displacementBias = material.displacementBias;
+  result.wireframeLinewidth = material.wireframeLinewidth;
+  result.linewidth = material.linewidth;
+  if (distance && result.isMeshDistanceMaterial) {
+    // WebGLMaterials.refreshUniformsDistance reads the light from the material properties (it only sets the colour,
+    // which the depth-only shadow pass discards)
+    const p = tp.properties.get(result);
+    if (!p.light) p.light = tp.shadows.find((l) => l.isPointLight) || tp.shadows[0];
+  }
+  return result;
+}
+
+/**
+ * Per draw (FastRenderer._collect, after the main material instance): the depth and distance material instances three
+ * would draw this caster with, as native material ids (0 = the native depth-only path). Sets d.shadowDepth and
+ * d.shadowDistance.
+ */
+export function shadowDraw(fr, object, material, d) {
+  d.shadowDepth = 0; d.shadowDistance = 0;
+  const tp = fr._tp;
+  const type = fr.shadowMap.type;
+  if (!fr.shadowMap.enabled || !tp || !DEPTH_TEXTURE_SHADOWS || tp.shadows.length === 0) return;
+  // WebGLShadowMap.renderObject: casters, and with VSM the receivers too
+  if (!(object.castShadow || (object.receiveShadow && type === SHADOW_TYPE.VSM))) return;
+  if (!needsDepthProgram(fr, object, material)) return;
+  let point = false, other = false;
+  // VSM: point lights get no shadow map (WebGLShadowMap warns and skips them)
+  for (const l of tp.shadows) { if (!l.isPointLight) other = true; else if (type !== SHADOW_TYPE.VSM) point = true; }
+  if (other) d.shadowDepth = fr._materialInstance(depthMaterialFor(tp, object, material, false, type), object);
+  if (point) d.shadowDistance = fr._materialInstance(depthMaterialFor(tp, object, material, true, type), object);
+}
+
+/** VSM blur programs, as WebGLShadowMap builds them (VSM_SAMPLES = shadow.blurSamples): [vertical, horizontal] program ids */
+function vsmPrograms(tp, samples) {
+  const cache = tp._vsm || (tp._vsm = new Map());
+  let ids = cache.get(samples);
+  if (!ids) {
+    if (!tp._vsmMesh) {
+      const g = new BufferGeometry();
+      g.setAttribute('position', new BufferAttribute(new Float32Array([-1, -1, 0.5, 3, -1, 0.5, -1, 3, 0.5]), 3));
+      tp._vsmMesh = new Mesh(g);
+    }
+    const vertical = new ShaderMaterial({
+      defines: { VSM_SAMPLES: samples },
+      uniforms: { shadow_pass: { value: null }, resolution: { value: { x: 0, y: 0 } }, radius: { value: 4.0 } },
+      vertexShader: VSM_GLSL.vertex, fragmentShader: VSM_GLSL.fragment,
+    });
+    const horizontal = vertical.clone();
+    horizontal.defines.HORIZONTAL_PASS = 1;
+    ids = [vertical, horizontal].map((m) => tp.instance(m, tp._vsmMesh).program.id);
+    cache.set(samples, ids);
+  }
+  return ids;
+}
+
+/**
+ * SHADOWS (three's shadow casters in lights-state order, SHADOW_WORDS each) and SHADOW_PASS (how the maps are made).
+ * The native side renders every map: directional/spot into a 2D depth texture, point lights into a cube, VSM blurred
+ * by three's own programs (resolution / radius packed natively by name).
+ */
+export function writeShadows(fr, w) {
+  const u = fr.u32, f = fr.f32, tp = fr._tp;
+  if (!fr.shadowMap.enabled) return w;
+  const casters = tp.shadowCasters();
+  if (!casters.length) return w;
+  const vp = tp._shadowVP || (tp._shadowVP = casters[0].light.shadow.camera.projectionMatrix.clone());
+  u[w++] = OP_SHADOWS; u[w++] = 1 + casters.length * SHADOW_WORDS; u[w++] = casters.length;
+  for (const c of casters) {
+    const l = c.light, s = l.shadow, cam = s.camera, m = l.matrixWorld.elements;
+    u[w++] = SHADOW_KIND[c.kind]; u[w++] = c.index;
+    f[w++] = s.mapSize.x; f[w++] = s.mapSize.y; f[w++] = s.bias; f[w++] = s.normalBias; f[w++] = s.radius;
+    f[w++] = cam.near; f[w++] = cam.far; f[w++] = m[12]; f[w++] = m[13]; f[w++] = m[14];
+    vp.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    f.set(vp.elements, w); w += 16;
+  }
+  const type = fr.shadowMap.type;
+  u[w++] = OP_SHADOW_PASS; u[w++] = 3 + casters.length * 2; u[w++] = type; u[w++] = DEPTH_TEXTURE_SHADOWS ? 1 : 0; u[w++] = casters.length;
+  for (const c of casters) {
+    const vsm = type === SHADOW_TYPE.VSM && !c.light.isPointLight && DEPTH_TEXTURE_SHADOWS;
+    const ids = vsm ? vsmPrograms(tp, c.light.shadow.blurSamples ?? 8) : null;
+    u[w++] = ids ? ids[0] : 0; u[w++] = ids ? ids[1] : 0;
+  }
+  return w;
+}
+
+/** SHADOW_DRAWS after DRAWS: per draw, its depth and distance material ids (set by shadowDraw; 0 = native depth-only path) */
+export function writeShadowDraws(fr, w, draws) {
+  const u = fr.u32;
+  if (!fr.shadowMap.enabled || !fr._tp.shadows.length) return w;
+  u[w++] = OP_SHADOW_DRAWS; u[w++] = 1 + draws.length * 2; u[w++] = draws.length;
+  for (let i = 0; i < draws.length; i++) { const d = draws[i]; u[w++] = d.shadowDepth | 0; u[w++] = d.shadowDistance | 0; }
+  return w;
+}
+
+// ================================================================== texture kinds FastRenderer uploads for three's programs
+/** TEXTURE meta `dim`: 0 2D, 2 2D array (DataArrayTexture: morph targets in r187, CompressedArrayTexture), 3 3D */
+export function textureDim(t) {
+  return t.isDataArrayTexture || t.isCompressedArrayTexture ? 2 : t.isData3DTexture ? 3 : 0;
+}
+
+/**
+ * A CompressedTexture (KTX2Loader / DDSLoader / ...): its mip chain as stored, one array per level, with three's
+ * format constant (ASTC 37808.., BC 33776.. / 36492.., ETC 36196 / 37492.., RGTC 36283..). The native side maps the
+ * format to an MTLPixelFormat and uploads the blocks unchanged. Returns whether it was uploaded.
+ */
+export function uploadCompressedTexture(fr, t, id) {
+  const mips = t.mipmaps;
+  if (!mips || !mips.length || !mips[0].data || t.isCompressedArrayTexture || t.isCompressedCubeTexture) { fr._unsupported('compressed texture (array/cube or without mip data)'); return false; }
+  const meta = {
+    width: mips[0].width, height: mips[0].height, compressed: true, levels: mips.length,
+    srgb: t.colorSpace === 'srgb', repeat: [t.repeat.x, t.repeat.y], offset: [t.offset.x, t.offset.y], wrap: [t.wrapS, t.wrapT],
+    flipY: false, mipmaps: false, magFilter: t.magFilter, minFilter: t.minFilter, anisotropy: t.anisotropy || 1, format: t.format, type: t.type,
+  };
+  const arrays = mips.map((m) => (m.data instanceof Uint8Array ? m.data : new Uint8Array(m.data.buffer, m.data.byteOffset, m.data.byteLength)));
+  fr.host.upload(2 /* KIND.TEXTURE */, id, meta, ...arrays);
+  return true;
+}

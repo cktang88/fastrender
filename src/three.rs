@@ -16,7 +16,29 @@ const OP_TONEMAP: u32 = 6;
 const OP_SHADOW: u32 = 7;
 const OP_MATERIAL_UNIFORMS: u32 = 8;
 const OP_SHADOWS: u32 = 9;
+const OP_SHADOW_PASS: u32 = 10;
+const OP_SHADOW_DRAWS: u32 = 11;
 pub const SHADOW_WORDS: usize = 28;
+
+/// three's shadow map types (renderer.shadowMap.type)
+pub mod shadow_type {
+    pub const BASIC: u32 = 0;
+    pub const PCF: u32 = 1;
+    pub const PCF_SOFT: u32 = 2;
+    pub const VSM: u32 = 3;
+}
+
+/// SHADOW_PASS (v3): how the SHADOWS maps are made.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShadowPass<'a> {
+    /// `shadow_type::*` (r186+: PCF_SOFT is already PCF)
+    pub ty: u32,
+    /// r180+ maps (depth textures; point lights: a cube depth texture). false: three packs depth into RGBA (older
+    /// three), which the native side does not render: the programs sample a lit map
+    pub depth_textures: bool,
+    /// per SHADOWS entry: the VSM blur programs (vertical, horizontal); [0, 0] unless VSM
+    pub vsm: &'a [[u32; 2]],
+}
 
 /// Special texture ids in MATERIAL_UNIFORMS (docs/PROTOCOL.md v3).
 pub mod tex {
@@ -187,6 +209,10 @@ pub struct Frame<'a> {
     pub shadows: &'a [ShadowRec],
     /// v3: packed uniform blocks per material instance in use (MATERIAL_UNIFORMS)
     pub uniforms: UniformsIter<'a>,
+    /// v3: SHADOW_PASS
+    pub shadow_pass: Option<ShadowPass<'a>>,
+    /// v3: SHADOW_DRAWS, per draw (same order as `draws`): depth and distance material instance ids (0: native path)
+    pub shadow_draws: &'a [[u32; 2]],
 }
 
 fn view<T>(words: &[u32], count: usize, stride: usize) -> Result<&[T], String> {
@@ -245,6 +271,20 @@ pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
                 out.shadows = view(&p[1..], count, SHADOW_WORDS)?;
             }
             OP_MATERIAL_UNIFORMS => out.uniforms = uniforms_iter(p)?,
+            OP_SHADOW_PASS => {
+                let count = *p.get(2).ok_or("shadow pass: no count")? as usize;
+                if n != 3 + count * 2 {
+                    return Err(format!("shadow pass: {count} entries need {} words, got {n}", 3 + count * 2));
+                }
+                out.shadow_pass = Some(ShadowPass { ty: p[0], depth_textures: p[1] != 0, vsm: view(&p[3..], count, 2)? });
+            }
+            OP_SHADOW_DRAWS => {
+                let count = *p.first().ok_or("shadow draws: no count")? as usize;
+                if n != 1 + count * 2 {
+                    return Err(format!("shadow draws: {count} draws need {} words, got {n}", 1 + count * 2));
+                }
+                out.shadow_draws = view(&p[1..], count, 2)?;
+            }
             OP_DRAWS => {
                 let count = *p.first().ok_or("draws: no count")? as usize;
                 if n != 1 + count * DRAW_WORDS {
@@ -313,6 +353,80 @@ pub struct TextureMeta {
     /// v3: flip rows at upload (WebGL's UNPACK_FLIP_Y), three's shaders sample the texture as stored
     #[serde(default)]
     pub flip_rows: bool,
+    /// layers (2D array) or depth (3D)
+    #[serde(default = "one_usize")]
+    pub depth: usize,
+    /// 0 2D, 2 2D array (DataArrayTexture: r187 morph targets), 3 3D (Data3DTexture)
+    #[serde(default)]
+    pub dim: u32,
+    /// a CompressedTexture: one array per mip level, blocks as stored, `format` is three's compressed format constant
+    #[serde(default)]
+    pub compressed: bool,
+    #[serde(default = "one_usize")]
+    pub levels: usize,
+}
+
+fn one_usize() -> usize { 1 }
+
+/// A compressed three.js format: (Metal pixel format, block width, block height, bytes per block).
+/// three's constants: S3TC 33776..33779, RGTC 36283..36286, BPTC 36492/36494/36495, ETC1 36196, ETC2 37492/37496,
+/// EAC 37488..37491, ASTC 37808..37821.
+pub fn compressed_format(format: u32, srgb: bool) -> Option<(objc2_metal_format::Fmt, u32, u32, u32)> {
+    use objc2_metal_format::Fmt::*;
+    let astc = [(4, 4), (5, 4), (5, 5), (6, 5), (6, 6), (8, 5), (8, 6), (8, 8), (10, 5), (10, 6), (10, 8), (10, 10), (12, 10), (12, 12)];
+    Some(match format {
+        33776 | 33777 => (if srgb { Bc1Srgb } else { Bc1 }, 4, 4, 8),
+        33778 => (if srgb { Bc2Srgb } else { Bc2 }, 4, 4, 16),
+        33779 => (if srgb { Bc3Srgb } else { Bc3 }, 4, 4, 16),
+        36283 => (Bc4, 4, 4, 8),
+        36284 => (Bc4Snorm, 4, 4, 8),
+        36285 => (Bc5, 4, 4, 16),
+        36286 => (Bc5Snorm, 4, 4, 16),
+        36492 => (if srgb { Bc7Srgb } else { Bc7 }, 4, 4, 16),
+        36494 => (Bc6hSigned, 4, 4, 16),
+        36495 => (Bc6hUnsigned, 4, 4, 16),
+        36196 | 37492 => (if srgb { Etc2RgbSrgb } else { Etc2Rgb }, 4, 4, 8),
+        37496 => (if srgb { Etc2RgbaSrgb } else { Etc2Rgba }, 4, 4, 16),
+        37488 => (EacR11, 4, 4, 8),
+        37489 => (EacR11Snorm, 4, 4, 8),
+        37490 => (EacRg11, 4, 4, 16),
+        37491 => (EacRg11Snorm, 4, 4, 16),
+        f @ 37808..=37821 => {
+            let (w, h) = astc[(f - 37808) as usize];
+            (Astc { w, h, srgb }, w, h, 16)
+        }
+        _ => return None,
+    })
+}
+
+/// Portable names for the compressed pixel formats (mapped to MTLPixelFormat in mac_three.rs).
+pub mod objc2_metal_format {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Fmt {
+        Bc1,
+        Bc1Srgb,
+        Bc2,
+        Bc2Srgb,
+        Bc3,
+        Bc3Srgb,
+        Bc4,
+        Bc4Snorm,
+        Bc5,
+        Bc5Snorm,
+        Bc6hSigned,
+        Bc6hUnsigned,
+        Bc7,
+        Bc7Srgb,
+        Etc2Rgb,
+        Etc2RgbSrgb,
+        Etc2Rgba,
+        Etc2RgbaSrgb,
+        EacR11,
+        EacR11Snorm,
+        EacRg11,
+        EacRg11Snorm,
+        Astc { w: u32, h: u32, srgb: bool },
+    }
 }
 
 fn rgba_format() -> u32 { 1023 }
@@ -325,7 +439,7 @@ fn one_u() -> u32 { 1 }
 
 impl Default for TextureMeta {
     fn default() -> Self {
-        TextureMeta { width: 1, height: 1, srgb: false, repeat: [1.0, 1.0], offset: [0.0, 0.0], flip_y: false, mipmaps: false, mag_filter: 1006, min_filter: 1006, wrap: clamp2(), anisotropy: 1, format: 1023, ty: 1009, flip_rows: false }
+        TextureMeta { width: 1, height: 1, srgb: false, repeat: [1.0, 1.0], offset: [0.0, 0.0], flip_y: false, mipmaps: false, mag_filter: 1006, min_filter: 1006, wrap: clamp2(), anisotropy: 1, format: 1023, ty: 1009, flip_rows: false, depth: 1, dim: 0, compressed: false, levels: 1 }
     }
 }
 
@@ -554,6 +668,21 @@ mod tests {
         // a record running past the payload is refused up front
         let bad = vec![MAGIC3, 7, OP_MATERIAL_UNIFORMS, 3, 1, 5, 64];
         assert!(decode(&bad).is_err());
+        // SHADOW_PASS + SHADOW_DRAWS
+        let mut s = vec![MAGIC3, 0, OP_SHADOW_PASS, 3 + 4, shadow_type::VSM, 1, 2, 7, 8, 0, 0, OP_SHADOW_DRAWS, 1 + 4, 2, 0, 0, 31, 32];
+        s[1] = s.len() as u32;
+        let f = decode(&s).unwrap();
+        let sp = f.shadow_pass.unwrap();
+        assert_eq!((sp.ty, sp.depth_textures, sp.vsm), (shadow_type::VSM, true, &[[7, 8], [0, 0]][..]));
+        assert_eq!(f.shadow_draws, &[[0, 0], [31, 32]]);
+        let bad = vec![MAGIC3, 7, OP_SHADOW_DRAWS, 3, 2, 0, 0];
+        assert!(decode(&bad).is_err());
+        let t: TextureMeta = serde_json::from_str(r#"{"width":8,"height":8,"compressed":true,"levels":4,"format":37808,"srgb":true}"#).unwrap();
+        assert_eq!((t.compressed, t.levels, t.depth, t.dim), (true, 4, 1, 0));
+        assert_eq!(compressed_format(37808, true), Some((objc2_metal_format::Fmt::Astc { w: 4, h: 4, srgb: true }, 4, 4, 16)));
+        assert_eq!(compressed_format(37821, false).map(|f| (f.1, f.2)), Some((12, 12)));
+        assert_eq!(compressed_format(33779, false).map(|f| f.3), Some(16));
+        assert_eq!(compressed_format(1023, false), None);
     }
 
     #[test]
