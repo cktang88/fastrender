@@ -10,7 +10,8 @@ node js/golden/diff.mjs js/golden/ref-t1.png golden-native-t1.png golden-diff-t1
 ```
 
 `diff.mjs` prints the mean absolute error (0–255) and the share of pixels off by more than 24/255, and
-writes a red heat map. CI runs this on every push.
+writes a red heat map. CI runs this on every push for both material paths: `--programs three` (three's own
+shaders, the default: MAE 0.97 in Nov 2026) and `--programs native` (hand-written `fs_three`: MAE 2.23).
 
 Expected differences, some of them by design:
 - **Shadows.** The native sun shadow box follows the camera (±150 m) and is cached; three.js uses the light's own

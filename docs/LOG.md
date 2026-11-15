@@ -2,6 +2,47 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: three.js's own programs run natively: golden MAE 0.97 (hand-written path: 2.23)
+
+`FastRenderer({ programs: 'three' })` is now drawn end to end on Metal: JS hands three's exact GLSL to
+`host.program` (JavaScriptCore callback → `xlat::host_program`, disk-cached), the native side compiles the two MSL
+libraries, builds pipelines lazily per (program, blend, colour write, vertex streams) and draws every material
+instance with three's own packed uniform block (buffer 1), an FrObject computed per draw (buffer 2) and an FrFrame
+with the camera and the MetalFX jitter (buffer 3). The three-city example defaults to it; `--programs native` keeps
+the `fs_three` fast tier.
+
+Golden (`js/golden`, 1280×800, t = 1, vs browser three r187 / SwiftShader), CI run 43691537039 (macos-26, paravirtual
+GPU):
+
+| path | MAE (0–255) | pixels off by > 24/255 |
+|---|---:|---:|
+| three's own programs (`programs: 'three'`) | **0.97** | 2.2 % |
+| hand-written `fs_three` (`programs: 'native'`) | 2.23 | 1.75 % |
+
+The remaining difference is mostly shadow edges: three's PCF rotates its 5 Vogel taps by interleaved gradient noise
+of `gl_FragCoord`, whose y runs down in Metal and up in GL, so the noise pattern differs per pixel; SwiftShader's
+filtering differs too.
+
+Per frame (bench, same run, 288 draws incl. one InstancedMesh of 18,395 windows, 5 programs, 10 material
+instances): `render()` CPU 3.75 ms = JS 3.26 ms (scene walk + three's uniform refresh + packing, JavaScriptCore) +
+native prepare 0.065 ms (cull, sort, FrObjects, pipeline lookups) + encode 0.29 ms; GPU 3.17 ms (paravirtual, not
+representative). Cold start: translating the 5 programs 15–60 ms each; Metal compile 1.6–2.3 s for all 5 on the CI
+runner the first time (the OS shader cache makes it ~1 ms afterwards) → precompile at load (`renderer.compile`,
+now implemented) and an `MTLBinaryArchive` later.
+
+How the hang was found: the first runs hung the GPU (`kIOGPUCommandBufferCallbackErrorHang`) with no API-validation
+error. Bisect knobs (`FASTRENDER_V3_DEBUG`, `FASTRENDER_V3_MAX_DRAWS`, in separate processes since a hang poisons
+the process) narrowed it to the Lambert program: glslang numbered its varyings per stage in declaration order
+(vertex: vViewPosition, vFogDepth, vNormal; fragment: vFogDepth, vNormal, vViewPosition) and Metal pairs
+`[[user(locnN)]]` by number. `xlat` now renumbers fragment inputs by name, with a test over every fixture program.
+CI annotations (`.github/annotate.sh`) make step output readable through the public checks API.
+
+Review items folded in: native jitter via FrFrame (no JS hook), texture kind/compare + attribute types in the
+layout, GL-sign `dFdy`, comma/comment-proof normalisation, version-vs-Cargo.lock test, short program ids,
+`onBeforeRender`, `renderer.compile`. Open: `gl_FragCoord.y` convention, per-stage sampler numbering, only the first
+directional shadow map is rendered (others bind a lit map), casters drawn with the native depth-only shader,
+2D-array/3D textures (morph targets), camera-cut threshold.
+
 ## 2026-11-15: review 3 (independent reviewer) of the translator, three-programs, MetalFX temporal and Electron work
 
 Nothing crashes as merged. The findings that matter are interface problems that the native binding of three's

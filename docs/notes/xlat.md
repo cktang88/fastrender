@@ -82,6 +82,7 @@ derives from) cannot be configured out through these crates. LTO might trim some
 | entry points | `fr_vertex` and `fr_fragment`. Each stage is a separate MSL source, so compile them as two `MTLLibrary`s: both declare `struct _RESERVED_IDENTIFIER_FIXUP_gl_DefaultUniformBlock`. |
 | clip space | `fixup_clipspace` is on. Feed three's OpenGL-convention `projectionMatrix` unchanged; the vertex shader remaps z to [0, w]. There is no y flip (GL and Metal NDC are both y-up). |
 | derivatives | Metal's window y points down, so `dfdy` has the opposite sign of GLSL's `dFdy`; every `dfdy(` in the MSL is routed through `fr_gl_dfdy` (= `-dfdy`), which keeps three's flat shading (`cross(dFdx, dFdy)`) and tangent-less normal maps (`getTangentFrame`) facing the right way. `gl_FragCoord.y` stays top-down (only three's dithering / shadow noise reads it). |
+| varyings | glslang auto-maps locations per stage in declaration order, and three declares varyings in a different order per stage (Lambert); Metal pairs `[[user(locnN)]]` by number. The fragment inputs are renumbered to the vertex outputs of the same name (crossed varyings hung the GPU on CI before this). Inputs the vertex stage never writes get spare locations ≥ 32. |
 | layout extras | `textures[i].kind` (`2d`/`2dArray`/`3d`/`cube`) and `.shadow` (depth-compare sampler), `attributes[i].type`, from SPIR-V reflection: the binder picks neutral textures, compare samplers and vertex formats from them. |
 
 Argument buffers are off. The target is MSL 3.0, platform macOS.
