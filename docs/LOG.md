@@ -2,6 +2,21 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: golden image, native vs browser three.js (r187): MAE 30.0 → 6.5 → 2.2
+
+Same scene, time and size; MAE is on a 0–255 scale, "off" means more than 24/255.
+
+| Run | MAE | Pixels off | Fix that got there |
+|---|---|---|---|
+| 19 | 30.0 | 44.9% | first comparison |
+| 20 | 6.5 | 3.5% | texture repeat taken from the stored texture meta; the game's own shadow camera (op 7); casters culled against the shadow frustum |
+| 22 | **2.2** | **1.8%** | per-texture samplers from three's filter/wrap/anisotropy (DataTexture is Nearest with no mips); fog mixed after tone mapping and sRGB, with the fog colour converted to output space (three's chunk order and `getUnlitUniformColorSpace`) |
+
+- **Remaining:** half-texel edges on the Nearest checker, and one grazing-angle wall face lit natively but shadowed in
+  three (normal bias / PCF).
+- **Both should go away** once three's own translated shader programs are bound natively, which is in progress.
+- **r170 vs r187 browser references:** differ by MAE 1.5/255, so the version bump is safe.
+
 ## 2026-11-15: per-object JS cost is the CPU bottleneck at high counts, not the language
 
 - **CI (JavaScriptCore, paravirtual M-class CPU):** `bench --script js/examples/boxes.js --props 20000` spent
