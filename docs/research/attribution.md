@@ -189,7 +189,10 @@ See the docs/LOG.md entry of 2026-11-15 "attribution ladder" for the outcome of 
   `Frustum` says are in view, in order, with their colours, and gives the mesh back; lights are out during
   `render()` only; the sort order; who qualifies.
 - Node, real game: the table above.
-- Linux, Electron 45 under xvfb with SwiftShader (`BENCH_ELECTRON`, `BENCH_CHROMIUM_FLAGS`): the WebGL rows on the
-  city and on the real game at a small size (software GL: timings mean nothing, the hooks, counters and MAE are real).
+- Linux, Electron 45 under xvfb, ANGLE on SwiftShader (`BENCH_ELECTRON`, `BENCH_CHROMIUM_FLAGS`; software GL, so
+  timings mean nothing, the hooks, counters and screenshots are real): the real game at 200x125, `webgl-opt` and
+  `webgl-opt-inst` against stock `webgl`: **MAE 0.00 both**; 27 of 27 dark lights hidden, 46 discarding materials
+  sorted last, 36,158 of 164,667 instances drawn, 0 programs compiled in the measured window. (The first instance
+  hook, without the geometry's per-instance attributes, gave 0.43: the check works.)
 - `fastrender-bare` / `-trimonly`: bundles build, `cargo check --target aarch64-apple-darwin` of the addon passes,
   the report was run on records made from the Air's JSON. **Not run**: the addon needs Metal.

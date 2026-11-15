@@ -2,6 +2,55 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: attribution ladder: every generic method on the WebGL side (webgl-opt), fastrender's own off (fastrender-bare); not run on Metal yet
+
+Question from the Air result (fastrender 110 fps vs WebGL 7.6): generic methods or the native renderer? Answered by
+bench rows, `docs/research/attribution.md`. **No Air numbers yet**: the command is at the end.
+
+**What was built.** `js/stock-three-opt.js`: hooks for a STOCK WebGLRenderer, each exact, each with a switch: `dark`
+(dark point / spot lights out of each `render()` and `compile()`), `discard` (`setOpaqueSort`: discarding draws last,
+nearest first), `instances` (only the instances in view, compacted into second per-instance attributes on a second
+geometry for the main pass; own geometry back for the shadow pass and after `render()`). Electron bench variants
+(a base's bundle + switches): `webgl-trim`, `webgl-opt`, `webgl-opt-inst`, `fastrender-trimonly`
+(`FASTRENDER_V3_DEBUG=2560`), `fastrender-bare` (+ `trimLights` off). The report prints an "Attribution ladder"
+with one-thing-apart steps, "best WebGL -> fastrender" and checks.
+
+**Tested here (Linux).**
+- `js/test/stock-three-opt.test.mjs` (in `npm test`, r187 and r170): the compaction keeps exactly the instances
+  three's `Frustum` keeps (1068 of 4000), in order, with colours and per-instance geometry attributes; restore;
+  dispose frees only what the hook made.
+- Real WebGL, real game: Electron 45 under xvfb, ANGLE on SwiftShader, 200x125, `game/bench-main.js` directly
+  (10 s per frame in software, so timings mean nothing):
+
+  | row | MAE vs stock `webgl` | evidence |
+  |---|--:|---|
+  | `webgl-opt` | 0.00 | 27 of 27 dark lights hidden per render; 46 discarding materials sorted last; 0 programs compiled in the window |
+  | `webgl-opt-inst` | 0.00 | + 120 of 340 InstancedMeshes qualify (all by the game's hint), 36,158 of 164,667 instances drawn, 117 meshes in part |
+
+  The first version of the instance hook gave MAE 0.43: it compacted `instanceMatrix` / `instanceColor` but not the
+  geometry's own `InstancedBufferAttribute`s (`aSize`, `aInfo`, `aRoom` on 163k of the 165k hinted instances). The
+  MAE check caught it; fixed with the second geometry.
+- Node, real game, `--stock-opt` (JS of the instance hook per frame, V8 on this box): about 1 ms with a standing
+  camera (43 KB uploaded), 4.3-5.1 ms when every mesh is recomputed (3.2 MB uploaded); instanced triangles
+  3.01 M -> 1.11 M. The native side pays none of it (runs of the mesh's own buffer, base instance).
+- `fastrender-bare` / `-trimonly`: bundles build; `DOCS_RS=1 cargo check --release --target aarch64-apple-darwin` of
+  the addon passes (it now prints `[fastrender] draws per pass (last frame): ...; FASTRENDER_V3_DEBUG=n` at
+  shutdown, which the report reads); the report was run on records made from the Air's JSON. **Not run on Metal.**
+- `webgpu-trim`: not run (no WebGPU adapter here).
+
+**Found on the way.** `js/gpu-census.js` evaluated `#if` arithmetic with `Function`, which the Electron pages' CSP
+forbids, so every numeric `#if` counted as true there (in the city, all 9 lit materials looked like they discard
+through `#if NUM_CLIPPING_PLANES > 0`). Replaced by a small parser; any `gpu_census` taken inside Electron before
+this over-counts `discard`. Node runs were not affected.
+
+**Run on the Air** (AC, other apps closed, about 25 minutes), then push `host/electron/bench-out/` as
+`bench-results/<date>-m2-air-attribution-at-<commit>/`:
+
+```bash
+git pull && host/electron/scripts/bench-3way.sh --scenes world --no-vsync-pass --sizes "1280x800 2560x1600" \
+  --variants "webgl webgl-opt webgl-opt-inst fastrender-bare fastrender"
+```
+
 ## 2026-11-15: cluster LOD + GPU culling for static meshes (off by default): 931k -> 138k block triangles at the golden camera, same picture; GPU gain small
 
 docs/notes/clusters.md. Marked static meshes (`userData.frClusters`; patches/0006 marks the game's merged block
