@@ -182,6 +182,13 @@ impl ThreeScene {
         }
     }
 
+    /// What a bind list's resolution depends on for texture id `id`: is it a game texture / a render-target
+    /// attachment, and of what kind. Unchanged across an upload = no list changed.
+    pub(super) fn texture_shape(&self, id: u32) -> (Option<GameTex>, Option<TexKind>) {
+        let reg = SceneRegistry { texs: &self.texs, targets: &self.targets, shadow_lookup: &[], shadow_maps: &[] };
+        (reg.game(id), reg.target(id))
+    }
+
     /// The Metal texture a handle names now (a handle that names nothing any more: the neutral texture).
     fn texture_of(&self, h: TexHandle) -> &Texture {
         let n = &self.progs.neutral;

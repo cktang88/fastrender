@@ -51,8 +51,9 @@ between two). A cached list is reused when the texture ids JS packed for the ins
 if the list has a shadow-map slot, the pass's shadow signature is the same (which SHADOWS entries have a map, which
 map, cube / VSM / packed, the shadow type). Lists without a shadow slot ignore the signature.
 
-Everything else invalidates all lists at once (`BindArena::invalidate`, an epoch bump): a texture or render target
-uploaded or released, a program added, or the arena grown past its cap. That only happens in `update()`, before the
+Everything else invalidates all lists at once (`BindArena::invalidate`, an epoch bump): a texture that is new,
+released or re-uploaded as another type (a re-upload of the same type, i.e. new pixels, changes no list: lists name
+textures by id), a render target uploaded or released, a program added, or the arena grown past its cap. That only happens in `update()`, before the
 frame's passes are prepared, so an index in a `Draw3` is valid for exactly the frame it was resolved in. A
 re-uploaded material starts with an empty cache. A steady frame builds no list (`three programs: ... N bind lists
 (M built)` in the bench output: M stops growing).

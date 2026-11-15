@@ -115,9 +115,9 @@ impl ThreeScene {
                     }
                 }
                 Resource::Upload { kind: k, id, meta, arrays } => {
-                    if k == kind::TEXTURE || k == kind::RENDER_TARGET {
-                        self.bind_arena.invalidate();
-                    }
+                    // a texture re-uploaded as the same kind of texture (new pixels) changes no bind list: they
+                    // name it by id. A new one, or one that changed type, does; so does any render target
+                    let shape = (k == kind::TEXTURE).then(|| self.texture_shape(id));
                     let ok = match k {
                         kind::GEOMETRY => self.upload_geometry(dev, id, &meta, &arrays),
                         kind::TEXTURE if meta.contains("\"framebuffer\":true") => self.targets.framebuffer_texture(dev, id, &meta),
@@ -128,6 +128,9 @@ impl ThreeScene {
                         kind::INSTANCES => self.upload_instances(dev, id, &meta, &arrays),
                         _ => Err(format!("unknown resource kind {k}")),
                     };
+                    if k == kind::RENDER_TARGET || shape.is_some_and(|s| s != self.texture_shape(id)) {
+                        self.bind_arena.invalidate();
+                    }
                     if let Err(e) = ok {
                         self.unsupported_resources += 1;
                         eprintln!("three upload {k}/{id}: {e}");
