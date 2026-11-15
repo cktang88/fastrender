@@ -1,4 +1,4 @@
-fastrender: signed /Users/apache/github/fastrender/target/release/fastrender with the allow-jit entitlement (JavaScriptCore's JIT needs it), restarting
+fastrender: signed ~/github/fastrender/target/release/fastrender with the allow-jit entitlement (JavaScriptCore's JIT needs it), restarting
 [js] [boot] modules loaded 0s
 [js] [boot] quality applied 0s
 [js] [boot] manifest 0s
