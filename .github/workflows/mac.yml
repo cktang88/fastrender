@@ -215,6 +215,22 @@ jobs:
           set -o pipefail
           npx electron app/main.js --frames 120 --out "$GITHUB_WORKSPACE" --tag electron-direct --stack subview --isolation off --no-reload 2>&1 | tee "$GITHUB_WORKSPACE/electron-direct.log"
           echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-direct.log" || true
+      # A REAL game (cktang88/3d-world-objects, three r170, unchanged) natively vs its browser golden
+      # (docs/notes/real-game-3d-world-objects.md). Non-gating: prints MAE + the per-frame unsupported counts.
+      - name: real game 3d-world-objects - native vs browser golden (non-gating)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          if ! git clone --depth 1 https://github.com/cktang88/3d-world-objects ../3d-world-objects > wo-clone.txt 2>&1; then
+            echo "game repo not readable from this job: skipped"; bash .github/annotate.sh warning "world-objects: skipped (clone failed)" wo-clone.txt 5; exit 0
+          fi
+          node js/examples/world-objects.build.mjs ../3d-world-objects js/dist/world-objects.js --target jsc --three three-r170
+          rc=0; FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 --shot golden-native-world-objects.png > world-objects-bench.txt 2>&1 || rc=$?
+          grep -E "world-objects:|three frame cost|three programs:|error|Error" world-objects-bench.txt | cut -c1-1500 | tee world-objects-summary.txt
+          bash .github/annotate.sh notice "world-objects bench (exit $rc)" world-objects-summary.txt 20
+          node js/golden/diff.mjs js/golden/world-objects-ref.png golden-native-world-objects.png golden-diff-world-objects.png | tee world-objects-golden.json
+          echo "::notice title=world-objects golden (MAE vs browser r170)::$(cat world-objects-golden.json)"
+          { echo "world-objects golden: $(cat world-objects-golden.json)"; cat world-objects-summary.txt; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -2,7 +2,7 @@
 // (three r170, the version the game pins) in headless Chromium (SwiftShader), driven frame by frame by the same
 // deterministic driver the native run uses (js/examples/world-objects.drive.mjs).
 //
-//   node js/golden/world-objects.reference.mjs <game dir> <out.png> [WxH] [--frames 60] [--json stats.json]
+//   node js/golden/world-objects.reference.mjs <game dir> <out.png> [WxH] [--settle 10] [--frames 3] [--json stats.json]
 //
 // Assets come from <game dir>/public through a request route; remote URLs (Poly Haven HDRIs/textures, Hugging Face
 // models) are refused, exactly as in the native/headless runs. Default query = the MacBook Air tier the game picks on
@@ -19,7 +19,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const { chromium } = createRequire(import.meta.url)('playwright');
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args.splice(i, 2)[1] : d; };
-const frames = Number(opt('--frames', '60'));
+const frames = Number(opt('--frames', '3'));
+const settle = Number(opt('--settle', '10'));
 const jsonOut = opt('--json', '');
 const search = opt('--search', '?mode=world&quality=low&weather=clear&tod=noon&seamless=0');
 const pkg = opt('--three', 'three-r170');
@@ -60,16 +61,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // boot: step frames until the world has started (the level is built and the programs compiled)
 let boot = 0, info = null;
 for (; boot < 3000; boot++) {
+  const t = Date.now();
   info = await page.evaluate(() => window.__worldStepN(1));
+  if (boot % 20 === 0) console.log(`boot frame ${boot}: ${Date.now() - t} ms`, JSON.stringify(info));
   if (info && info.started) break;
   await sleep(10);
 }
-// let streaming settle (models, textures) the way the headless run does: 60 frames with idle time between
-for (let i = 0; i < 60; i++) { await page.evaluate(() => window.__worldStepN(1)); await sleep(i < 10 ? 200 : 20); }
+// let streaming settle (models, textures): `settle` frames with idle time between. SwiftShader takes ~25 s per
+// frame of this scene once its queue is full, so the reference is frame 1 + settle + frames (native: --warmup 11 --frames 3)
+console.log(`started after ${boot} frames`);
+for (let i = 0; i < settle; i++) { const t = Date.now(); const r = await page.evaluate(() => window.__worldStepN(1)); if (i % 2 === 0) console.log(`settle frame ${i}: ${Date.now() - t} ms`, JSON.stringify(r)); await sleep(500); }
 for (let i = 0; i < 100 && inflight > 0; i++) await sleep(100);
 const per = [];
-for (let i = 0; i < frames; i++) { per.push(await page.evaluate(() => window.__worldStepN(1))); await sleep(5); }
-await page.screenshot({ path: out });
+for (let i = 0; i < frames; i++) {
+  const last = i === frames - 1;
+  const r = await page.evaluate((last) => { const r = window.__worldStepN(1); if (last) r.png = window.__worldCapture(); return r; }, last);
+  if (r.png) { writeFileSync(out, Buffer.from(r.png.split(',')[1], 'base64')); delete r.png; }
+  per.push(r);
+  console.log(`frame ${i}:`, JSON.stringify(r));
+}
 const cam = await page.evaluate(() => ({ pos: window.__world.camera.position.toArray(), player: window.__world.player.pos.toArray(), yaw: window.__world.player.yaw, gl: (() => { const g = window.__world.renderer.getContext(); const e = g.getExtension('WEBGL_debug_renderer_info'); return e ? g.getParameter(e.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER); })() }));
 await browser.close();
 const calls = per.map((p) => p.calls).sort((a, b) => a - b);

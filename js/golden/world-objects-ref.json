@@ -1,0 +1,36 @@
+{
+  "three": "three-r170",
+  "search": "?mode=world&quality=low&weather=clear&tod=noon&seamless=0",
+  "size": "1280x800",
+  "bootFrames": 1,
+  "frames": 3,
+  "drawCallsMedian": 3189,
+  "drawCallsMax": 3190,
+  "last": {
+    "calls": 3190,
+    "triangles": 10444753,
+    "programs": 143,
+    "geometries": 989,
+    "textures": 196,
+    "started": true
+  },
+  "fetch": {
+    "local": 121,
+    "missing": 0,
+    "remote": 33
+  },
+  "camera": {
+    "pos": [
+      49.8,
+      1.65,
+      9
+    ],
+    "player": [
+      49.8,
+      0,
+      9
+    ],
+    "yaw": -0.12,
+    "gl": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)"
+  }
+}

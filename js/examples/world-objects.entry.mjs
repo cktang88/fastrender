@@ -17,11 +17,11 @@ let running = 0, reportAt = 0;
 G.frame = (_t, dt) => {
   if (pinView() && ++running === 1) {
     const r = G.__world.renderer;
-    reportAt = 100;
+    reportAt = 10; // (CI: bench --warmup 11 --frames 3)
     for (const k in r.info.unsupported) delete r.info.unsupported[k];
   }
   G.__worldStep(dt > 0 && dt < 0.25 ? dt : 1 / 60);
-  // one summary line (CI greps it): what this frame needed that FastRenderer skipped, per frame, over 100 frames
+  // one summary line (CI greps it): what this frame needed that FastRenderer skipped, per frame, over the first 10 frames
   if (reportAt && running === reportAt + 1) {
     const r = G.__world.renderer, u = {};
     for (const [k, v] of Object.entries(r.info.unsupported).sort((a, b) => b[1] - a[1])) u[k] = +(v / reportAt).toFixed(1);
