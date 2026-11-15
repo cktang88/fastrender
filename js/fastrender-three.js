@@ -25,6 +25,7 @@ import { Color } from 'three/src/math/Color.js';
 import { Frustum } from 'three/src/math/Frustum.js';
 import { Matrix4 } from 'three/src/math/Matrix4.js';
 import { Sphere } from 'three/src/math/Sphere.js';
+import { Object3D } from 'three/src/core/Object3D.js';
 
 export const PROTOCOL = 2;
 const MAGIC = 0x46524d32; // 'FRM2'
@@ -55,7 +56,7 @@ function materialModel(m) {
 export class FastRenderer {
   /**
    * @param {{host?: object, commandWords?: number, programs?: 'three', dfgLUT?: object, frustumCulling?: boolean,
-   *   compressedTextures?: string[] | false}} opts
+   *   staticSubtrees?: boolean | number, compressedTextures?: string[] | false}} opts
    */
   constructor(opts = {}) {
     this.host = opts.host || globalThis.__fr;
@@ -96,6 +97,11 @@ export class FastRenderer {
     this._planes = new Float64Array(24); // the frustum's 6 planes (normal, constant) for _inView
     // v3: three's frustum test in JS before any per-object work (_inView); false leaves all culling to the native side
     this.frustumCulling = opts.frustumCulling !== false;
+    // opt-in: scene.updateMatrixWorld() that leaves subtrees alone in which nothing has moved for a while, and looks
+    // at each of them again every `staticSubtrees` frames (true: 4). See updateWorldSettled. 0 / false: three's own walk.
+    this.staticSubtrees = opts.staticSubtrees === true ? 4 : opts.staticSubtrees | 0;
+    this._settle = { frame: 0, check: 8, frozen: 0, skipped: 0 };
+    this.info.transforms = this._settle; // { frozen: subtrees left alone, skipped: of them not looked at this frame }
     this._rawInstances = true;      // (false: v3 instance matrices as 3x4 rows, the wire format before raw 4x4; for A/B runs)
     this.info.render.culled = 0;    // objects skipped this pass: outside the camera frustum and every shadow frustum
     this.info.uniformBlocks = { total: 0, changed: 0 };
@@ -620,7 +626,10 @@ export class FastRenderer {
   _render(scene, camera) {
     // three's hooks, in WebGLRenderer's order: scene.onBeforeRender, then per draw object/material.onBeforeRender
     if (scene.onBeforeRender) scene.onBeforeRender(this, scene, camera, this._rt);
-    if (scene.matrixWorldAutoUpdate !== false) scene.updateMatrixWorld();
+    if (scene.matrixWorldAutoUpdate !== false) {
+      if (this.staticSubtrees > 0 && scene.parent === null && scene.updateMatrixWorld === plainUpdateMatrixWorld) this._updateWorldSettled(scene, camera);
+      else scene.updateMatrixWorld();
+    }
     if (camera.parent === null && camera.matrixWorldAutoUpdate !== false) camera.updateMatrixWorld();
     const u = this.u32, f = this.f32;
     const tp0 = this._tp;
@@ -727,6 +736,26 @@ export class FastRenderer {
     this.info.render.calls = nDraws; this.info.render.triangles = this._tris | 0; this.info.render.frame++;
     if (tp) { this.info.uniformBlocks.total = tp.stats.blocks; this.info.uniformBlocks.changed = tp.stats.changed; }
     if (this.host.present) this.host.present(w);
+  }
+
+  /** scene.updateMatrixWorld() with settled subtrees left alone (staticSubtrees; updateWorldSettled below) */
+  _updateWorldSettled(scene, camera) {
+    const st = this._settle;
+    // (a frame count per scene: two scenes rendered alternately must not share the units' check phases)
+    st.frame = scene._frFrame = (scene._frFrame | 0) + 1; st.check = this.staticSubtrees; st.frozen = 0; st.skipped = 0;
+    // whatever holds the camera is looked at every frame (a camera that starts to move must not lag)
+    for (let p = camera; p !== null; p = p.parent) { const r = p._frSettle; if (r !== undefined) r.hot = st.frame; }
+    updateWorldSettled(scene, false, 0, st);
+  }
+
+  /**
+   * staticSubtrees: tell the renderer that `object` (or something below it) was moved, so the subtree it settled in
+   * is updated this frame instead of at its next look. Never needed for correctness in the long run (every settled
+   * subtree is looked at again every `staticSubtrees` frames); it removes that delay for an object the game knows it
+   * just moved. Adding / removing children through three's API does this by itself.
+   */
+  transformsChanged(object) {
+    for (let p = object; p; p = p.parent) { const r = p._frSettle; if (r !== undefined) r.dirty = true; }
   }
 
   /** visible lights and meshes in three's traversal order (pre-order, children in order), with a reused stack */
@@ -1042,6 +1071,101 @@ function targetNeedsMipmaps(rt) {
     if (t.generateMipmaps && isMipmapFilter(t.minFilter) && t.mipmapsAutoUpdate !== false) return true;
   }
   return false;
+}
+
+// ------------------------------------------------------------------ staticSubtrees: settled subtrees are not walked
+// scene.updateMatrixWorld() visits every object every frame and, for every object with matrixAutoUpdate, composes its
+// matrix and multiplies its world matrix, moved or not: in the real game 4.5 of ~12 ms of render() (25k objects, 90 %
+// of them static; docs/notes/three-programs.md "Static transforms"). No test on an object is cheaper than that work
+// (three's vectors have no change notification), so the only way to save it is not to visit.
+//
+// The walk below is three's own (same compose, same multiply, three's updateMatrixWorld for every subtree it does
+// visit) over the top levels of the scene graph, with a state per subtree ("unit": the scene's children, and what they
+// are split into, down to SETTLE_DEPTH):
+//   watch    three's updateMatrixWorld every frame; every SETTLE_SAMPLE frames a hash of the subtree's world matrices
+//            (and its object count). Two samples in a row equal -> settled. A unit that keeps changing is split into
+//            its children (they become units) when that can help, else sampled less and less often.
+//   settled  not visited. Every `check` frames (staggered over the units) three's updateMatrixWorld runs on it and the
+//            hash is taken again: equal -> still settled; different -> back to watch (updated every frame again).
+// So a transform changed inside a settled subtree shows up at most `check - 1` frames late (4: 50 ms at 60 Hz), and
+// from then on every frame. That delay is why this is opt-in. Looked at at once, not at the next check: a subtree whose
+// ancestor moved, one that holds the render camera, one where a child was added or removed through three's API
+// ('childadded' / 'childremoved'), and one the game names with renderer.transformsChanged(object). Everything else
+// about an object (visibility, materials, geometry, instance matrices) is read every frame as before.
+const plainUpdateMatrixWorld = Object3D.prototype.updateMatrixWorld;
+const SETTLE_DEPTH = 4, SETTLE_SAMPLE = 16, SETTLE_SPLIT = 3;
+
+function onChildChange(e) {
+  for (let p = e.target; p; p = p.parent) { const r = p._frSettle; if (r !== undefined) r.dirty = true; }
+}
+
+/** hash of a subtree's world matrices + object count; with watch, every object in it reports child changes */
+let _hashCount = 0;
+function hashWorld(o, h, watch) {
+  const e = o.matrixWorld.elements;
+  _hashCount++;
+  h = h * 1.0000001 + e[12] * 1.1 + e[13] * 1.3 + e[14] * 1.7 + e[0] * 2.1 + e[5] * 2.3 + e[10] * 2.9 + e[1] * 3.1 + e[6] * 3.7 + e[8] * 4.1;
+  if (watch && o._frWatched !== true) { o._frWatched = true; o.addEventListener('childadded', onChildChange); o.addEventListener('childremoved', onChildChange); }
+  const ch = o.children;
+  for (let i = 0, n = ch.length; i < n; i++) h = hashWorld(ch[i], h, watch);
+  return h;
+}
+function subtreeHash(o, watch) { _hashCount = 0; const h = hashWorld(o, 0, watch); return h + _hashCount * 1e-3; }
+
+function updateWorldSettled(o, force, depth, st) {
+  let r = o._frSettle;
+  if (depth >= 1 && r === undefined) {
+    // a unit: only something with children (one object alone is as cheap to update as to check)
+    if (o.children.length === 0) { o.updateMatrixWorld(force); return; }
+    r = o._frSettle = { state: 0 /* 0 watch, 1 settled, 2 split */, hash: NaN, stable: 0, changes: 0, every: SETTLE_SAMPLE, phase: o.id, dirty: false, hot: 0 };
+  }
+  if (r !== undefined && r.state !== 2) {
+    const frame = st.frame;
+    if (r.state === 1) {
+      st.frozen++;
+      if (!force && !r.dirty && r.hot !== frame && (frame + r.phase) % st.check !== 0) { st.skipped++; return; }
+      o.updateMatrixWorld(force);
+      const h = subtreeHash(o, true);
+      if (h !== r.hash || r.hot === frame) { r.state = 0; r.stable = 0; r.changes = 0; r.every = SETTLE_SAMPLE; }
+      r.hash = h; r.dirty = false;
+      return;
+    }
+    o.updateMatrixWorld(force);
+    r.dirty = false;
+    if ((frame + r.phase) % r.every !== 0) return;
+    const h = subtreeHash(o, false);
+    if (h === r.hash) {
+      if (++r.stable >= 2 && r.hot !== frame) { r.state = 1; subtreeHash(o, true); }
+    } else {
+      r.stable = 0; r.hash = h;
+      if (++r.changes >= SETTLE_SPLIT) {
+        // it keeps moving: let its children settle on their own if some of them are subtrees, else look less often
+        let split = false;
+        if (depth < SETTLE_DEPTH && o.updateMatrixWorld === plainUpdateMatrixWorld) { const ch = o.children; for (let i = 0; i < ch.length; i++) if (ch[i].children.length !== 0) { split = true; break; } }
+        if (split) r.state = 2; else { r.changes = 0; if (r.every < 256) r.every *= 2; }
+      }
+    }
+    return;
+  }
+  // the top of the graph and split units: three's own step for this object, then its children
+  if (o.updateMatrixWorld !== plainUpdateMatrixWorld) { o.updateMatrixWorld(force); return; }
+  // (three forces the children of every object it recomputed, which is every object with matrixAutoUpdate; what a
+  // settled subtree needs to know is whether this world matrix CHANGED: compare it with what it was)
+  const e = o.matrixWorld.elements;
+  const e0 = e[0], e1 = e[1], e2 = e[2], e4 = e[4], e5 = e[5], e6 = e[6], e8 = e[8], e9 = e[9], e10 = e[10], e12 = e[12], e13 = e[13], e14 = e[14], e3 = e[3], e7 = e[7], e11 = e[11], e15 = e[15];
+  if (o.matrixAutoUpdate) o.updateMatrix();
+  if (o.matrixWorldNeedsUpdate || force) {
+    if (o.matrixWorldAutoUpdate === true) {
+      if (o.parent === null) o.matrixWorld.copy(o.matrix);
+      else o.matrixWorld.multiplyMatrices(o.parent.matrixWorld, o.matrix);
+    }
+    o.matrixWorldNeedsUpdate = false;
+  }
+  const f = o.matrixWorld.elements; // (a game may have replaced the array)
+  force = f !== e || e0 !== f[0] || e1 !== f[1] || e2 !== f[2] || e4 !== f[4] || e5 !== f[5] || e6 !== f[6] || e8 !== f[8] || e9 !== f[9] || e10 !== f[10] ||
+    e12 !== f[12] || e13 !== f[13] || e14 !== f[14] || e3 !== f[3] || e7 !== f[7] || e11 !== f[11] || e15 !== f[15];
+  const ch = o.children;
+  for (let i = 0, n = ch.length; i < n; i++) updateWorldSettled(ch[i], force, depth + 1, st);
 }
 
 /**

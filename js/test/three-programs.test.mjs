@@ -696,3 +696,62 @@ function decode(buf) {
   assert.ok(id > 0 && up && up.meta.compressed === true && up.meta.format === THREE.RGBA_ASTC_4x4_Format && up.data[0].length === 16, 'ASTC blocks uploaded unchanged');
   console.log(`[three r${REV}] instance matrices: three's own 4x4 array (no copy); compressed texture formats advertised (ASTC, ETC2, BC)`);
 }
+
+// ------------------------------------------------------------------ 12. staticSubtrees (opt-in): settled subtrees are not walked
+// (with the game's three and the renderer's as two module copies, i.e. this file run without the alias hook, the
+// renderer does not recognise Object3D's own updateMatrixWorld and leaves the walk to three: nothing to test)
+if ((await import('three/src/core/Object3D.js')).Object3D !== THREE.Object3D) console.log(`[three r${REV}] staticSubtrees: skipped (two copies of three)`);
+else {
+  const h = makeHost();
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20, staticSubtrees: 4 });
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(50, 1.6, 0.1, 500); cam.position.set(0, 30, 80); cam.lookAt(0, 0, 0);
+  const mat = new THREE.MeshBasicMaterial(), geo = new THREE.BoxGeometry();
+  const world = new THREE.Group(); scene.add(world);
+  const blocks = [], all = [];
+  for (let b = 0; b < 12; b++) {
+    const block = new THREE.Group(); block.position.set(b * 5 - 30, 0, 0); world.add(block); blocks.push(block);
+    for (let k = 0; k < 10; k++) { const part = new THREE.Group(); part.position.y = k; part.rotation.y = k; block.add(part); const m = new THREE.Mesh(geo, mat); m.position.x = 1; part.add(m); all.push(part, m); }
+  }
+  const mover = new THREE.Mesh(geo, mat); blocks[0].add(mover);         // one block keeps moving
+  const rig = new THREE.Group(); world.add(rig); rig.add(cam);           // the camera hangs in the graph
+  const snapshot = () => { const out = []; scene.traverse((o) => out.push(...o.matrixWorld.elements)); return out; };
+  const frame = () => { mover.position.x += 0.01; r.render(scene, cam); };
+  for (let i = 0; i < 200; i++) frame();
+  const t = r.info.transforms;
+  assert.ok(t.frozen >= 11 && t.skipped >= 8, `the static blocks settle and are not walked (${t.frozen} settled, ${t.skipped} skipped this frame)`);
+  // nothing is stale: three's own walk from the same state gives the same matrices (the moving block included)
+  const ours = snapshot();
+  scene.updateMatrixWorld(true);
+  assert.deepEqual(ours, snapshot(), 'every matrixWorld is what three computes');
+  // a transform changed inside a settled subtree: at the latest `staticSubtrees - 1` frames later, then every frame
+  const part = blocks[5].children[3], mesh = part.children[0];
+  part.position.y = 50;
+  let late = 0;
+  for (; late < 8; late++) { frame(); if (mesh.matrixWorld.elements[13] === 50) break; }
+  assert.ok(late <= 3, `seen after ${late} frames (at most 3)`);
+  part.position.y = 60; frame();
+  assert.equal(mesh.matrixWorld.elements[13], 60, 'a subtree that moved is updated every frame again');
+  for (let i = 0; i < 120; i++) frame(); // settles again
+  // renderer.transformsChanged(object): this frame
+  const p2 = blocks[7].children[2];
+  p2.position.y = 70; r.transformsChanged(p2); frame();
+  assert.equal(p2.children[0].matrixWorld.elements[13], 70, 'transformsChanged: no delay');
+  // a child added through three's API: this frame
+  const added = new THREE.Mesh(geo, mat); added.position.set(0, 80, 0);
+  blocks[9].children[1].add(added); frame();
+  assert.equal(added.matrixWorld.elements[13], 80 + 1, 'a new child of a settled subtree is placed at once');
+  // an ancestor that moves takes its settled subtrees along at once
+  for (let i = 0; i < 120; i++) frame();
+  world.position.y = 5; frame();
+  assert.equal(blocks[3].children[0].children[0].matrixWorld.elements[13], 5, 'ancestor moved: settled subtrees follow in the same frame');
+  // the camera's holder never settles: a camera that starts to move after a pause does not lag
+  for (let i = 0; i < 120; i++) frame();
+  rig.position.x = 9; frame();
+  assert.equal(cam.matrixWorld.elements[12], 9, 'the subtree holding the render camera is updated every frame');
+  // switched off: three's walk
+  r.staticSubtrees = 0;
+  blocks[4].children[4].position.y = 90; frame();
+  assert.equal(blocks[4].children[4].children[0].matrixWorld.elements[13], 90 + 5);
+  console.log(`[three r${REV}] staticSubtrees: ${t.frozen} settled subtrees not walked, same matrices as three's walk; a move shows within check - 1 frames; transformsChanged / add / ancestor / camera at once`);
+}

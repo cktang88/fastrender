@@ -9,7 +9,7 @@
 // --profile        V8's sampling profiler over the measured frames, aggregated in process (no file): top functions by
 //                  self time and the inclusive time of the renderer's stages, in ms per frame
 // --ab <property>  A/B inside one run (a busy machine slows both alike): renderer.<property> is switched every 10
-//                  measured frames (frustumCulling, _rawInstances); reports render() median / p95
+//                  measured frames (frustumCulling, staticSubtrees, _rawInstances); reports render() median / p95
 //                  with it on and off, without the first 3 frames after each switch
 // --matrix-stats   which objects' matrixWorld changes over the measured frames (static / sometimes / every frame), and
 //                  what scene.updateMatrixWorld() costs as it is vs with matrixAutoUpdate = false on the static ones
@@ -68,6 +68,9 @@ const program0x = host.program;
 // src/xlat.rs sanitise names with '#' now; kept to compare)
 const fixName = args.includes('--fix-shader-name');
 const abProp = opt('--ab', '');
+// (staticSubtrees needs ~50 frames to settle after it is switched on: blocks of 200 frames, the first 80 dropped)
+const abOn = abProp === 'staticSubtrees' ? Number(opt('--check', '8')) : true, abBlock = abProp === 'staticSubtrees' ? 200 : 10, abSkip = abProp === 'staticSubtrees' ? 80 : 3;
+const staticSubtrees = Number(opt('--static-subtrees', '0'));
 const wantProfile = args.includes('--profile'), wantMatrixStats = args.includes('--matrix-stats');
 const program0 = fixName ? (k, vs, fs, id) => program0x(k, vs.replace(/^#define SHADER_NAME .*$/m, ''), fs.replace(/^#define SHADER_NAME .*$/m, ''), id) : program0x;
 const allPrograms = new Map(); // every program asked for (also the ones that fail): --dump-programs
@@ -146,6 +149,7 @@ renderer._texture = function (t) {
 let picks = 0;
 if (renderer._tp) { const gp = renderer._tp._getProgram; renderer._tp._getProgram = function (...a) { picks++; return gp.apply(this, a); }; }
 globalThis.__worldTrace = true;
+if (staticSubtrees) { renderer.staticSubtrees = staticSubtrees; for (let i = 0; i < 80; i++) { globalThis.__worldStep(1 / 60); await tick(); } }
 // --matrix-stats: a copy of every object's matrixWorld, compared after each measured frame
 const mstat = wantMatrixStats ? (() => {
   const objs = []; W().scene.traverse((o) => objs.push(o));
@@ -177,12 +181,12 @@ const per = [];
 let instances = 0, maxDraws = 0;
 const ab = { on: [], off: [], cpuOn: [], cpuOff: [] };
 for (let i = 0; i < frames; i++) {
-  if (abProp) renderer[abProp] = Math.floor(i / 10) % 2 === 0;
+  if (abProp) renderer[abProp] = Math.floor(i / abBlock) % 2 === 0 ? abOn : 0;
   renderMs = 0; renderCalls = 0; renderCpu = 0;
   const t = hrNow(), tc = cpuNow();
   globalThis.__worldStep(1 / 60);
   const total = hrNow() - t, totalCpu = cpuNow() - tc;
-  if (abProp && i % 10 >= 3) { (renderer[abProp] ? ab.on : ab.off).push(renderMs); (renderer[abProp] ? ab.cpuOn : ab.cpuOff).push(renderCpu); }
+  if (abProp && i % abBlock >= abSkip) { (renderer[abProp] ? ab.on : ab.off).push(renderMs); (renderer[abProp] ? ab.cpuOn : ab.cpuOff).push(renderCpu); }
   per.push({ total, totalCpu, renderCpu, render: renderMs, calls: renderer.info.render.calls, inst: renderer._used ? renderer._used.length : 0, renders: renderCalls });
   instances = Math.max(instances, renderer._used ? renderer._used.length : 0);
   maxDraws = Math.max(maxDraws, renderer.info.render.calls);
@@ -256,6 +260,14 @@ if (mstat) {
   collect(scene);
   c.staticSubtrees = roots.length; c.staticSubtreeObjects = 0;
   for (const r of roots) r.traverse(() => c.staticSubtreeObjects++);
+  // where they hang: "path of ancestor names: root name/type" -> [subtrees, objects], the largest first
+  const by = new Map();
+  for (const r of roots) {
+    const path = []; for (let p = r.parent; p; p = p.parent) path.unshift(p.name || p.type);
+    const k = `${path.join('/')}: ${(r.name || r.type).replace(/[-_ ]?[0-9][0-9_.,:-]*/g, '#')}`;
+    const e = by.get(k) || [0, 0]; e[0]++; r.traverse(() => e[1]++); by.set(k, e);
+  }
+  c.staticSubtreeKinds = Object.fromEntries([...by].sort((x, y) => y[1][1] - x[1][1]).slice(0, 25));
   const own = roots.map((r) => Object.prototype.hasOwnProperty.call(r, 'updateMatrixWorld') ? r.updateMatrixWorld : null);
   for (const r of roots) r.updateMatrixWorld = () => {};
   c.updateMatrixWorldMsStaticSubtreesSkipped = +timeUMW().toFixed(2);
@@ -271,7 +283,7 @@ const result = {
   programPicksPerFrame: +(picks / frames).toFixed(1),
   draws: maxDraws, drawsMedian: med(per.map((p) => p.calls)), materialInstances: instances, programsTranslated: hstats.programs, programTranslateMs: Math.round(hstats.programMs),
   triangles: renderer.info.render.triangles, screenRendersPerFrame: med(per.map((p) => p.renders)),
-  sceneObjects: objects, updateMatrixWorldMs: +matrixWorldMs.toFixed(2), matrixStats, ab: abProp ? { property: abProp, renderOn: [med(ab.on), p95(ab.on)], renderOff: [med(ab.off), p95(ab.off)], renderCpuOn: [med(ab.cpuOn), p95(ab.cpuOn)], renderCpuOff: [med(ab.cpuOff), p95(ab.cpuOff)] } : null, culledPerFrame: renderer.info.render.culled, profile: profileTop,
+  sceneObjects: objects, updateMatrixWorldMs: +matrixWorldMs.toFixed(2), matrixStats, transforms: renderer.info.transforms, ab: abProp ? { property: abProp, renderOn: [med(ab.on), p95(ab.on)], renderOff: [med(ab.off), p95(ab.off)], renderCpuOn: [med(ab.cpuOn), p95(ab.cpuOn)], renderCpuOff: [med(ab.cpuOff), p95(ab.cpuOff)] } : null, culledPerFrame: renderer.info.render.culled, profile: profileTop,
   scene: { perInstanceAttrMeshes, perInstanceAttrs: [...perInstanceAttrs], meshes, instancedMeshes: instanced, instances: instancesTotal, skinned, sprites, points, lines, lights, materials: mats.size, shaderMaterials: [...shaderMats], onBeforeCompile: [...obc] },
   unsupportedPerFrame: Object.fromEntries(unsupported.map(([k, v]) => [k, +(v / frames).toFixed(2)])),
   uploadsPerFrame, uploadMBPerFrame, texturesWithoutPixelsPerFrame: Object.fromEntries(Object.entries(texKinds).map(([k, v]) => [k, +(v / frames).toFixed(1)])),

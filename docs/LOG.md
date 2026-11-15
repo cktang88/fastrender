@@ -38,6 +38,31 @@ A steady frame builds no bind list (asserted by the benchmark; the macOS bench p
 macOS CI, before (run 43717991507, paravirtual GPU): real game after streaming, no validation: prepare 0.652 ms,
 encode 2.010 ms at 1506 draws; three-city golden run (API validation on): prepare 0.160 ms, encode 0.153 ms at 288
 draws. After: see the entry's update below once the run is in.
+## 2026-11-15: WP7 (JS): `staticSubtrees` (opt-in): settled subtrees are not walked, render() -27 % in the real game
+
+Steady-state profile of the real game in V8 after the entry below (`world-objects.node.mjs --profile`, 300 frames,
+quiet machine, self time in ms per frame, `render()` 13.8 inclusive): `Object3D.updateMatrixWorld` 5.43,
+`ThreePrograms.update` 0.95, `Matrix4.multiplyMatrices` 0.89, `refreshUniformsCommon` 0.73, the game's `update` 0.71,
+`_collect` 0.68, `_render` 0.67, `Object3D.traverse` (game) 0.60, uniform `write` 0.57, `_walk` 0.51, `_inView` 0.45.
+One item is 46 % of `render()` (updateMatrixWorld + its multiplies: 6.3 ms inclusive); nothing else is above 1 ms.
+
+`staticSubtrees` attacks it (docs/notes/three-programs.md "Static transforms"): the scene's subtrees whose world
+matrices hash the same on consecutive samples are not visited; each gets three's own `updateMatrixWorld` again every N
+frames and returns to per-frame updates when it changed. Trade-off, hence opt-in and off by default: a transform changed
+inside a settled subtree is seen up to N - 1 frames late (camera holder, moved ancestors, added / removed children and
+`renderer.transformsChanged(object)`: at once).
+
+| real game, `--ab staticSubtrees` (1200 frames, switched every 200, first 80 of each block dropped) | off | on |
+|---|---:|---:|
+| N = 8: `render()` median (p95) | 16.01 (23.1) | 11.66 (19.7): -27 % |
+| N = 4: `render()` median (p95) | 12.71 (22.5) | 9.10 (20.8): -28 % |
+| subtrees settled / skipped per frame | | 430 / 383 |
+| `updateMatrixWorld` inclusive, profile | 6.3 | 2.5 |
+
+Not enabled anywhere yet: the game entries (js/examples/world-objects.*) decide; the goldens are static views, so they
+should not move, but that needs its own CI run. `npm test` section 12 holds it to three's walk (same matrices on a
+settled scene; a move seen within N - 1 frames; the immediate cases).
+
 ## 2026-11-15: WP7 (JS): frustum test before per-object work, raw instance matrices, compressed formats advertised; where `updateMatrixWorld` goes
 
 Perf audit WP7 (docs/research/perf-audit-2026-11.md J2-J4, U1, U10), minus the JavaScriptCore JIT question. All

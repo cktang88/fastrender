@@ -173,7 +173,19 @@ after it; `scene.matrixWorldAutoUpdate = false` makes the renderer skip the walk
 `updateMatrixWorld()` on what it moved.) Fewer objects helps the same way: InstancedMesh / BatchedMesh / merged
 geometry for static props are one object each.
 
-**What the renderer cannot do for the game** (measured, not shipped): a walk of our own that remembers each object's
+**What the renderer can do without the game's help: `staticSubtrees` (opt-in).** `new FastRenderer({ programs:
+'three', staticSubtrees: true })` (or `renderer.staticSubtrees = 4`) replaces three's walk by one that does not visit
+subtrees in which nothing has moved for a while (`updateWorldSettled` in js/fastrender-three.js). A subtree settles
+when a hash of its world matrices is the same on consecutive samples; a settled subtree gets three's own
+`updateMatrixWorld` again every N frames (N = the option's value, `true` = 4, staggered over the subtrees) and goes back
+to per-frame updates when its hash changed. The price, and the reason it is opt-in: **a transform changed inside a
+settled subtree shows up to N - 1 frames late** (4: 50 ms at 60 Hz), then every frame. No delay for: the subtree that
+holds the render camera, subtrees whose ancestor moved, children added / removed through three's API, and anything the
+game names with `renderer.transformsChanged(object)`. Real game, `world-objects.node.mjs --ab staticSubtrees` (1200
+frames, switched every 200): `render()` 16.0 -> 11.7 ms with N = 8, 12.7 -> 9.1 ms with N = 4 (-27 %, -28 %); 430
+subtrees settled, 383 of them skipped per frame. The game-side switches above get the same without any delay.
+
+**What does not work** (measured, not shipped): a walk of our own that remembers each object's
 position / quaternion / scale and skips compose + multiply when they are unchanged (`js/test/transforms.bench.mjs`
 "cached walk") is exact under a small contract, but finding out that an object did not move means reading ten numbers
 per object, which costs about what composing it costs: 4.5 -> 3.6 ms with nothing moving, no measurable change in the
