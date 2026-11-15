@@ -28,7 +28,7 @@ fastrender native (Rust + Metal): registry → cull/sort → shadow (the game's 
 | 4. Golden images | the same scene in browser three.js and natively, diffed | **done**, runs on every push: the city, and the parity scene (every shadow kind, PCF and VSM, depth-program casters, skinning, morphs, flat, wireframe, tangent-less normal map) | `js/golden/` |
 | 5. Custom shaders | `ShaderMaterial` / `onBeforeCompile` → MSL | **done** through 5b (they are three programs like any other) | `js/test/three-programs.test.mjs`, CI compiles every fixture program with Apple's `metal` |
 | 5b. three's own programs | every material (built-in or custom) runs three's exact GLSL, translated in process (`src/xlat.rs`, `host.program`); uniforms from three's own code | **done, default for the three-city example** (`FastRenderer({ programs: 'three' })`, protocol v3) | JS: sources + uniform values identical to WebGLRenderer (r170 + r187); native: CI selftest + golden (`docs/LOG.md`) |
-| 6. Host | where game JS runs | **JavaScriptCore works** (CI); **Electron + napi addon** is chosen for full DOM/WebAudio compatibility, spike pending (needs a Mac) | `docs/HOST.md` |
+| 6. Host | where game JS runs | **JavaScriptCore works** (CI); **Electron works** (CI): the game runs in the renderer process (V8, real DOM, 2D canvas, workers), the addon's main-process render thread runs the fastrender library (`Renderer::with_source`) under the transparent web contents; `host.program` translates synchronously in the renderer process; the three-city and 3d-world-objects goldens are diffed from the drawable | `docs/HOST.md` ("Electron host with the real renderer"), CI step "electron fastrender" |
 | 7. Bundling | game → one script | esbuild IIFE (`js/build.mjs`); `three` stays real | CI builds the example |
 | 8. Air tuning | quality tiers, MetalFX, dynamic resolution | renderer-level knobs exist (scale, MetalFX, cached shadows, dynres) | bench matrix on real hardware (pending) |
 
@@ -48,7 +48,7 @@ every push (docs/notes/real-game-3d-world-objects.md: MAE, per-frame costs, what
 | BatchedMesh in shadow maps per shadow camera | BatchedMesh runs three's batching program (one draw per multi-draw entry, gl_DrawID = base instance, colours, integer indirection texture); its shadow casters use the main camera's entry list (three re-culls per shadow camera in onBeforeShadow) |
 | r170 point-light / VSM shadow maps | bound lit (r187 renders them all) |
 | Async program compile | `host.program` is synchronous (~15 ms cold translate + Metal compile per new program, cached on disk after); precompile at load |
-| DOM UI, input, audio | Free with the Electron host |
+| DOM UI, input, audio | Free with the Electron host (it runs the real renderer since Nov 2026; input/audio not exercised by CI yet) |
 
 ## Running the pipeline on a game
 

@@ -5,7 +5,8 @@
 //                                WebGLRenderer = FastRenderer({ programs: 'three' }) (js/examples/world-objects.three.mjs),
 //                                under the browser golden's deterministic driver (world-objects.browser.entry.mjs):
 //                                the same resolution rules as js/examples/world-objects.build.mjs, minus the DOM stubs
-//                                (Electron has the real DOM, 2D canvas, createImageBitmap, workers).
+//                                (Electron has the real DOM, 2D canvas, createImageBitmap, workers). The game's CSS
+//                                is kept (game/dist/world-objects.css): its HUD looks as in a browser.
 //
 //   node scripts/bundle-game.mjs [--world ../3d-world-objects]
 import { build } from 'esbuild';
@@ -30,7 +31,6 @@ const threeSrc = (shim) => ({
     b.onResolve({ filter: /^three\/(examples\/jsm|addons)\// }, (a) => ({ path: path.join(threeRoot, 'examples/jsm', a.path.replace(/^three\/(examples\/jsm|addons)\//, '')) }));
     b.onResolve({ filter: /^three\/webgpu$|^three\/tsl$/ }, () => ({ path: path.join(threeRoot, 'src/Three.js') }));
     if (!shim) return;
-    b.onLoad({ filter: /\.css$/ }, () => ({ contents: '', loader: 'js' }));
     b.onLoad({ filter: /\.ts$/ }, (a) => {
       const src = readFileSync(a.path, 'utf8');
       if (!src.includes('import.meta.glob')) return undefined;

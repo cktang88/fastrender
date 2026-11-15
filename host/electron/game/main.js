@@ -56,7 +56,8 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/ja
 const CSP = "default-src 'self' blob: data:; script-src 'self' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https:; media-src 'self' blob: data:; connect-src 'self' blob: data: https:; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'none'";
 
 function page() {
-  const inject = '<link rel="stylesheet" href="/__fr/fr.css"><script src="/__fr/boot.js"></script><script src="/__fr/game.js"></script>';
+  const css = fs.existsSync(bundle.replace(/\.js$/, '.css')) ? '<link rel="stylesheet" href="/__fr/game.css">' : '';
+  const inject = `${css}<link rel="stylesheet" href="/__fr/fr.css"><script src="/__fr/boot.js"></script><script src="/__fr/game.js"></script>`;
   if (htmlPath) {
     const html = fs.readFileSync(htmlPath, 'utf8');
     const out = html.replace(/<script type="module" src="[^"]*"><\/script>/, inject);
@@ -73,6 +74,7 @@ async function serve(req) {
     if (u.pathname === '/' || u.pathname === '/index.html') return send(page(), 'x.html', { 'content-security-policy': CSP });
     if (u.pathname === '/__fr/boot.js') return send(fs.readFileSync(path.join(__dirname, 'dist', 'boot.js')), 'x.js');
     if (u.pathname === '/__fr/game.js') return send(fs.readFileSync(bundle), 'x.js');
+    if (u.pathname === '/__fr/game.css') return send(fs.readFileSync(bundle.replace(/\.js$/, '.css')), 'x.css');
     if (u.pathname === '/__fr/fr.css') return send(fs.readFileSync(path.join(__dirname, 'fr.css')), 'x.css');
     if (assets) {
       const f = path.join(assets, decodeURIComponent(u.pathname));

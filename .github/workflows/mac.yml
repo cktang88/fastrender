@@ -360,6 +360,17 @@ jobs:
             echo "::notice title=electron world-objects golden (MAE vs browser; JSC host 46.9)::$(cat electron-world-summary.txt | cut -c1-2500)"
             echo "electron world-objects: $(cat electron-world-summary.txt)" >> "$GITHUB_STEP_SUMMARY"
           fi
+          # per-frame costs without API validation, contextIsolation off (direct addon calls: no bridge copies)
+          rc=0; (cd host/electron && env -u MTL_DEBUG_LAYER npx electron game/main.js --kind world --isolation off --html "$GITHUB_WORKSPACE/../3d-world-objects/index.html" --assets "$GITHUB_WORKSPACE/../3d-world-objects/public" --out "$GITHUB_WORKSPACE" --tag electron-world-direct --cost-frames 60 --timeout 900) > electron-world-direct.log 2>&1 || rc=$?
+          node -e "const r=require('./electron-world-direct.json');console.log(JSON.stringify({exit:$rc,cost:r.cost,boot_s:r.boot_s,images:r.images,error:r.error}))" > electron-world-direct-summary.txt 2>&1 || tail -20 electron-world-direct.log > electron-world-direct-summary.txt
+          bash .github/annotate.sh notice "electron world-objects costs, isolation off, no API validation" electron-world-direct-summary.txt 20
+      # gates (first stable run 43712475017: city 0.97 = the JSC host's, world-objects 2.96 vs the JSC host's 6.58)
+      - name: electron fastrender three-city MAE<1.0, 3d-world-objects MAE<10
+        if: ${{ !cancelled() }}
+        run: |
+          node -e "const r=JSON.parse(require('fs').readFileSync('electron-city-golden.json','utf8'));console.log('electron three-city MAE',r.mae);if(!(r.mae<1.0))process.exit(1)"
+          test -d ../3d-world-objects || { echo "no game checkout: world gate skipped"; exit 0; }
+          node -e "const r=JSON.parse(require('fs').readFileSync('electron-world-golden.json','utf8'));console.log('electron world-objects MAE',r.mae);if(!(r.mae<10))process.exit(1)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

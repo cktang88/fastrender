@@ -54,8 +54,10 @@ async function capture(tag, extra) {
   const seq = host.lastSeq;
   const t0 = realNow();
   let s = native.stats();
-  while (s.lastFrameSeq < seq && realNow() - t0 < 20000) { await sleep(10); s = native.stats(); }
-  if (s.lastFrameSeq < seq) log(`capture ${tag}: frame ${seq} not rendered after 20 s (last ${s.lastFrameSeq})`);
+  // the render thread may be far behind at load (pipelines for every program, texture uploads; CI's paravirtual GPU)
+  while (s.lastFrameSeq < seq && realNow() - t0 < 180000) { await sleep(20); s = native.stats(); }
+  if (s.lastFrameSeq < seq) log(`capture ${tag}: frame ${seq} not rendered after 180 s (last ${s.lastFrameSeq})`);
+  else log(`capture ${tag}: frame rendered after ${((realNow() - t0) / 1000).toFixed(1)} s`);
   const done = new Promise((r) => { captureDone = r; });
   ipc.send('capture', { tag, rendered: s.lastFrameSeq >= seq, ...extra });
   await done;

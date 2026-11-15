@@ -50,6 +50,71 @@ UI renderer of their own.
 3. Idle RSS of all Electron processes on an 8 GB Air, and the cost of `present()`.
 4. SharedArrayBuffer only if a Worker writes frame data.
 
+## Electron host with the real renderer (Nov 2026)
+
+**Status:** a three.js game runs in Electron with fastrender's own Metal renderer on macOS CI (step "electron fastrender"
+in `.github/workflows/mac.yml`). Numbers: see "Electron host: numbers" below and docs/LOG.md.
+
+```
+renderer process (V8, real DOM / 2D canvas / workers)           main process
+  game JS + real three.js                                        addon: CAMetalLayer view BELOW the transparent web contents
+  FastRenderer({programs:'three'}) -> host.js                    ring reader thread (fr_queue.rs): drains the ring as fast as
+    upload(kind,id,meta,...arrays) --typed--+                      it is written, decodes (fastrender::host codec) into a queue
+    program(key,vs,fs,id): xlat HERE (sync) |                    render thread (fr_render.rs): one Batch per frame =
+      -> layout JSON to three-programs.js   |  shared memory       resources + programs in ring order, then the frame ->
+      -> MSL program -----------------------+--> ordered ring -->  fastrender::mac::Renderer::with_source(FeedSource)
+    present / flush(): frame words ---------+    (never drops)     -> MetalFX / direct -> drawable
+    shot(name): read back the next frame ---+                      screen-only frames skipped when a newer one is queued
+```
+
+- **Library.** The `fastrender` crate is a library (`src/lib.rs`: renderer, protocol decoder, xlat) plus the binary. The
+  host boundary is `fastrender::host::FrameSource` ("frame words + resource messages + program requests in, Metal
+  out"): `jsc::ScriptHost` implements it in-process; Electron's `FeedSource` is filled by the addon's render thread.
+  `ThreeScene::with_source` / `Renderer::with_source` take any source (the JavaScriptCore path is unchanged).
+- **Programs.** `host.program(key, vs, fs, id)` stays synchronous in the renderer process: the addon there links the
+  same `fastrender::xlat::host_program` (disk cache `~/Library/Caches/fastrender/shaders`, glslang warmed up on
+  attach) and returns the layout; the translated MSL goes to the main process as a PROGRAM message, ordered before any
+  frame that uses it. Pipelines are built on the render thread. Only the main-process side would change for an
+  asynchronous Metal compile (completion handlers / MTL4Compiler): the wire protocol already carries the MSL early.
+- **Frames travel in the ordered ring** (fastrender mode), not in the spike's mailbox: a frame that renders into a
+  render target (PMREM at load, captures, composer buffers) must run even when a newer frame is queued, and the
+  mailbox would drop it. The reader thread keeps the ring flowing while the render thread compiles pipelines; the
+  render thread skips screen-only frames that are already superseded (`stats().framesSkipped`).
+- **One frame per display frame** (`host.js` flush mode): FastRenderer accumulates every `render()` of a frame;
+  `host.flush()` (after each `requestAnimationFrame` callback, or by the driver) sends it once and zeroes word 0, the
+  JavaScriptCore host's frame semantics (passes written at load run in the first frame; deferred releases line up).
+- **Typed uploads.** `upload` carries an element type per array (f32/u16/u32/u8, null), so the main process rebuilds
+  the same `three::Resource` the JavaScriptCore host builds (`fastrender::host::decode_upload`). In contextBridge
+  mode a view into a bigger buffer (a GLB's binary chunk) is sliced first (the bridge copies a view's whole buffer).
+- **Canvas / image textures** (`host.imagePixels`): HTMLCanvasElement, OffscreenCanvas, ImageBitmap, HTMLImageElement,
+  VideoFrame are drawn into one reused 2D `OffscreenCanvas` (`willReadFrequently`) and read with `getImageData`.
+  FastRenderer only asks when `texture.version` changed; ImageBitmaps and loaded `<img>`s are cached per object.
+  Cost: `imageStats` (calls, ms, bytes) in the run's JSON.
+- **Golden screenshots.** `shot(name)` (OP_SHOT through the ring) makes the render thread read the drawable of the
+  next frame back to `<out>/<tag>-<name>.png`: exact pixels, no compositing, no DOM, independent of the screen (the
+  CI runner's display is 1024x768; the window is 1280x800 with `enableLargerThanScreen`). `screencapture` of the
+  window is kept as the proof of compositing (`<tag>-<name>-screen.png`, clipped by the screen).
+- **App** (`host/electron/game/`): `main.js` serves the game from `app://game/` (privileged scheme: fetch, workers,
+  CORS behave as on http; `file://` would not): `/` = the game's `index.html` with its Vite module entry replaced by
+  our bundles, `/__fr/*` = bundles, the rest = the game's `public/`. Remote URLs are refused (webRequest), as in the
+  golden's browser. CSP: `script-src 'self' 'wasm-unsafe-eval' blob:` (no eval). `preload.js` exposes
+  `window.__frNative` (contextBridge by default). `boot.mjs` builds the host, installs it as `globalThis.__fr`, and
+  drives: `world` = 3d-world-objects under the golden's deterministic driver; `city` = the three-city JSC bundle,
+  unchanged. `scripts/bundle-game.mjs` bundles both (same resolution rules as `js/examples/world-objects.build.mjs`,
+  minus the DOM stubs: Electron has the real DOM).
+- **Renderer options** (`startHost(..., rendererJson)`): any fastrender CLI option, e.g.
+  `{"scale": 0.75, "upscale": "temporal", "dynres": 14}`; the drawable follows the layer (bounds x contentsScale).
+
+```bash
+cd host/electron && npm ci && npm run build && node scripts/bundle-game.mjs --world ../../../3d-world-objects
+npx electron game/main.js --kind world --html ../../../3d-world-objects/index.html --assets ../../../3d-world-objects/public --out /tmp/x
+npx electron game/main.js --kind city --out /tmp/x            # three-city; golden = /tmp/x/electron-city-golden.png
+```
+
+### Electron host: numbers
+
+ELECTRON_NUMBERS
+
 ## Spike (Nov 2026)
 
 Code: `host/electron/` (Electron 45.3.2 / Chromium 156 / Node 24, napi-rs 3: `napi` 3.16, `@napi-rs/cli` 3.10.12).
@@ -174,8 +239,9 @@ event-loop gap stayed < 1.5 s over the whole run (the largest gap happens at sta
 - napi-rs 3 has no rest args: `host.js` spreads `upload(kind,id,meta,...arrays)` into `upload(kind,id,metaJson,[Uint8Array])`.
 - Mailbox names: macOS caps POSIX shm/semaphore names at 31 chars (`/fr-<pid>` and `/fr-<pid>-s`). `sem_timedwait` doesn't exist on
   macOS, so the render thread blocks in `sem_wait` and quits via a flag + post.
-- Addon crate is its own Cargo workspace (`host/electron/native`), so the `fastrender` binary build is untouched. It does **not** yet
-  link the `fastrender` crate: the spike renderer is a tiny MSL clear+quads pipeline compiled at runtime.
+- Addon crate is its own Cargo workspace (`host/electron/native`), so the `fastrender` binary build is untouched. In spike mode
+  (`startHost` without `rendererJson`) the renderer is a tiny MSL clear+quads pipeline; fastrender mode links the
+  `fastrender` crate (see "Electron host with the real renderer").
 - `startHost`/the view must be created on the main thread (checked with `MainThreadMarker`).
 
 ### Open risks
@@ -188,9 +254,8 @@ event-loop gap stayed < 1.5 s over the whole run (the largest gap happens at sta
 3. Screen Recording permission for `screencapture` on the runner (a black capture is reported as such, not as a pass).
 4. Sandbox: the preload needs `sandbox: false` (addon loads shm), so the game must be local content. A sandboxed option needs MessagePort transport.
 5. Pacing: rAF (Chromium's vsync) vs the Metal layer's `displaySyncEnabled` give 0-1 frames of skew between DOM UI and 3D.
-6. Resource channel: implemented (ring, back-pressure) but the render thread only validates/hashes; it does not build GPU resources yet. Throughput for tens of MB is bounded by the memcpy + the reader (`upload_100kb` ~170-190 us incl. hashing); a bigger ring or zero-copy for textures is a later tuning step. A ring stalled > 2 s (render thread stuck) makes `upload` throw.
-7. Next step for real rendering: expose `mac`/`mac_three` as a `fastrender` library (`lib.rs`) and call it from the render thread
-   instead of `render_frame`; that refactor was out of scope here. Per-frame `parse_frame` becomes `ThreeScene::frame()`.
+6. Resource channel: implemented (ring, back-pressure); in fastrender mode the main process builds GPU resources from it. Throughput for tens of MB is bounded by the memcpy + the reader (`upload_100kb` ~170-190 us incl. hashing); a bigger ring or zero-copy for textures is a later tuning step. A ring stalled > 2 s (render thread stuck) makes `upload` throw.
+7. ~~Next step for real rendering: a `fastrender` library~~ done: "Electron host with the real renderer" above.
 
 Sources: [Electron memory cage](https://electronjs.org/blog/v8-memory-cage) ·
 [napi no external buffers](https://github.com/nodejs/node/pull/45181) ·
