@@ -5,6 +5,7 @@
 //
 //   node js/test/world-objects.node.mjs <game dir> [--three three|three-r170] [--frames 120] [--search '?mode=world...']
 //        [--mesh-census 30] [--ablate nofarlod] [--json out.json] [--view x,y,z,yaw,pitch] [--dump-programs dir] [--profile] [--matrix-stats] [--ab property]
+//        [--matrix-check N] [--walk vx,vz]
 //
 // --profile        V8's sampling profiler over the measured frames, aggregated in process (no file): top functions by
 //                  self time and the inclusive time of the renderer's stages, in ms per frame
