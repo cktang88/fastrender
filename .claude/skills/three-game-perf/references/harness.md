@@ -263,3 +263,10 @@ Order of work:
 Generalise a script by adding a parameter when the second game arrives; do not fork a copy per game.
 `docs/PORTING.md` and `docs/HOST.md` cover the host choice (Electron for a game that needs DOM, canvas, audio;
 JavaScriptCore for boot + rendering).
+
+## Play the game interactively
+
+`host/electron/scripts/play-world.sh --fps` builds everything and opens the real game on fastrender with real time and
+input (`--webgl` for the same game copy on stock WebGLRenderer, `--renderer '{...}'` for renderer options, `--help`).
+The `` ` `` key toggles an fps / JS ms / GPU ms overlay. Use it to feel a fix and to reproduce hitches the deterministic
+bench cannot (light changes, streaming, entering buildings). Its CI smoke is `.github/workflows/play-smoke.yml`.
