@@ -38,7 +38,7 @@ cargo run --release -- probe        # GPU capabilities
 MTL_HUD_ENABLED=1 cargo run --release   # Apple's Metal performance HUD on top
 ```
 
-Window keys: `1` forward/deferred · `2` memoryless on/off · `3` MetalFX/bilinear · `-`/`=` render scale ·
+Window keys: `1` forward/deferred · `2` memoryless on/off · `3` MetalFX/bilinear · `7` MetalFX temporal/spatial (`--upscale temporal`: jittered, motion from depth, any shader) · `-`/`=` render scale ·
 `4` cached/every-frame shadows · `5` GPU culling · `6` city/voxel · `L`/`K` lights ×2 / ÷2 · `D` dynamic resolution ·
 `V` vsync · `Space` pause camera. Live fps, GPU ms, JS ms and draw count are shown in the title bar.
 
