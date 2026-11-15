@@ -1,0 +1,52 @@
+name: half-precision (scratch)
+# Scratch branch only: the WP10 step of mac.yml alone, because runs on the shared branch are superseded every few
+# minutes. Not for the main branch.
+on: [push]
+jobs:
+  half:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+      - name: toolchain
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_26.6.app"
+          rustup toolchain install
+          brew install glslang spirv-cross
+      - name: build
+        run: |
+          cargo build --release
+          (cd js && npm ci --silent)
+          node js/build.mjs js/examples/three-city.entry.mjs js/dist/three-city.js
+          (cd js && node --import ./test/three-alias.mjs test/dump-programs.mjs ../city-programs)
+      - name: the real game
+        continue-on-error: true
+        run: |
+          WO_BASE=073aa9eae0ba86cecb16970162593281714214e3
+          git init -q ../3d-world-objects && git -C ../3d-world-objects fetch -q --depth 1 https://github.com/cktang88/3d-world-objects "$WO_BASE" && git -C ../3d-world-objects checkout -q FETCH_HEAD
+          for p in patches/3d-world-objects-000*.patch; do
+            git -C ../3d-world-objects -c user.name=ci -c user.email=ci@localhost am -q "$PWD/$p"
+          done
+          node js/examples/world-objects.build.mjs ../3d-world-objects js/dist/world-objects.js --target jsc --three three
+          (cd js && node test/world-objects.node.mjs "$GITHUB_WORKSPACE/../3d-world-objects" --three three --frames 3 --dump-programs "$GITHUB_WORKSPACE/wo-programs" > "$GITHUB_WORKSPACE/wo-node.txt" 2>&1) || true
+          ls wo-programs | wc -l
+      - name: half precision (WP10) - compile, goldens, GPU ms per mode
+        run: |
+          rc=0; bash .github/half-precision.sh > half-precision.log 2>&1 || rc=$?
+          cat half-precision.txt
+          echo "---- errors"; cat half-metal-errors.txt 2>/dev/null | head -80
+          echo "---- log"; tail -30 half-precision.log
+          for m in brdf lit all; do echo "---- $m refusals"; grep -h "stays 32-bit" half-xlat-$m-*.txt | sort | uniq -c | head; done
+          { echo '```'; cat half-precision.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$rc" = 0 ]
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: half
+          path: |
+            half-*.png
+            half-*.txt
+            half-*.json
