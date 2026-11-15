@@ -1,0 +1,222 @@
+{
+ "entryPoints": [
+  {
+   "name": "main",
+   "mode": "frag"
+  }
+ ],
+ "types": {
+  "_34": {
+   "name": "DirectionalLight",
+   "members": [
+    {
+     "name": "direction",
+     "type": "vec3"
+    },
+    {
+     "name": "color",
+     "type": "vec3"
+    }
+   ]
+  },
+  "_36": {
+   "name": "IncidentLight",
+   "members": [
+    {
+     "name": "color",
+     "type": "vec3"
+    },
+    {
+     "name": "direction",
+     "type": "vec3"
+    },
+    {
+     "name": "visible",
+     "type": "bool"
+    }
+   ]
+  },
+  "_54": {
+   "name": "PhysicalMaterial",
+   "members": [
+    {
+     "name": "diffuseColor",
+     "type": "vec3"
+    },
+    {
+     "name": "roughness",
+     "type": "float"
+    },
+    {
+     "name": "specularColor",
+     "type": "vec3"
+    },
+    {
+     "name": "specularF90",
+     "type": "float"
+    },
+    {
+     "name": "dispersion",
+     "type": "float"
+    }
+   ]
+  },
+  "_80": {
+   "name": "ReflectedLight",
+   "members": [
+    {
+     "name": "directDiffuse",
+     "type": "vec3"
+    },
+    {
+     "name": "directSpecular",
+     "type": "vec3"
+    },
+    {
+     "name": "indirectDiffuse",
+     "type": "vec3"
+    },
+    {
+     "name": "indirectSpecular",
+     "type": "vec3"
+    }
+   ]
+  },
+  "_483": {
+   "name": "DirectionalLight",
+   "members": [
+    {
+     "name": "direction",
+     "type": "vec3",
+     "offset": 0
+    },
+    {
+     "name": "color",
+     "type": "vec3",
+     "offset": 16
+    }
+   ]
+  },
+  "_485": {
+   "name": "gl_DefaultUniformBlock",
+   "members": [
+    {
+     "name": "viewMatrix",
+     "type": "mat4",
+     "offset": 0,
+     "matrix_stride": 16
+    },
+    {
+     "name": "cameraPosition",
+     "type": "vec3",
+     "offset": 64
+    },
+    {
+     "name": "isOrthographic",
+     "type": "uint",
+     "offset": 76
+    },
+    {
+     "name": "uGrime",
+     "type": "float",
+     "offset": 80
+    },
+    {
+     "name": "diffuse",
+     "type": "vec3",
+     "offset": 96
+    },
+    {
+     "name": "emissive",
+     "type": "vec3",
+     "offset": 112
+    },
+    {
+     "name": "roughness",
+     "type": "float",
+     "offset": 124
+    },
+    {
+     "name": "metalness",
+     "type": "float",
+     "offset": 128
+    },
+    {
+     "name": "opacity",
+     "type": "float",
+     "offset": 132
+    },
+    {
+     "name": "fogColor",
+     "type": "vec3",
+     "offset": 144
+    },
+    {
+     "name": "fogNear",
+     "type": "float",
+     "offset": 156
+    },
+    {
+     "name": "fogFar",
+     "type": "float",
+     "offset": 160
+    },
+    {
+     "name": "receiveShadow",
+     "type": "uint",
+     "offset": 164
+    },
+    {
+     "name": "ambientLightColor",
+     "type": "vec3",
+     "offset": 176
+    },
+    {
+     "name": "directionalLights",
+     "type": "_483",
+     "array": [
+      1
+     ],
+     "array_size_is_literal": [
+      true
+     ],
+     "offset": 192,
+     "array_stride": 32
+    }
+   ]
+  }
+ },
+ "inputs": [
+  {
+   "type": "vec3",
+   "name": "vViewPosition",
+   "location": 0
+  },
+  {
+   "type": "vec3",
+   "name": "vNormal",
+   "location": 2
+  },
+  {
+   "type": "float",
+   "name": "vFogDepth",
+   "location": 1
+  }
+ ],
+ "outputs": [
+  {
+   "type": "vec4",
+   "name": "pc_fragColor",
+   "location": 0
+  }
+ ],
+ "ubos": [
+  {
+   "type": "_485",
+   "name": "gl_DefaultUniformBlock",
+   "block_size": 224,
+   "set": 0,
+   "binding": 0
+  }
+ ]
+}

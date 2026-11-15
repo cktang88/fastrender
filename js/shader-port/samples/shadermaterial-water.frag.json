@@ -1,0 +1,72 @@
+{
+ "entryPoints": [
+  {
+   "name": "main",
+   "mode": "frag"
+  }
+ ],
+ "types": {
+  "_13": {
+   "name": "gl_DefaultUniformBlock",
+   "members": [
+    {
+     "name": "viewMatrix",
+     "type": "mat4",
+     "offset": 0,
+     "matrix_stride": 16
+    },
+    {
+     "name": "cameraPosition",
+     "type": "vec3",
+     "offset": 64
+    },
+    {
+     "name": "isOrthographic",
+     "type": "uint",
+     "offset": 76
+    },
+    {
+     "name": "uColor",
+     "type": "vec3",
+     "offset": 80
+    }
+   ]
+  }
+ },
+ "inputs": [
+  {
+   "type": "float",
+   "name": "vWave",
+   "location": 1
+  },
+  {
+   "type": "vec2",
+   "name": "vUv",
+   "location": 0
+  }
+ ],
+ "outputs": [
+  {
+   "type": "vec4",
+   "name": "pc_fragColor",
+   "location": 0
+  }
+ ],
+ "textures": [
+  {
+   "type": "sampler2D",
+   "name": "uMap",
+   "set": 0,
+   "binding": 1
+  }
+ ],
+ "ubos": [
+  {
+   "type": "_13",
+   "name": "gl_DefaultUniformBlock",
+   "block_size": 92,
+   "set": 0,
+   "binding": 0
+  }
+ ]
+}

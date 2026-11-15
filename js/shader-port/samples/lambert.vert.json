@@ -1,0 +1,131 @@
+{
+ "entryPoints": [
+  {
+   "name": "main",
+   "mode": "vert"
+  }
+ ],
+ "types": {
+  "_19": {
+   "name": "gl_DefaultUniformBlock",
+   "members": [
+    {
+     "name": "modelMatrix",
+     "type": "mat4",
+     "offset": 0,
+     "matrix_stride": 16
+    },
+    {
+     "name": "modelViewMatrix",
+     "type": "mat4",
+     "offset": 64,
+     "matrix_stride": 16
+    },
+    {
+     "name": "projectionMatrix",
+     "type": "mat4",
+     "offset": 128,
+     "matrix_stride": 16
+    },
+    {
+     "name": "viewMatrix",
+     "type": "mat4",
+     "offset": 192,
+     "matrix_stride": 16
+    },
+    {
+     "name": "normalMatrix",
+     "type": "mat3",
+     "offset": 256,
+     "matrix_stride": 16
+    },
+    {
+     "name": "cameraPosition",
+     "type": "vec3",
+     "offset": 304
+    },
+    {
+     "name": "isOrthographic",
+     "type": "uint",
+     "offset": 316
+    }
+   ]
+  },
+  "_52": {
+   "name": "gl_PerVertex",
+   "members": [
+    {
+     "name": "gl_Position",
+     "type": "vec4"
+    },
+    {
+     "name": "gl_PointSize",
+     "type": "float"
+    },
+    {
+     "name": "gl_ClipDistance",
+     "type": "float",
+     "array": [
+      1
+     ],
+     "array_size_is_literal": [
+      true
+     ]
+    },
+    {
+     "name": "gl_CullDistance",
+     "type": "float",
+     "array": [
+      1
+     ],
+     "array_size_is_literal": [
+      true
+     ]
+    }
+   ]
+  }
+ },
+ "inputs": [
+  {
+   "type": "vec3",
+   "name": "normal",
+   "location": 1
+  },
+  {
+   "type": "vec3",
+   "name": "position",
+   "location": 0
+  },
+  {
+   "type": "vec2",
+   "name": "uv",
+   "location": 2
+  }
+ ],
+ "outputs": [
+  {
+   "type": "vec3",
+   "name": "vNormal",
+   "location": 2
+  },
+  {
+   "type": "vec3",
+   "name": "vViewPosition",
+   "location": 0
+  },
+  {
+   "type": "float",
+   "name": "vFogDepth",
+   "location": 1
+  }
+ ],
+ "ubos": [
+  {
+   "type": "_19",
+   "name": "gl_DefaultUniformBlock",
+   "block_size": 320,
+   "set": 0,
+   "binding": 0
+  }
+ ]
+}

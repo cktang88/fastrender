@@ -1,0 +1,105 @@
+{
+ "entryPoints": [
+  {
+   "name": "main",
+   "mode": "frag"
+  }
+ ],
+ "types": {
+  "_76": {
+   "name": "gl_DefaultUniformBlock",
+   "members": [
+    {
+     "name": "viewMatrix",
+     "type": "mat4",
+     "offset": 0,
+     "matrix_stride": 16
+    },
+    {
+     "name": "cameraPosition",
+     "type": "vec3",
+     "offset": 64
+    },
+    {
+     "name": "isOrthographic",
+     "type": "uint",
+     "offset": 76
+    },
+    {
+     "name": "diffuse",
+     "type": "vec3",
+     "offset": 80
+    },
+    {
+     "name": "opacity",
+     "type": "float",
+     "offset": 92
+    },
+    {
+     "name": "fogColor",
+     "type": "vec3",
+     "offset": 96
+    },
+    {
+     "name": "fogNear",
+     "type": "float",
+     "offset": 108
+    },
+    {
+     "name": "fogFar",
+     "type": "float",
+     "offset": 112
+    }
+   ]
+  },
+  "_93": {
+   "name": "ReflectedLight",
+   "members": [
+    {
+     "name": "directDiffuse",
+     "type": "vec3"
+    },
+    {
+     "name": "directSpecular",
+     "type": "vec3"
+    },
+    {
+     "name": "indirectDiffuse",
+     "type": "vec3"
+    },
+    {
+     "name": "indirectSpecular",
+     "type": "vec3"
+    }
+   ]
+  }
+ },
+ "inputs": [
+  {
+   "type": "float",
+   "name": "vFogDepth",
+   "location": 1
+  },
+  {
+   "type": "vec3",
+   "name": "vNormal",
+   "location": 0
+  }
+ ],
+ "outputs": [
+  {
+   "type": "vec4",
+   "name": "pc_fragColor",
+   "location": 0
+  }
+ ],
+ "ubos": [
+  {
+   "type": "_76",
+   "name": "gl_DefaultUniformBlock",
+   "block_size": 116,
+   "set": 0,
+   "binding": 0
+  }
+ ]
+}

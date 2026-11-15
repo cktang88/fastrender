@@ -19,6 +19,8 @@ jobs:
         run: cargo build --release
       - name: offline shader compile (Apple metal compiler)
         run: xcrun -sdk macosx metal -std=metal3.0 -c shaders/fastrender.metal -o /tmp/fr.air
+      - name: auto-translated three.js shaders compile with Apple's Metal compiler
+        run: for f in js/shader-port/samples/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /tmp/x.air && echo "ok $f"; done
       - name: probe
         run: ./target/release/fastrender probe
       - name: selftest
