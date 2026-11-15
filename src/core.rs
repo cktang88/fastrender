@@ -63,6 +63,8 @@ pub struct Config {
     pub rounds: u32,
     /// bench mode: save the final frame as PNG
     pub shot: Option<String>,
+    /// render every frame at this time (golden images): camera and animation frozen
+    pub fixed_t: Option<f32>,
 }
 
 impl Default for Config {
@@ -89,6 +91,7 @@ impl Default for Config {
             seed: 20261115,
             rounds: 3,
             shot: None,
+            fixed_t: None,
         }
     }
 }
@@ -141,6 +144,7 @@ impl Config {
                 "seed" => self.seed = num(v)? as u64,
                 "rounds" => self.rounds = (num(v)? as u32).max(1),
                 "shot" => self.shot = Some(v.clone()),
+                "time" => self.fixed_t = Some(num(v)? as f32),
                 _ => return Err(format!("unknown option --{k}")),
             }
             i += 2;

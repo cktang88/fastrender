@@ -40,6 +40,10 @@ jobs:
           ./target/release/fastrender bench --three js/dist/three-city.js --upscale metalfx --scale 0.5 --size 1280x800 --frames 60 --warmup 5 --shot shot-three-city.png
           ./target/release/fastrender bench --three js/dist/three-city.js --upscale bilinear --scale 1 --size 1280x800 --frames 60 --warmup 5 --shot shot-three-city-native.png
           ./target/release/fastrender bench --script js/examples/boxes.js --props 20000 --path forward --upscale metalfx --scale 0.5 --size 1280x800 --frames 60 --warmup 5 --shot shot-script.png
+      - name: golden image (native vs browser three.js reference, same scene/time/size)
+        run: |
+          ./target/release/fastrender bench --three js/dist/three-city.js --time 1 --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 2 --shot golden-native-t1.png
+          node js/golden/diff.mjs js/golden/ref-t1.png golden-native-t1.png golden-diff-t1.png
       - name: hypothesis matrix (paravirtual GPU, timings NOT representative)
         run: |
           ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000 --rounds 1

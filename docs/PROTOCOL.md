@@ -26,6 +26,7 @@ Materials are deduplicated by content. Texture ids inside a material refer to up
 | 2 LIGHTS | n, then n × 16: kind (1 ambient, 2 hemisphere, 3 directional, 4 point, 5 spot), castShadow, colour×intensity rgb, position xyz, direction xyz, distance, decay, then ground rgb (hemisphere) or angle, penumbra, 0 |
 | 3 FOG | rgb, isExp2, density or near, 0 or far |
 | 4 BACKGROUND | rgb, alpha |
+| 6 TONEMAP | three.js `toneMapping` constant (0 none, 4 ACESFilmic, 6 AgX, 7 neutral; others → ACES), `toneMappingExposure` |
 | 5 DRAWS | n, then n × 20: geometry id, material id, flags, instance-buffer id, index start, index count, instance count, renderOrder, 3×4 world matrix rows |
 
 Draw flags: 1 cast shadow, 2 receive shadow, 4 transparent, 8 double-sided, 16 back side, 32 instanced, 64 vertex colours,

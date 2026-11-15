@@ -17,7 +17,7 @@
 
 export const PROTOCOL = 2;
 const MAGIC = 0x46524d32; // 'FRM2'
-export const OP = { CAMERA: 1, LIGHTS: 2, FOG: 3, BACKGROUND: 4, DRAWS: 5, STATS: 6 };
+export const OP = { CAMERA: 1, LIGHTS: 2, FOG: 3, BACKGROUND: 4, DRAWS: 5, TONEMAP: 6 };
 export const KIND = { GEOMETRY: 1, TEXTURE: 2, MATERIAL: 3, INSTANCES: 4 };
 // draw flags
 export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256 };
@@ -217,6 +217,8 @@ export class FastRenderer {
     u[w++] = OP.BACKGROUND; u[w++] = 4;
     f[w++] = bg ? bg.r : this._clearColor[0]; f[w++] = bg ? bg.g : this._clearColor[1]; f[w++] = bg ? bg.b : this._clearColor[2]; f[w++] = bg ? 1 : this._clearAlpha;
     if (scene.background && !bg) this._unsupported('non-colour scene.background');
+    // three.js tone mapping constants: 0 none, 1 linear, 2 reinhard, 3 cineon, 4 ACESFilmic, 6 AgX, 7 neutral
+    u[w++] = OP.TONEMAP; u[w++] = 2; u[w++] = this.toneMapping | 0; f[w++] = this.toneMappingExposure;
     if (scene.fog) {
       const fg = scene.fog;
       u[w++] = OP.FOG; u[w++] = 6;

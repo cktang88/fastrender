@@ -95,7 +95,17 @@ export function createCity({ blocks = 6, windows = true } = {}) {
     lamps.forEach((l, i) => (l.intensity = 30 + 10 * Math.sin(t * 2 + i)));
   };
   update(0);
-  return { scene, camera, update, stats: { buildings: scene.children.filter((o) => o.isMesh && o.geometry === box).length, windows: winMatrices.length } };
+  // renderer settings shared by the native and browser entries (tone mapping must match for golden diffs)
+  const configure = (renderer) => {
+    renderer.toneMapping = 4; // THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1.0;
+    if (renderer.shadowMap) renderer.shadowMap.enabled = true;
+  };
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -150;
+  sun.shadow.camera.right = sun.shadow.camera.top = 150;
+  sun.shadow.camera.far = 400;
+  sun.shadow.mapSize.set(2048, 2048);
+  return { scene, camera, update, configure, stats: { buildings: scene.children.filter((o) => o.isMesh && o.geometry === box).length, windows: winMatrices.length } };
 }
 
 function mulberry32(a) {

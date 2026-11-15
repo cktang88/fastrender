@@ -10,6 +10,7 @@ const OP_LIGHTS: u32 = 2;
 const OP_FOG: u32 = 3;
 const OP_BACKGROUND: u32 = 4;
 const OP_DRAWS: u32 = 5;
+const OP_TONEMAP: u32 = 6;
 pub const DRAW_WORDS: usize = 20;
 pub const LIGHT_WORDS: usize = 16;
 
@@ -88,6 +89,8 @@ pub struct Frame<'a> {
     pub fog: Option<Fog>,
     pub lights: &'a [ThreeLight],
     pub draws: &'a [Draw],
+    /// three.js toneMapping constant and toneMappingExposure
+    pub tonemap: (u32, f32),
 }
 
 fn view<T>(words: &[u32], count: usize, stride: usize) -> Result<&[T], String> {
@@ -123,6 +126,7 @@ pub fn decode(words: &[u32]) -> Result<Frame<'_>, String> {
             }
             OP_BACKGROUND if n >= 4 => out.background = [f(p[0]), f(p[1]), f(p[2]), f(p[3])],
             OP_FOG if n >= 6 => out.fog = Some(Fog { color: [f(p[0]), f(p[1]), f(p[2])], exp2: f(p[3]) > 0.5, a: f(p[4]), b: f(p[5]) }),
+            OP_TONEMAP if n >= 2 => out.tonemap = (p[0], f(p[1])),
             OP_LIGHTS => {
                 let count = *p.first().ok_or("lights: no count")? as usize;
                 if n != 1 + count * LIGHT_WORDS {

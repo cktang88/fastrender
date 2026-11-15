@@ -89,6 +89,7 @@ pub struct ThreeView {
     pub fog: Option<three::Fog>,
     /// direction towards the shadow-casting directional light (if any)
     pub sun: Option<Vec3>,
+    pub tonemap: (u32, f32),
 }
 
 pub struct ThreeScene {
@@ -186,7 +187,7 @@ impl ThreeScene {
             draws: Vec::new(),
             lights: Vec::new(),
             visible: Vec::new(),
-            view: ThreeView { view: Mat4::IDENTITY, proj: Mat4::IDENTITY, cam_pos: Vec3::ZERO, background: [0.0, 0.0, 0.0, 1.0], fog: None, sun: None },
+            view: ThreeView { view: Mat4::IDENTITY, proj: Mat4::IDENTITY, cam_pos: Vec3::ZERO, background: [0.0, 0.0, 0.0, 1.0], fog: None, sun: None, tonemap: (0, 1.0) },
             error: None,
             unsupported_resources: 0,
             last_t: 0.0,
@@ -213,6 +214,7 @@ impl ThreeScene {
             self.view.cam_pos = Vec3::from(f.cam_pos);
             self.view.background = f.background;
             self.view.fog = f.fog;
+            self.view.tonemap = f.tonemap;
             self.lights.clear();
             self.lights.extend_from_slice(&f.lights[..f.lights.len().min(MAX_LIGHTS)]);
             self.draws.clear();

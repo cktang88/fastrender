@@ -80,11 +80,13 @@ struct Env {
     fog2: [f32; 4],
     /// final clear colour of the forward pass (display-referred)
     clear: [f64; 3],
+    /// three.js scenes: tone mapping mode (three's constants) and exposure
+    tone: (u32, f32),
 }
 
 impl Default for Env {
     fn default() -> Self {
-        Env { sun: SUN.normalize(), sun_intensity: 1.8, fog: FOG, fog_density: FOG_DENSITY, fog2: [0.0; 4], clear: [tonemap(FOG[0]), tonemap(FOG[1]), tonemap(FOG[2])] }
+        Env { sun: SUN.normalize(), sun_intensity: 1.8, fog: FOG, fog_density: FOG_DENSITY, fog2: [0.0; 4], clear: [tonemap(FOG[0]), tonemap(FOG[1]), tonemap(FOG[2])], tone: (0, 1.0) }
     }
 }
 
@@ -411,7 +413,7 @@ impl Content {
             Content::Script { env, .. } => *env,
             Content::Three(s) => {
                 let v = &s.view;
-                let mut e = Env { sun: v.sun.and_then(|d| d.try_normalize()).unwrap_or(SUN.normalize()), ..Env::default() };
+                let mut e = Env { sun: v.sun.and_then(|d| d.try_normalize()).unwrap_or(SUN.normalize()), tone: v.tonemap, ..Env::default() };
                 let bg = v.background;
                 e.clear = [linear_to_srgb(bg[0]), linear_to_srgb(bg[1]), linear_to_srgb(bg[2])];
                 match v.fog {
@@ -821,13 +823,14 @@ impl Renderer {
             view_proj: vp.to_cols_array_2d(),
             inv_view_proj: vp.inverse().to_cols_array_2d(),
             shadow_vp: self.shadow_vp.to_cols_array_2d(),
-            cam_pos: [eye.x, eye.y, eye.z, t],
+            // three.js scenes: w carries toneMappingExposure (fs_three); others: time
+            cam_pos: [eye.x, eye.y, eye.z, if matches!(self.content, Content::Three(_)) { e.tone.1 } else { t }],
             sun_dir: [sun.x, sun.y, sun.z, e.sun_intensity],
             fog: [e.fog[0], e.fog[1], e.fog[2], e.fog_density],
             frustum: frustum_planes(vp).map(|p| p.to_array()),
             counts: [n as u32, self.n_lights as u32, 0, 0],
             viewport: [cw as f32, ch as f32, self.targets.alloc.0 as f32, self.targets.alloc.1 as f32],
-            fog2: e.fog2,
+            fog2: [e.fog2[0], e.fog2[1], e.fog2[2], e.tone.0 as f32],
         };
         let reset = MTLDrawIndexedPrimitivesIndirectArguments { indexCount: 36, instanceCount: 0, indexStart: 0, baseVertex: 0, baseInstance: 0 };
         let f = &self.frames[slot];
@@ -1192,8 +1195,9 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
         Err(e) => return skip(e),
     };
     let dt = 1.0 / 60.0;
+    let at = |i: u32| cfg.fixed_t.unwrap_or(i as f32 * dt);
     for i in 0..cfg.warmup {
-        r.render(i as f32 * dt, || None);
+        r.render(at(i), || None);
     }
     r.wait_idle();
     r.take_gpu_times();
@@ -1203,7 +1207,7 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     let mut gpu = Stats::default();
     let mut js = Stats::default();
     for i in 0..cfg.frames {
-        r.render((cfg.warmup + i) as f32 * dt, || None);
+        r.render(at(cfg.warmup + i), || None);
         if let Some(ms) = r.script_ms() { js.push(ms); }
         if cfg.log_every_s > 0.0 && last_log.elapsed().as_secs_f32() >= cfg.log_every_s {
             let done = i as usize + 1;
