@@ -24,3 +24,31 @@
 - On M2 Airs, AAA ports (Death Stranding, RE Village) are reported at about 30–60 fps at about 1080p with MetalFX on balanced settings. These are user reports.
 - An M4 Pro, with about 2.5× the M2's GPU, runs Death Stranding at 92 fps at 1440p Very High with MetalFX Quality.
 - The NYC scene's shading is lighter than those AAA titles, but its geometry and draw counts are high.
+
+---
+
+# After adversarial review: final estimates and ranking
+
+An independent reviewer with web search attacked the table above. What changed:
+
+- **No source gives sustained fps on an M2 Air for any of these stacks.** Every number is inference, and the error bars (about ±15 fps) overlap. The ranking is about where each stack's ceiling sits, not a measured order.
+- **Native Metal was given its best case while the rivals got hedges.** The "60 capped / 75–110 uncapped" figure ignored binning cost at about 2M triangles and fanless throttling (M2 Air: about 13% CPU loss in sustained Cinebench loops). Revised to **45–60**.
+- **Godot does expose MetalFX.** It merged "Metal: Add MetalFX upscaling support" in January 2025: spatial and temporal modes, Metal driver only. Its Mobile renderer is TBDR-oriented, and 4.7 uses Metal 4 on macOS 26. So Godot **ties** native in expected fps.
+- **Stock Unity does not ship MetalFX.** Only third-party plugins do. Revised to **40–55**.
+- **The Vulkan top end was incoherent,** since it exceeded native's own estimate. Revised to **40–60**.
+- **The browser can get much of the upscaling win with FSR1 or TAAU in a shader.** The fps gap between browser and native is smaller than "no MetalFX" suggests. The no-tile-memory penalty is real but unmeasured.
+- **Deferred vs forward is not settled for a geometry-heavy scene.** It must be benchmarked, not assumed.
+
+| Rank | Option | Est. sustained fps (M2 Air, NYC-class scene) | Confidence |
+|---|---|---|---|
+| 1 (tie) | Native Metal 4, TBDR-aware, with MetalFX | 45–60 | low |
+| 1 (tie) | Godot 4.5+, Metal backend, Mobile renderer with MetalFX | 45–60 | low |
+| 3 | Unity 6 URP on Metal (no stock MetalFX) | 40–55 | low |
+| 4 | Vulkan via KosmicKrisp or MoltenVK | 40–60 | low |
+| 5 | Bevy / wgpu | 35–55 | low |
+| 6 | three.js tuned, WebGL2 with FSR1 | 35–50 | low |
+| 7 | three.js WebGPURenderer | 30–45 | low |
+| 8 | Unreal 5 | 20–35 | low |
+| — | current 3d-world-objects at `quality=ultra` | 10–20, with hitches | medium (code audit) |
+
+**Decision:** build native Metal first (fastrender). It has the highest ceiling and the user explicitly wants a Mac-specific implementation. It is built as a **benchmark harness** that turns the contested claims into measurements: memoryless vs stored, forward vs single-pass deferred, render scale with MetalFX vs bilinear, cached shadows, GPU culling. The cheapest next experiment is the reviewer's suggestion: build the same scene in Godot Mobile with MetalFX and compare fps on the same Air.
