@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000003 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 16:00:00 +0000
+Subject: [PATCH] fastrender: per-instance culling hints for the fleet and the
+ windows (userData.frInstanceCull)
+
+FastRenderer draws only the instances of an InstancedMesh that can be on
+screen when it knows their bounds. Two kinds of mesh hide that from it:
+- the vehicle fleet (frustumCulled = false; placed by instanceMatrix alone):
+  frInstanceCull = true
+- window parts (the vertex stage adds aAnchor * aSize): frInstanceCull = the
+  radius an instance stays within
+three's WebGLRenderer ignores the field. Street view: 3.1 M of the 5.1 M
+triangles per frame are in these meshes, about a quarter of them in view.
+---
+ src/nyc/buildings-win.ts | 7 +++++++
+ src/nyc/vehicleFleet.ts  | 3 +++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/src/nyc/buildings-win.ts b/src/nyc/buildings-win.ts
+--- a/src/nyc/buildings-win.ts
++++ b/src/nyc/buildings-win.ts
+@@ -581,6 +581,13 @@
+       im.receiveShadow = true;
+       if (shadow) im.customDepthMaterial = depthMat;
+       im.computeBoundingSphere();
++      // fastrender (FastRenderer, docs/notes/gpu-cost.md): the vertex stage places a part at aAnchor (0..1) * aSize +
++      // position, so an instance stays within its geometry's radius + the opening's diagonal of the geometry sphere's
++      // centre. With that bound the native renderer draws only the windows in view (a block's windows are one mesh)
++      let reach = 0;
++      for (const s of items) reach = Math.max(reach, Math.hypot(s.w, s.h));
++      if (!im.geometry.boundingSphere) im.geometry.computeBoundingSphere();
++      im.userData.frInstanceCull = im.geometry.boundingSphere!.radius + reach;
+       im.userData.owned = true;
+       to.add(im);
+     };
+diff --git a/src/nyc/vehicleFleet.ts b/src/nyc/vehicleFleet.ts
+--- a/src/nyc/vehicleFleet.ts
++++ b/src/nyc/vehicleFleet.ts
+@@ -796,6 +796,9 @@
+       const cap = Math.max(16, (this.mesh?.instanceMatrix.count ?? 8) * 2);
+       const next = new THREE.InstancedMesh(this.geo, this.mat, cap);
+       next.frustumCulled = false; // instances span the whole neighbourhood; the GPU culls the few off-screen
++      // fastrender (FastRenderer, docs/notes/gpu-cost.md): cars are placed by instanceMatrix alone, so the native
++      // renderer may draw only the instances in view (most of the fleet is behind the camera or around a corner)
++      next.userData.frInstanceCull = true;
+       next.castShadow = this.shadow;
+       next.userData.owned = false;
+       if (this.mesh) {
+-- 
+2.43.0
+

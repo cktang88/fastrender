@@ -17,11 +17,14 @@ Details, tables and the Air command: docs/notes/gpu-cost.md.
     8 12 16...) and shrink after 120 frames. Lit programs: `main()` 209 -> 110 lines, 29 -> 2 BRDF evaluations, no
     cube shadow lookup. `render()` JS in node 20.5 -> 13.3 ms. Price: a place that switches lights on compiles new
     variants once (the game's padding avoided that).
-  - Instanced draws draw only the runs of instances in view (base instance, buffers untouched): 3.68 -> 1.23 M
-    instanced triangles in 791 runs (node estimate), frame 5.07 -> 2.62 M.
+  - Instanced draws draw only the runs of instances in view (base instance, buffers untouched). By itself the
+    renderer may do it for 0.29 M triangles here; the fleet (`frustumCulled = false`) and the window parts (placed
+    by the vertex stage from `aSize`) need the game's word: `userData.frInstanceCull`, set by
+    `patches/3d-world-objects-0003`. With it 3.54 -> 1.14 M instanced triangles in 833 runs, frame 5.07 -> 2.66 M
+    (node estimate).
   - Draws that can discard go after the other opaque draws, nearest first (89 of 1427 here).
 - **Diagnostics**: `scripts/gpu-ablate.sh` rows `alllights` (the frame before), `name@N` (FASTRENDER_V3_DEBUG: 512
-  discard order, 1024 no discard draws, 2048 instanced draws whole, 4 no instanced draws), `[census]` lines; the
+  discard order, 1024 no discard draws, 2048 / 4096 instanced draws whole (all / the hinted ones), 4 no instanced draws), `[census]` lines; the
   bench prints draws per pass and instance runs; CI annotates an A/B of the same rows.
 - **Verified**: `js` tests (r187 + r170, new: trimLights), `cargo test` (new: instance runs, discard key), type-check
   for `aarch64-apple-darwin`. **Not verified at the time of writing**: the macOS goldens and the CI A/B for these

@@ -193,6 +193,8 @@ struct Inst {
     colors: Option<Buffer>,
     /// instances in `cols`
     count: usize,
+    /// `InstancesMeta::cull`: the game vouches for per-instance bounds (Some(0): the geometry's radius, else this one)
+    hint: Option<f32>,
     /// per-instance bounding spheres in the object's space for the geometry (id, sphere) they were last drawn with
     /// (`bindlist::instance_spheres`; built on first use, gone with the upload that replaces these matrices)
     cull: Option<(u32, [f32; 4], Vec<[f32; 4]>)>,
@@ -313,8 +315,9 @@ pub struct ThreeScene {
     /// FASTRENDER_V3_DEBUG bits (bisecting on CI): 1 shadow slots bind the lit texture, 2 no v3 shadow pass,
     /// 4 no instanced draws, 8 no transparent draws, 16 neutral textures only, 32 Lambert only, 64 no textures bound,
     /// 512 discarding opaque draws stay in state order (not after the others, front to back), 1024 no discarding
-    /// opaque draws, 2048 instanced draws are not split by the frustum (512 / 1024 / 2048 / 8 / 4: GPU cost
-    /// attribution, scripts/gpu-ablate.sh)
+    /// opaque draws, 2048 instanced draws are not split by the frustum, 4096 only those the game vouches for
+    /// (`userData.frInstanceCull`) are not (512 / 1024 / 2048 / 4096 / 8 / 4: GPU cost attribution,
+    /// scripts/gpu-ablate.sh)
     dbg: u32,
     /// FASTRENDER_V3_MAX_DRAWS: draw only the first n v3 draws of the main pass (bisecting)
     max_draws: usize,
@@ -796,15 +799,23 @@ impl ThreeScene {
                     continue;
                 }
             }
-            // An InstancedMesh three would frustum-cull as a whole (frustumCulled, so its vertex stage stays inside
-            // instanceMatrix x the geometry's bounds: the assumption three's own test makes): only the instances that
-            // can be on screen are drawn, as runs of consecutive instances (base instance + count; the buffers stay
-            // as they are). Off-screen instances cost vertex shading and tiling of every triangle otherwise.
+            // An InstancedMesh whose instances are known to stay inside instanceMatrix x the geometry's bounds: only
+            // the instances that can be on screen are drawn, as runs of consecutive instances (base instance + count;
+            // the buffers stay as they are). Off-screen instances cost vertex shading and tiling of every triangle
+            // otherwise. Known = three would frustum-cull the mesh as a whole on those bounds (frustumCulled) and the
+            // geometry has no per-instance attribute a vertex stage could place the instance with; or the game says
+            // so (`userData.frInstanceCull`, `Inst::hint`), optionally with its own radius.
             runs.clear();
             let mut split = false;
             let reads_instance_id = self.mats3.get(&d.material).and_then(|m| self.progs.progs.get(&m.meta.program)).is_some_and(|p| p.instance_id);
-            if d.flags & (flag::INSTANCED | flag::NO_CULL | flag::BATCH) == flag::INSTANCED && d.instance_count >= INSTANCE_CULL_MIN && !reads_instance_id && self.dbg & 2048 == 0 {
-                if let Some(inst) = self.insts.get_mut(&d.instances) {
+            if d.flags & (flag::INSTANCED | flag::BATCH) == flag::INSTANCED && d.instance_count >= INSTANCE_CULL_MIN && !reads_instance_id && self.dbg & 2048 == 0 {
+                let (plain, hints) = (d.flags & flag::NO_CULL == 0 && g.inst_cap.is_none(), self.dbg & 4096 == 0);
+                if let Some(inst) = self.insts.get_mut(&d.instances).filter(|inst| plain || (hints && inst.hint.is_some())) {
+                    // the game's radius replaces the geometry's
+                    let s = match inst.hint {
+                        Some(radius) if radius > 0.0 => [s[0], s[1], s[2], radius],
+                        _ => s,
+                    };
                     let n = (d.instance_count as usize).min(inst.count).min(g.inst_cap.unwrap_or(usize::MAX));
                     if !matches!(&inst.cull, Some((geo, sphere, _)) if *geo == d.geometry && *sphere == s) {
                         // SAFETY: `cols` is a shared-storage buffer of `count` column-major 4x4 float matrices (upload_instances)

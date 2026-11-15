@@ -754,6 +754,10 @@ pub struct InstancesMeta {
     /// otherwise 3x4 rows (12 floats per instance, the v2 layout)
     #[serde(default)]
     pub mat4: bool,
+    /// the game's promise (`mesh.userData.frInstanceCull`) that every instance stays inside instanceMatrix x a
+    /// sphere around the geometry's bounding-sphere centre: 0 = the geometry's own radius, > 0 = this radius
+    #[serde(default)]
+    pub cull: Option<f32>,
 }
 
 /// RENDER_TARGET (kind 5) meta: a three render target; its textures keep their own texture ids, so a material

@@ -38,7 +38,7 @@ its preprocessor conditionals (three has already substituted the light counts an
 | shadow lookups per lit fragment | 2 directional + **1 point cube** (a dark 16x16 padding light) | 2 directional |
 | direct-light BRDF evaluations per lit fragment | **29** | 2 |
 | lines of `main()` in the lit programs (1417 of 1470 draws) | 209 | 110 |
-| triangles per frame | 5.07 M | 2.62 M (node estimate) |
+| triangles per frame | 5.07 M | 2.66 M with patches/0003 (4.90 M without); node estimate |
 | draws: opaque without discard / opaque with discard / transparent | 1338 / 89 / 44 | same |
 
 The 27 dark lights are deliberate: the game keeps "exactly this many lights of each kind" (`LIGHT_BUDGET` in its
@@ -66,15 +66,26 @@ All three keep the picture (CI's golden gates decide; see docs/LOG.md for the ru
    Side effect: `render()` JS in node 20.5 -> 13.3 ms median (27 fewer light structs packed per lit program per frame).
 2. **Instanced draws draw the instances in view** (`src/bindlist.rs` `instance_spheres` / `planes_to_object` /
    `instance_runs`, `prepare_one_v3`). 3.68 M of the frame's 5.07 M triangles are InstancedMesh (268 draws, 180k
-   instances: props, far cars, far crowd), and three draws every instance of a mesh whose bounds touch the frustum.
-   Only 27 % of those triangles are in view. Per-instance spheres are built once per upload in the object's space;
-   each frame the frustum planes are taken into that space and the instances in view become runs
-   `(first instance, count)`, drawn with a base instance (no buffer is rewritten; runs up to 8 culled instances
-   apart merge; at most 64 runs per draw). The game lays instances out block by block, so 791 runs cover them
-   (+523 draws) and draw 1.23 M triangles instead of 3.68 M.
-   Left whole: `frustumCulled = false` objects (the same promise three's own test relies on: the vertex stage stays
-   inside instanceMatrix x the geometry's bounds), BatchedMesh entries, programs that read `gl_InstanceID`
-   (SPIRV-Cross counts it from the draw's first instance), shadow passes. `FASTRENDER_V3_DEBUG=2048` turns it off.
+   instances: window parts, the vehicle fleet, props, far crowd), and three draws every instance of a mesh whose
+   bounds touch the frustum. A quarter of those triangles are in view. Per-instance spheres are built once per
+   upload in the object's space; each frame the frustum planes are taken into that space and the instances in view
+   become runs `(first instance, count)`, drawn with a base instance (no buffer is rewritten; runs up to 8 culled
+   instances apart merge; at most 64 runs per draw). The game lays instances out block by block, so few runs cover
+   them.
+   The renderer does this by itself only where it can know the bounds: the mesh is `frustumCulled` (three's own
+   whole-mesh test already relies on instanceMatrix x the geometry's bounds) and the geometry has no per-instance
+   attribute a vertex stage could place the instance with. In this game that is 0.29 M triangles (-> 0.12 M): its
+   two big groups hide their bounds. The fleet is `frustumCulled = false` (1.5 M triangles), and the window parts
+   are placed by the vertex stage at `aAnchor * aSize + position` (1.6 M). So there is a hint the game gives:
+   `mesh.userData.frInstanceCull = true` (instances stay inside instanceMatrix x the geometry's sphere) or
+   `= radius` (inside that radius around the sphere's centre, in geometry units); it travels with the instance
+   upload (`InstancesMeta::cull`), so set it before the mesh is first drawn. **`patches/3d-world-objects-0003`**
+   sets it for the fleet (`true`) and the window parts (geometry radius + the largest opening's diagonal, at most
+   4.5 m). With the patch: 3.54 M instanced triangles are tested, 1.14 M drawn in 833 runs (+575 draws), frame
+   5.07 -> 2.66 M triangles (node estimate). Without the patch: 5.07 -> 4.90 M.
+   Always drawn whole: BatchedMesh entries, programs that read `gl_InstanceID` (SPIRV-Cross counts it from the
+   draw's first instance), shadow passes, the far crowd (`frustumCulled = false`, no hint: its vertex stage animates
+   from a texture). `FASTRENDER_V3_DEBUG=2048` turns all of it off, `4096` only the hinted part.
 3. **Discarding draws last, nearest first** (`bindlist::discard_key`, `Prog::discard`). Apple's hidden-surface
    removal shades one fragment per pixel for plain opaque geometry in any order, but has to shade what is under a
    draw that can `discard` (alphaTest, alphaHash, clipping planes) when that draw arrives. Those draws (89 of 1427
@@ -101,7 +112,7 @@ instances N of N drawn in N runs`.
 1. Per-pixel cost of the remaining lit shader (2 directional lights with PCF, hemisphere, IBL, PBR maps): the rows
    `noenv`, `nomaps`, `lambert`, `basic` of the ablation bound each part. Half precision (WP10) and the render scale
    (MetalFX: 57 -> 30 ms measured) act on this part.
-2. Triangles: 2.6 M per frame is still a lot for an M2. `car-far` is 1.1 M triangles over 18 draws for cars that are
+2. Triangles: 2.7 M per frame is still a lot for an M2. `car-far` is 1.1 M triangles over 18 draws for cars that are
    a few pixels tall (1.5-2.8k triangles per far car): a game-side LOD fix. Row `none@4` (no instanced draws) bounds
    what instancing still costs.
 3. The screenshot differs more from WebGL on the Air (MAE 11.66) than on CI (2.96); not looked at here.
@@ -110,10 +121,11 @@ instances N of N drawn in N runs`.
 
 ```bash
 xcodebuild -downloadComponent MetalToolchain      # once; optional (removes the build warning)
-git pull && scripts/gpu-ablate.sh                 # 1280x800, ~16 rows of 240 frames; logs -> bench-results/<date>-gpu-ablate-<model>/
+git pull && scripts/gpu-ablate.sh                 # 1280x800, 17 rows of 240 frames; logs -> bench-results/<date>-gpu-ablate-<model>/
 ```
 
-It needs the game copy `host/electron/scripts/bench-3way.sh` fetched (`host/electron/.bench/3d-world-objects`).
+The script fetches the game into `host/electron/.bench/3d-world-objects` if it is not there and applies the patches
+added since (`host/electron/scripts/world-game.sh`; `patches/3d-world-objects-0003` is new).
 Read the `gpu passes ... main` number of each row against `none`:
 
 | row | what it tells |
@@ -121,6 +133,7 @@ Read the `gpu passes ... main` number of each row against `none`:
 | `alllights` | the frame before `trimLights` (should reproduce ~57 ms); `alllights - none` = what the dark lights cost |
 | `none` | what ships now. `[census]` lines: lights in the light state, draws and `main()` size per program |
 | `none@2048` | instanced draws whole: `none@2048 - none` = what drawing only the instances in view saves |
+| `none@4096` | only the hinted meshes (fleet, windows: patches/0003) whole: the share of that saving that needs the game's hint |
 | `none@512` | discarding draws in state order: `none@512 - none` = what drawing them last saves |
 | `none@1024`, `none@4`, `none@64` | without discarding draws / without instanced draws / without textures |
 | `lights0`, `nopoint` | cross-checks: must equal `none` now |

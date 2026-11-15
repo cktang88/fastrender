@@ -55,20 +55,9 @@ say() { printf '\n== %s\n' "$*"; }
 WO_BASE=073aa9eae0ba86cecb16970162593281714214e3
 case " $scenes " in *" world "*)
   if [ -z "$world" ]; then
-    world="$el/.bench/3d-world-objects"
-    if [ ! -f "$world/.bench-patched" ]; then
-      say "fetching cktang88/3d-world-objects @ ${WO_BASE:0:7} + patches -> $world"
-      rm -rf "$world"; mkdir -p "$world"
-      if git -C "$world" init -q && git -C "$world" fetch -q --depth 1 https://github.com/cktang88/3d-world-objects "$WO_BASE" && git -C "$world" checkout -q FETCH_HEAD; then
-        ok=1
-        for p in "$repo"/patches/3d-world-objects-000*.patch; do
-          git -C "$world" -c user.name=bench -c user.email=bench@localhost am -q "$p" || { echo "patch $p does not apply"; ok=0; break; }
-        done
-        [ "$ok" = 1 ] && touch "$world/.bench-patched" || world=""
-      else
-        echo "cannot fetch the game (private repo? pass --world DIR): the real-game runs are skipped"; world=""
-      fi
-    fi
+    # fetched once into .bench/3d-world-objects; patches added since are applied to the copy (scripts/world-game.sh)
+    say "the game: cktang88/3d-world-objects @ ${WO_BASE:0:7} + patches/"
+    world="$(bash "$here/world-game.sh" "$el/.bench/3d-world-objects")" || { echo "the real-game runs are skipped (pass --world DIR)"; world=""; }
   fi
   if [ -z "$world" ] || [ ! -f "$world/index.html" ]; then scenes="$(echo " $scenes " | sed 's/ world / /')"; world=""; fi
   ;;

@@ -407,6 +407,12 @@ export class FastRenderer {
         // reads): no copy and no conversion here, none natively (the host copies the bytes during the call)
         const meta = rec.meta || (rec.meta = { count: 0, mat4: true });
         meta.count = n;
+        // mesh.userData.frInstanceCull (a game's promise, docs/notes/gpu-cost.md "Instances in view"): the native side
+        // may draw only the instances whose bounds touch the frustum even where it cannot tell by itself that this
+        // is safe (frustumCulled = false, per-instance attributes). true: an instance stays inside instanceMatrix x
+        // the geometry's bounding sphere; a number: inside that radius (geometry units) around the sphere's centre
+        const hint = mesh.userData.frInstanceCull;
+        if (hint === true) meta.cull = 0; else if (typeof hint === 'number' && hint > 0) meta.cull = hint; else if (meta.cull !== undefined) delete meta.cull;
         this.host.upload(KIND.INSTANCES, id, meta, src.length === n * 16 ? src : src.subarray(0, n * 16), colors);
       } else {
         const rows = new Float32Array(n * 12);
