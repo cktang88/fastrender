@@ -10,8 +10,17 @@ name: Build and Test Metal 4 Renderer
 #   xcode-27          macOS 27.0.1 + Xcode 27.0-27.2, public preview (there is no macos-27 label yet)
 #   xcode-27-xlarge   the same on a larger runner (paid)
 #   self-hosted       [self-hosted, macOS, ARM64], only when the repository variable METAL4_SELF_HOSTED is 'true'
-# A job that stays "queued" means the label is not available to this repository (plan without larger runners, or
-# no self-hosted runner online). It never fails the workflow; cancel the run to clear it.
+# A job that fails at once with no steps (the -xlarge labels here) or stays "queued" means the label is not
+# available to this repository (plan without larger runners, or no self-hosted runner online). It never fails
+# the workflow.
+#
+# Measured 2026-11-15 (run 43718701909), "Apple Paravirtual device" on both hosted images:
+#   macos-26 (26.7.2, Xcode 26.6, SDK 26.5)   -std=metal4.0 compiles; supportsFamily(Metal4) false; MTL4 selectors
+#   xcode-27 (27.0.1, Xcode 27.2, SDK 27.2)   present, newMTL4CommandQueue nil, newCompilerWithDescriptor "Device does
+#                                             not support Metal 4.", residency set nil, supportsMetal4FX false (all
+#                                             three); xcode-27 also accepts -std=metal4.1
+# So hosted runners compile Metal 4 code and MSL 4.x but cannot execute Metal 4: executing needs real Apple
+# silicon (a self-hosted runner, or a larger runner if its GPU is passed through; not measured, not on this plan).
 on:
   push:
     branches: [claude/focused-keller-jtmxe0]

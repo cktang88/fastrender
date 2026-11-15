@@ -461,7 +461,7 @@ jobs:
     env:
       WO_BUNDLE: js/dist/world-objects.js
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: build + the game's JavaScriptCore bundle
         run: |
           brew install glslang spirv-cross
@@ -502,7 +502,7 @@ jobs:
           bash .github/jsc-profile.sh diagnostics $WO_BUNDLE "$GITHUB_WORKSPACE/../3d-world-objects"
           bash .github/annotate.sh notice "jsc-profile diagnostics" jsc-profile/summary-diagnostics.txt 40
           bash .github/annotate.sh notice "jsc-profile sampling profiler" jsc-profile/sampling-top.txt 60
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: jsc-profile
@@ -524,7 +524,7 @@ jobs:
     continue-on-error: true
     timeout-minutes: 80
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: bench-3way - WebGLRenderer vs WebGPURenderer vs fastrender (PARAVIRTUAL GPU - absolute numbers are not an Air's)
         continue-on-error: true
         timeout-minutes: 60
@@ -552,7 +552,7 @@ jobs:
             node -e "process.exit(JSON.parse(require('fs').readFileSync('$j','utf8')).ok?0:1)" 2>/dev/null && continue
             grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" "${j%.json}.log" | tail -25 > bench-fail.txt; bash .github/annotate.sh warning "bench-3way failed run: $(basename "$j" .json)" bench-fail.txt 25
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bench-3way
