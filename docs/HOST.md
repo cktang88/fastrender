@@ -55,8 +55,8 @@ UI renderer of their own.
 Code: `host/electron/` (Electron 45.3.2 / Chromium 156 / Node 24, napi-rs 3: `napi` 3.16, `@napi-rs/cli` 3.10.12).
 CI: the "electron spike" steps in `.github/workflows/mac.yml` (macos-26, `continue-on-error`, PASS/FAIL lines,
 screenshots `electron-*-capturePage.png`, `electron-*-screen.png`, `electron-*-window.png`, results `electron-*-spike.json`).
-**Status: written and type-checked on Linux (`cargo check --target aarch64-apple-darwin`, shm/protocol unit tests, JS tests with
-real three.js + real `FastRenderer` over a fake addon). Nothing below marked "CI" has been run on a Mac yet.**
+**Status: runs on macOS 26 CI (run 43689270560 and its predecessor): all stacking checks, resource-channel, reload and renderer-crash
+checks PASS in `subview` mode; `childwindow` fails only the known resize checks (child window does not follow resizes yet).**
 
 ### The finding that changed the design: the NSView lives in the *main* process
 
@@ -66,25 +66,67 @@ a renderer-process addon can't touch it. So the addon has two roles, same `.node
 
 | process | calls | does |
 |---|---|---|
-| main | `startHost(handle, shmName, capacityWords, stack)`, `shutdown()` | creates the CAMetalLayer view below the web contents, a render thread, and a shared-memory frame mailbox (POSIX shm + named semaphore) |
-| renderer | `attach(null, cmdBuffer, shmName)`, `upload`, `release`, `present(words)`, `stats()` | `present` = one memcpy of the used part of the JS-allocated command buffer into the mailbox (seqlock) + `sem_post` |
+| main | `startHost(handle, shmName, capacityWords, stack, ringBytes?)`, `resetChannel()`, `shutdown()` | creates the CAMetalLayer view below the web contents, a render thread, and a shared-memory frame mailbox (POSIX shm + named semaphore) |
+| renderer | `attach(null, cmdBuffer, shmName)`, `upload`, `release`, `present(cmdBuffer, words)`, `stats()` | `present` = one memcpy of the used part of the command buffer into the mailbox (seqlock) + `sem_post`; `upload`/`release` stream into the resource ring |
 
 `attach(handle, ...)` with a handle starts the host in the same process (everything in the main process; used if a game's
 FastRenderer runs there). The renderer finds the mailbox name through `additionalArguments` (`--fr-shm=/fr-<mainpid>`).
 The render thread coalesces (mailbox semantics: newest frame wins), so JS never blocks on the GPU or on main-process JS.
 
+### Resource channel (ordered, never dropped)
+
+The frame mailbox keeps only the newest frame, but uploads/releases are stateful, so they get their own channel in the same
+shared region (`native/src/shm.rs`): a byte ring (default 4 MB, `startHost(..., ringBytes)`), single writer (renderer), single
+reader (render thread).
+
+- Message = 24-byte header `{payload_len, op (0 upload, 1 release), kind, id, seq u64}` + payload
+  `[meta_len][n][len_0..][meta JSON][array_0]...`. Bytes are copied once into the ring.
+- The writer blocks (bounded: 2 s without progress, then an error) when the ring is full, so a message may be larger than the ring
+  (CI sends a 6 MB message over the 4 MB ring). Nothing is ever dropped or reordered.
+- `seq` counts messages. Every published frame is stamped (inside the seqlock) with the `seq` of the last message written before
+  it. The render thread (`Consumer::next_frame`) drains the ring and applies every message up to the frame's `seq` before it
+  returns the frame; the Metal side only sees a frame once its resources are applied.
+- For now "apply" = decode, validate (lengths tile exactly, `seq` consecutive) and fold into an FNV-1a chain over
+  `(kind, id, meta, [len, bytes]...)`. `stats()` exposes `resApplied`, `resBytes`, `resHash`, `resErrors`, `resWaits`,
+  `resSeqWritten/Applied`. The game (`app/game.mjs`) computes the same chain from what it sent and the CI checks equality:
+  N=64 uploads, in order, right bytes (8.6 MB incl. the 6 MB one).
+
+### Failure handling
+
+- **Dead/reloading renderer.** A writer that dies mid-copy leaves the seqlock odd forever. The reader's spin is bounded
+  (5 ms, and it checks the quit/retired flags), and main calls `resetChannel()` on `render-process-gone` and on every main-frame
+  non-in-page `did-start-navigation`: the old region is *retired* (writers get "channel was reset", the reader is woken) and a fresh
+  region is created under the same name; cumulative stats carry over. The next page attaches to the new one. The render thread never
+  waits on a dead writer.
+- **`shutdown()` never hangs**: sets flags, posts the semaphore, joins for at most 1.5 s, then detaches (CI: 18-54 ms).
+- **No leaked names**: once the renderer attached (`peer_attached`), main `shm_unlink`s the region and `sem_unlink`s the semaphore
+  (the mappings stay valid); a crash can no longer leak `/fr-<pid>`. `resetChannel()` re-creates (and re-unlinks after attach).
+- **Detached ArrayBuffer**: the addon keeps no pointer into the JS heap. `present(cmdBuffer, words)` receives the `Uint32Array` on
+  every call; a transferred/detached buffer has length 0 and throws (`host.js` checks `byteLength` too, tested).
+- `snapshot` copies only the used words (no zero-fill pass). The render thread wraps each frame in `objc2::rc::autoreleasepool`.
+- `parse_frame` accepts `FRM2` (0x46524D32) and `FRM3` (0x46524D33, docs/PROTOCOL.md v3).
+
 ### Where FastRenderer runs: decision
 
-| | renderer, `nodeIntegration` on, `contextIsolation`/`sandbox` off (a) | preload + `contextBridge` (b) | main process (c) |
+| | (a) renderer, `nodeIntegration` on, isolation off | **(b) preload + `contextBridge` (chosen default)** | (c) main process |
 |---|---|---|---|
-| addon access | `require` the `.node` directly, sync napi calls | preload can load it only with `sandbox: false`; bridged calls cross worlds | direct |
-| per-frame cost | one napi call + memcpy (numbers below) | `contextBridge` clones arguments between worlds, so a typed array is copied per call and the shared command buffer idea breaks [I]; unmeasured | n/a: the game's DOM/rAF are not there |
-| unchanged games | yes (`window`, DOM, WebAudio, pointer lock) | yes | **no** (no DOM) |
-| security | weak isolation: only fine for loading local/bundled game code, never remote content | better | n/a |
-| sandbox | needs `sandbox: false` (addon calls `shm_open`/`mmap`/`sem_open`) | same | n/a |
+| addon access | `require` in the page | preload loads it (needs `sandbox: false`); page gets a 5-function proxy | direct |
+| `present(100 KB)` mean, CI macOS 26 | 3.6 us (0.9 us for 1 KB) | **57 us** (5 us for 1 KB), p99 per 20-call batch 285 us | n/a |
+| unchanged games | yes | yes | **no** (no DOM) |
+| security | any page script has the addon | page has no Node, no handle/shm name, no `startHost`/`resetChannel`/`shutdown` | n/a |
 
-**Pick (a).** If sandboxing is ever required: keep the game in a sandboxed renderer and carry frames over a `MessagePort` to the
-main process (copy cost measured below as the `ipc_send_100kb` baseline); the render thread and mailbox don't change.
+Measured: `contextBridge` copies typed-array arguments, and for a *view* it copies the **whole underlying buffer**:
+passing `cmd` or `cmd.subarray(0, words)` of the 4 MB command buffer cost ~1.4 ms per call (1.2 ms even for 1 KB). Passing
+`cmd.slice(0, words)` (one copy of the used words by us, one by the bridge, one memcpy into shm) costs 57 us for 100 KB and 5 us for
+1 KB, which is fine for one call per frame (0.3% of a 16.7 ms frame). Kept: **(b)**, with `--isolation off` (`contextIsolation: false`,
+direct calls) as the fallback if a game ever needs the extra ~50 us. `sandbox` stays `false` because the addon calls
+`shm_open`/`mmap`/`sem_open`; the page is bundled local content, so keep it that way. Also: `will-navigate` is prevented,
+`window.open` denied, permission requests denied, `webSecurity` on, `webviewTag` off, and the page has a CSP
+(`default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; ...`, no inline script/style, no eval; it works
+with three.js and FastRenderer). Without Node in the page, the bench uses `performance.now()` over batches of calls.
+
+If sandboxing is ever required: keep the game in a sandboxed renderer and carry frames over a `MessagePort` to the main process
+(copy cost is the `ipc_send_100kb_for_comparison` baseline: 87-154 us sender side); the render thread and mailbox don't change.
 
 ### Stacking (Electron issue 41979)
 
@@ -104,20 +146,31 @@ Not yet checked: fullscreen, pointer lock, display change/scale change, occlusio
 
 Real three.js scene (40 boxes, `MeshStandardMaterial`) -> real `FastRenderer.render()` -> `host.present(words)` -> addon
 (memcpy to shm) -> Metal thread: clear to the BACKGROUND colour, one white 16 px square per draw. Background hue and visible
-draw count change every frame. Geometry uploads go through `host.upload` (the spike only counts them; a resource channel is next).
+draw count change every frame. Geometry/material/texture uploads go through `host.upload` into the resource channel.
 
 ### Numbers
 
-Measured in the renderer by `app/game.mjs` (`process.hrtime`, 3000 calls after warmup), emitted in `electron-*-spike.json` under
-`bench`: `noop_napi_call`, `present_100kb`, `present_1kb`, `ipc_send_100kb_for_comparison` (sender-side cost of
-`ipcRenderer.send` of the same 100 KB, async), `render_thread_avg_ms`, `raf_fps`.
-**To be confirmed by CI (not measured yet).** Expectation [I]: napi call ~0.1-0.3 us, 100 KB memcpy ~5-15 us, so `present()` stays
-in the tens of microseconds; `ipcRenderer.send` of 100 KB is expected to cost 1-2 orders of magnitude more.
+Measured in the page by `app/game.mjs` (batches of 20 calls, `performance.now()`), emitted in `electron-*-spike.json` under `bench`.
+CI macOS 26 runner (virtualised Apple silicon, so absolute numbers are indicative only):
+
+| call | isolated (bridge, default) | direct (`--isolation off`) |
+|---|---:|---:|
+| `present` 100 KB | 57 us | 3.6 us |
+| `present` 1 KB | 5.2 us | 0.9 us |
+| `upload` 1 KB (ring write) | 8.4 us | 1.8 us |
+| `upload` 100 KB | 194 us | 170 us (memcpy + ring back-pressure; the render thread hashes it) |
+| `ipcRenderer.send` 100 KB (sender side, async) | 154 us | 87 us |
+| `stats()` | 4.6 us | 1.3 us |
+
+Resource channel: 64 uploads / 8.6 MB (one 6 MB message over a 4 MB ring) are sent in 230-290 ms including back-pressure and are all
+applied in order with matching hashes, in the initial load, after a reload and after a forced renderer crash.
+Reload + crash recovery: new page attached and rendering again ~1.0-1.4 s after the navigation/crash. The main-process
+event-loop gap stayed < 1.5 s over the whole run (the largest gap happens at startup, before any reload; first-page load on the runner).
 
 ### Choices and constraints
 
-- Command buffer allocated in JS; `attach` receives a `Uint32Array` (host.js wraps a raw `ArrayBuffer`) and stores a raw pointer.
-  `host.js` keeps the view referenced; the buffer must not be detached/transferred. A `napi` ref-based keep-alive is a hardening step.
+- Command buffer allocated in JS; `attach` receives a `Uint32Array` (host.js wraps a raw `ArrayBuffer`); no pointer is retained,
+  `present` takes the array on every call.
 - napi-rs 3 has no rest args: `host.js` spreads `upload(kind,id,meta,...arrays)` into `upload(kind,id,metaJson,[Uint8Array])`.
 - Mailbox names: macOS caps POSIX shm/semaphore names at 31 chars (`/fr-<pid>` and `/fr-<pid>-s`). `sem_timedwait` doesn't exist on
   macOS, so the render thread blocks in `sem_wait` and quits via a flag + post.
@@ -133,9 +186,9 @@ in the tens of microseconds; `ipcRenderer.send` of 100 KB is expected to cost 1-
 2. Transparent windows: compositing cost of a transparent Chromium window over Metal on a base Air, and whether `capturePage()` and
    screenshots include the Metal layer (they will not: `capturePage` sees only Chromium's compositor output).
 3. Screen Recording permission for `screencapture` on the runner (a black capture is reported as such, not as a pass).
-4. Sandbox: `sandbox: false` + `nodeIntegration` means the game must be local content. A sandboxed option needs MessagePort transport.
+4. Sandbox: the preload needs `sandbox: false` (addon loads shm), so the game must be local content. A sandboxed option needs MessagePort transport.
 5. Pacing: rAF (Chromium's vsync) vs the Metal layer's `displaySyncEnabled` give 0-1 frames of skew between DOM UI and 3D.
-6. Resource channel (geometry/texture upload of tens of MB) is not implemented; shm ring or `MessagePort` + `SharedArrayBuffer`.
+6. Resource channel: implemented (ring, back-pressure) but the render thread only validates/hashes; it does not build GPU resources yet. Throughput for tens of MB is bounded by the memcpy + the reader (`upload_100kb` ~170-190 us incl. hashing); a bigger ring or zero-copy for textures is a later tuning step. A ring stalled > 2 s (render thread stuck) makes `upload` throw.
 7. Next step for real rendering: expose `mac`/`mac_three` as a `fastrender` library (`lib.rs`) and call it from the render thread
    instead of `render_frame`; that refactor was out of scope here. Per-frame `parse_frame` becomes `ThreeScene::frame()`.
 
