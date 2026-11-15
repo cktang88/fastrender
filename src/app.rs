@@ -18,7 +18,7 @@ use winit::window::{Window, WindowId};
 use crate::core::*;
 use crate::mac::Renderer;
 
-const HELP: &str = "keys: 1 forward/deferred  2 memoryless  3 metalfx/bilinear  -/= scale  4 shadow cache  5 gpu cull  6 city/voxel  L/K lights x2 /2  D dynres  V vsync  Space pause";
+const HELP: &str = "keys: 1 forward/deferred  2 memoryless  3 metalfx/bilinear  7 metalfx temporal on/off  -/= scale  4 shadow cache  5 gpu cull  6 city/voxel  L/K lights x2 /2  D dynres  V vsync  Space pause";
 
 /// frames allowed in flight when interactive: 2 keeps input latency down (bench uses 3)
 const IN_FLIGHT: usize = 2;
@@ -128,7 +128,10 @@ impl ApplicationHandler for App {
                     }
                     KeyCode::Digit1 => c.path = if c.path == RenderPath::Forward { RenderPath::Deferred } else { RenderPath::Forward },
                     KeyCode::Digit2 => c.memoryless = !c.memoryless,
-                    KeyCode::Digit3 => c.upscale = if c.upscale == Upscale::Spatial { Upscale::Bilinear } else { Upscale::Spatial },
+                    KeyCode::Digit3 => c.upscale = if c.upscale == Upscale::Bilinear { Upscale::Spatial } else { Upscale::Bilinear },
+                    // MetalFX temporal on/off (off = spatial). Where the device lacks it, the renderer
+                    // logs the fallback and stays on spatial.
+                    KeyCode::Digit7 => c.upscale = if c.upscale == Upscale::Temporal { Upscale::Spatial } else { Upscale::Temporal },
                     KeyCode::Digit4 => c.shadow_every = if c.shadow_every == 0 { 1 } else { 0 },
                     KeyCode::Digit5 => c.gpu_cull = !c.gpu_cull,
                     KeyCode::Digit6 => c.scene = if c.scene == SceneKind::City { SceneKind::Voxel } else { SceneKind::City },

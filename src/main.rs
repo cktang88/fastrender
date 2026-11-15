@@ -18,7 +18,7 @@ const USAGE: &str = "fastrender [run|bench|matrix|probe] [--key value ...]
   probe    print GPU capabilities
   voxel-mesh  generate a 512x128x512 island and greedy-mesh it natively (any OS)
   selftest stage-by-stage render diagnostics (writes selftest-*.png)
-options: --scene city|voxel|script|three --script game.js (props = box count) --three bundle.js (real three.js game) --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|bilinear
+options: --scene city|voxel|script|three --script game.js (props = box count) --three bundle.js (real three.js game) --path forward|deferred --memoryless 0|1 --scale 0.25..1 --upscale metalfx|temporal|bilinear
          --shadow-every 0(cached)|n --lights n --cull 0|1 --size WxH --props n --frames n
          --warmup n --seconds s --warmup-seconds s --rounds n --vsync 0|1 --dynres <target ms> --log-every <s> --seed n";
 

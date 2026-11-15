@@ -321,6 +321,42 @@ fragment half4 fs_blit(FsqOut in [[stage_in]],
     return src.sample(s, min(in.uv * scale.xy, scale.xy - scale.zw));
 }
 
+// ------------------------------------------------------------------ MetalFX temporal: motion from depth
+// Motion vectors for MTLFXTemporalScaler without any per-shader velocity output: each pixel's surface
+// point is rebuilt from the depth buffer with the inverse of the *jittered* view-projection the frame
+// was drawn with, then projected with this frame's and the previous frame's *unjittered*
+// view-projections. Output: prev_uv - cur_uv in UV of the content rect (Rust mirror and conventions:
+// core::reproject_motion); the scaler's motionVectorScale = content size turns it into pixels.
+// Exact for static geometry under any camera motion; objects moving on their own get camera-only
+// motion (ghosting), see docs/notes/metalfx-temporal.md.
+
+struct MotionParams {
+    float4x4 inv_cur_jittered;
+    float4x4 cur;
+    float4x4 prev;
+    float4 content; // xy = content size in pixels, zw unused
+};
+
+kernel void motion_from_depth(depth2d<float, access::read> depth [[texture(0)]],
+                              texture2d<half, access::write> motion [[texture(1)]],
+                              constant MotionParams& p [[buffer(0)]],
+                              uint2 gid [[thread_position_in_grid]]) {
+    if (float(gid.x) >= p.content.x || float(gid.y) >= p.content.y) return;
+    float d = depth.read(gid);
+    float2 uv = (float2(gid) + 0.5) / p.content.xy;
+    float4 w = p.inv_cur_jittered * float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), d, 1.0);
+    w /= w.w;
+    float4 c = p.cur * float4(w.xyz, 1.0);
+    float4 q = p.prev * float4(w.xyz, 1.0);
+    float2 m = 0.0;
+    if (c.w > 1e-6 && q.w > 1e-6) {
+        float2 cuv = c.xy / c.w * float2(0.5, -0.5) + 0.5;
+        float2 puv = q.xy / q.w * float2(0.5, -0.5) + 0.5;
+        m = puv - cuv;
+    }
+    motion.write(half4(half2(m), 0.0h, 0.0h), gid);
+}
+
 // ------------------------------------------------------------------ three.js scenes (protocol v2)
 // A real three.js scene graph, walked by js/fastrender-three.js. Geometry keeps three's streams
 // (position, normal, uv, colour); materials are a table; lights use three.js r155+ units.
