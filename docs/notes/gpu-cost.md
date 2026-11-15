@@ -3,8 +3,8 @@
 Scope: cktang88/3d-world-objects (+ `patches/`), street view, `quality=low`, `programs: 'three'` on a base M2 Air.
 Numbers marked **Air** are the user's runs (`bench-results/`); numbers marked **node** come from the headless run of
 the game (`js/test/world-objects.node.mjs --gpu-census -`), which sees the same scene and the same programs but no
-GPU. `trimLights` has been timed on the Air (below); the instance and draw-order changes have not: the command at the end
-does that.
+GPU. `trimLights` has been timed on the Air (below); the instance and draw-order changes and the game's far LODs
+(item 4) have not: the command at the end does that.
 
 ## What the Air measured (before any of this)
 
@@ -59,7 +59,7 @@ its preprocessor conditionals (three has already substituted the light counts an
 | shadow lookups per lit fragment | 2 directional + **1 point cube** (a dark 16x16 padding light) | 2 directional |
 | direct-light BRDF evaluations per lit fragment | **29** | 2 |
 | lines of `main()` in the lit programs (1417 of 1470 draws) | 209 | 110 |
-| triangles per frame | 5.07 M | 2.66 M with patches/0003 (4.90 M without); node estimate |
+| triangles per frame | 5.07 M | 2.66 M with patches/0003 (4.90 M without); with patches/0004 as well see "Triangles by owner"; node estimates |
 | draws: opaque without discard / opaque with discard / transparent | 1338 / 89 / 44 | same |
 
 The 27 dark lights are deliberate: the game keeps "exactly this many lights of each kind" (`LIGHT_BUDGET` in its
@@ -68,9 +68,26 @@ so that walking between the street and interiors never changes a shader variant.
 lit program and unrolls the loop, and r187 has no early-out for a black light, so every lit fragment evaluated the
 full physical BRDF 27 times and multiplied each result by 0.
 
+## Triangles by owner (node mesh census, same view)
+
+`node js/test/world-objects.node.mjs <game> --mesh-census 30` records every draw of the screen pass and tests
+each instance against the frustum the way the native side does where it may (items 2 and 4 below), so "in view"
+is what reaches the vertex stage. Its own estimate: a little lower than the 2.66 M above (no run merging).
+
+| owner | in view, patches 0001-0003 | with 0004 | what |
+|---|--:|--:|---|
+| merged block meshes (`bake()`, ~40 per block) | 973k | 642k | 8 blocks in view; the 4 beyond 70 m: 489k -> ~205k (meshes under 400 triangles keep one version) |
+| window parts and other instanced details of the 3x3 nearest blocks (`fine`) | 331k | 331k | sashes: 46 triangles x 4500 windows per block |
+| far cars (`car-far`, `car-far-paint`) | 276k | 136k | 244 cars in view; those beyond 100 m: 214k -> 77k |
+| other instanced parts (window panes, boxes) | 183k | 183k | 2-48 triangles each |
+| far crowd | 137k | 137k | 53 people at 26-100 m, 2.5k triangles each, drawn whole |
+| mid cars + their shadow proxies | ~115k | ~90k | 9-11 cars within 40 m (traffic differs between the runs); the proxies (colour writes off) are in the screen pass's draw list too |
+| everything else | ~235k | ~230k | far shore 35k, the player's two models 26k, trees, props |
+| **total in view** | **2.25 M** | **1.75 M** | sent: 5.07 M -> 3.92 M; shadow casters per pass before culling: 0.96 M -> 0.76 M |
+
 ## What shipped
 
-All three keep the picture (CI's golden gates decide; see docs/LOG.md for the run).
+Items 1-3 keep the picture; item 4 moves far geometry by about a pixel or less (CI's golden gates decide; see docs/LOG.md for the run).
 
 1. **`trimLights`** (`js/three-programs.js` `_trimLights`, default on; `FastRenderer({ trimLights: false })` or
    `host.params.trimLights = 0` to opt out). Point and spot lights whose colour x intensity is exactly 0 leave the
@@ -113,6 +130,29 @@ All three keep the picture (CI's golden gates decide; see docs/LOG.md for the ru
    opaque ones here: foliage, the instanced windows) now come after the others within their renderOrder, sorted by
    distance. `FASTRENDER_V3_DEBUG=512` restores state order. Expected to be small in this view.
 
+4. **Far LODs in the game** (`patches/3d-world-objects-0004-far-lods.patch`; nothing in the renderer). Built at
+   load with the meshoptimizer simplifier the game already vendors (`src/meshlod-core.ts`), same materials and
+   attributes, so no new program:
+   - **Blocks** (`src/nyc/chunkLod.ts`): the game merges a block's static parts into ~40 meshes (100-140k triangles
+     per block, up to 33k per mesh) and they are drawn whole whenever any of the block is in view. Each merged mesh
+     over 400 triangles gets a coarse twin within 6 cm of it (about a third of the triangles; normals, uv seams and
+     colour borders weighed in). Blocks whose nearest point is beyond 70 m (back inside 62 m) show the twins: 6 cm
+     is one pixel of a 1600 px high drawable there (70 degree field of view), half a pixel at 1280x800.
+     The twins of a block are built the first time it is that far, in frames where no block is being built, in
+     steps of ~1500 triangles (a merged mesh is cut where its parts share no vertex): ~0.3 s per block in node,
+     longest step ~15 ms.
+   - **Cars** (`src/nyc/vehicleFleet.ts`): the game had near (< 12 m), mid (< 40 m) and far LODs; the far one is
+     0.8-2.8k triangles and was used out to the fog. Beyond 90 m (back at 82 m) a car is now drawn with its far LOD
+     welded and simplified within 7 cm (2032 -> 421, 2812 -> 631, 1626 -> 281, 1754 -> 867 ...), from two more
+     instance batches per model (+15 draws in this view).
+   Row `nofarlod` of the ablation switches both off (the frame before the patch).
+   **Picture:** shapes move by at most 6-7 cm at 70 / 90 m and beyond. Parts thinner than that (a 3 cm door sill, a
+   thin rod) collapse to nothing in a twin; a block switches as a whole when its nearest point crosses 70 m. Not
+   seen on a GPU yet: the golden camera's far blocks and far cars use the LODs, so CI's MAE gate (< 10) covers it.
+   **Cost:** memory for the twins (about a third of the merged meshes' vertices, only for blocks that have been
+   far); simplifier time as above; JS per frame unchanged within node's noise (one comparison per far car, one per
+   block, 1470 -> 1485 draws).
+
 Also: the bench prints `draws per pass (last frame): main N opaque + N discard + N transparent; shadow ...;
 instances N of N drawn in N runs`.
 
@@ -133,26 +173,34 @@ instances N of N drawn in N runs`.
 1. Per-pixel cost of the remaining lit shader (2 directional lights with PCF, hemisphere, IBL, PBR maps): the rows
    `noenv`, `nomaps`, `lambert`, `basic` of the ablation bound each part. Half precision (WP10) and the render scale
    (MetalFX: 57 -> 30 ms measured) act on this part.
-2. Triangles: 2.7 M per frame is still a lot for an M2. `car-far` is 1.1 M triangles over 18 draws for cars that are
-   a few pixels tall (1.5-2.8k triangles per far car): a game-side LOD fix. Row `none@4` (no instanced draws) bounds
-   what instancing still costs.
+2. Triangles: ~1.75 M per frame in view after item 4 (table above). What is left, largest first:
+   - the merged meshes of the blocks within 70 m (438k for 4 blocks): a second level (3 cm from 35 m) was measured
+     at another -100k for the two blocks 40 m away; not shipped (doubles the simplifier time and the twins' memory).
+     Splitting a block's merged meshes so the frustum can cut them would add ~10 us of JS per extra draw: not done.
+   - window sashes and other `fine` parts of the nearest 3x3 blocks (331k): the game shows them by block ring, out
+     to 100-240 m; hiding them sooner is visible (the bars are 1-2 px at 40 m on the Air's panel).
+   - the far crowd (137k): one mesh per gender with a vertex animation texture, 2.5k triangles per person from
+     26 m. A coarser index over the same vertices would work with the texture, but the per-instance attributes
+     live on the geometry, so a second level needs the instance writes split by distance.
+   Row `none@4` (no instanced draws) bounds what instancing still costs.
 3. The screenshot differs more from WebGL on the Air (MAE 11.66) than on CI (2.96); not looked at here.
 
 ## Measuring on the Air
 
 ```bash
 xcodebuild -downloadComponent MetalToolchain      # once; optional (removes the build warning)
-git pull && scripts/gpu-ablate.sh                 # 1280x800, 17 rows of 240 frames; logs -> bench-results/<date>-gpu-ablate-<model>/
+git pull && scripts/gpu-ablate.sh                 # 1280x800, 18 rows of 240 frames; logs -> bench-results/<date>-gpu-ablate-<model>/
 ```
 
 The script fetches the game into `host/electron/.bench/3d-world-objects` if it is not there and applies the patches
-added since (`host/electron/scripts/world-game.sh`; `patches/3d-world-objects-0003` is new).
+added since (`host/electron/scripts/world-game.sh`; `patches/3d-world-objects-0003` and `-0004` are new).
 Read the `gpu passes ... main` number of each row against `none`:
 
 | row | what it tells |
 |---|---|
 | `alllights` | the frame before `trimLights` (should reproduce ~57 ms); `alllights - none` = what the dark lights cost |
 | `none` | what ships now. `[census]` lines: lights in the light state, draws and `main()` size per program |
+| `nofarlod` | the game's far LODs off (patches/0004): `nofarlod - none` = what they save; the `draws per pass` and `[census]` lines give the triangles of both |
 | `none@2048` | instanced draws whole: `none@2048 - none` = what drawing only the instances in view saves |
 | `none@4096` | only the hinted meshes (fleet, windows: patches/0003) whole: the share of that saving that needs the game's hint |
 | `none@512` | discarding draws in state order: `none@512 - none` = what drawing them last saves |

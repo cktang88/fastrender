@@ -3,6 +3,32 @@
 Short entries, newest first: what was tested, how, what came out.
 
 
+## 2026-11-15: real game, far LODs in the game (patches/0004): triangles in view 2.25 -> 1.75 M (node); not timed, golden pending CI
+
+Details: docs/notes/gpu-cost.md ("Triangles by owner", item 4).
+
+- **Why**: after `trimLights` the Air's unlit ablation is still 8.9 of 12.5 ms: geometry. Census by owner
+  (`js/test/world-objects.node.mjs --mesh-census`, new: per material / mesh, per distance band, with the instance
+  test the native side does): of 2.25 M triangles in view, 973k are the blocks' merged static meshes (drawn whole,
+  ~120k per block, half of them beyond 70 m), 331k window parts of the nearest blocks, 276k far cars (not the 1.1 M
+  sent: instance culling took the rest), 137k far crowd.
+- **What** (`patches/3d-world-objects-0004-far-lods.patch`, game code only, the game's own vendored meshoptimizer):
+  - merged block meshes get a twin within 6 cm (about a third of the triangles), shown for blocks beyond 70 m;
+    built when a block is first that far, in ~15 ms steps between block builds (~0.3 s per block);
+  - cars beyond 90 m use their far LOD simplified within 7 cm (20-50 % of the triangles).
+- **Node, same view**: sent 5.07 -> 3.92 M, in view 2.25 -> 1.75 M (merged meshes 973k -> 642k, far cars 276k ->
+  136k), shadow casters per pass 0.96 -> 0.76 M, draws 1470 -> 1485, render() JS unchanged within the noise.
+- **Tried, not shipped**: a second block level (3 cm from 35 m): another -100k, twice the build time and memory.
+  Without the normal attribute in the simplifier the twins are 13 % instead of 33 %, but faces pick up their
+  neighbours' normals. Edge collapse on the cars' far LOD stalls at ~65 % (open patches with doubled seams) until
+  the vertices are welded by position and colour.
+- **Picture risk**: parts thinner than 6 cm vanish in a twin (door sills, thin rods); a block switches as a whole
+  at 70 m. The golden camera sees four far blocks and ~190 distant cars, so CI's gate (MAE < 10, 6.58 before)
+  measures it: **pending CI**. `--ablate nofarlod` / row `nofarlod` gives the frame before.
+- **Verified**: game `tsc` (no new errors), `npm run qa` 264 passed (new `tests/chunk-lod.test.ts`: twins never
+  stick out by more than the error, one version shown per level, hysteresis), patch applied with `git am` on a
+  fresh copy by `world-game.sh` after 0001-0003. **Not verified**: any ms (no Air run), the golden.
+
 ## 2026-11-15: WP10, half precision in three's lighting functions: built, picture holds, no win measurable on CI; off by default
 
 Details: docs/notes/half-precision.md.

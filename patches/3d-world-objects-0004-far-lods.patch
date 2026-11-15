@@ -1,0 +1,715 @@
+From 153dae3b727f6bfd9844bb68834410f9f5d80e62 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 16:59:48 +0000
+Subject: [PATCH] Far LODs built at load: merged block meshes beyond 70 m, cars
+ beyond 90 m
+
+A third of the street view's triangles were static block geometry and far
+cars at distances where a triangle is well under a pixel.
+
+Blocks (src/nyc/chunkLod.ts): bake() merges a block's static parts into a
+few meshes per material (~100-140k triangles per block), drawn whole
+whenever any of the block is in view. Each merged mesh over 400 triangles
+gets a coarse twin: same material, attributes and bounds, simplified with
+the vendored meshoptimizer (meshlod-core) within 6 cm, normals, uv seams
+and colour borders weighed in, compacted (about a third of the triangles).
+Blocks whose nearest point is beyond 70 m (back inside 62 m) show the
+twins. NycLevel.update builds them the first time a block is that far, in
+frames where no block is being built, in steps of ~1500 triangles (a
+merged mesh is cut where its parts share no vertex): ~0.3 s per block,
+longest step ~15 ms. Parts thinner than 6 cm (a door sill, a thin rod)
+collapse to nothing in the twin.
+
+Cars (vehicleFleet.ts): a fourth representation beyond FLEET_LOD.FAR =
+90 m (back at 82 m): the far LOD of each model welded by position and
+colour and simplified within 7 cm (2032 -> 421, 1754 -> 867, 2812 -> 631,
+1626 -> 281 triangles ...), same materials, drawn by two more instance
+batches per model. Built once per model when the simplifier's wasm is in;
+until then, and for the halves it gains nothing on, the far LOD.
+
+Node run of the street view through FastRenderer (fastrender's
+js/test/world-objects.node.mjs --mesh-census): triangles sent 5.07 M ->
+3.92 M per frame, with only the instances in view 2.25 M -> 1.75 M; merged
+block meshes 973k -> 642k, far cars 276k -> 136k; shadow casters per pass
+0.96 M -> 0.76 M; draws 1470 -> 1485.
+
+tests/chunk-lod.test.ts: twins exist and are under 45 % of the triangles,
+never stick out of the original by more than the error, keep material /
+attributes / bounds / shadow flags, one version shown per level,
+hysteresis. npm run qa: 264 passed.
+---
+ scripts/qa.mjs          |   5 +-
+ src/nyc.ts              |  45 ++++++++
+ src/nyc/chunkLod.ts     | 228 ++++++++++++++++++++++++++++++++++++++++
+ src/nyc/vehicleFleet.ts | 120 +++++++++++++++++++--
+ tests/chunk-lod.test.ts | 125 ++++++++++++++++++++++
+ 5 files changed, 515 insertions(+), 8 deletions(-)
+ create mode 100644 src/nyc/chunkLod.ts
+ create mode 100644 tests/chunk-lod.test.ts
+
+diff --git a/scripts/qa.mjs b/scripts/qa.mjs
+index 06c79e9..ccba0e1 100644
+--- a/scripts/qa.mjs
++++ b/scripts/qa.mjs
+@@ -45,7 +45,7 @@ const AREAS = {
+   lighting: ['lighting'], light: ['lighting'], materials: ['materials'], rebuilt: ['materials'],
+   zfight: ['zfight'], flicker: ['zfight'], offices: ['offices'], office: ['offices'], memory: ['memory', 'memory-city', 'memory-rooms'], mem: ['memory', 'memory-city', 'memory-rooms'], leaks: ['memory', 'memory-city', 'memory-rooms'],
+   nbhd: ['neighborhoods'], neighborhoods: ['neighborhoods'], waterfront: ['neighborhoods'],
+-  meshlod: ['meshlod'], lod: ['meshlod'], simplify: ['meshlod'],
++  meshlod: ['meshlod'], lod: ['meshlod', 'chunk-lod'], simplify: ['meshlod'],
+   museum: ['museum'], libraries: ['libraries'], library: ['libraries'], seamless: ['seamless'], lazy: ['seamless', 'interior', 'shop'], realscale: ['realscale', 'seamless', 'museum'],
+ };
+ /** changed file -> areas (first match wins; '*' = every test file). Add a line when you add a test file. */
+@@ -57,7 +57,8 @@ const SRC_MAP = [
+   [/^src\/nyc\/ground/, ['ground']],
+   [/^src\/rooms\/office/, ['offices']],
+   [/^src\/rooms\/vertical/, ['vertical', 'offices']],
+-  [/^src\/nyc\/vehicle/, ['vehicles']],
++  [/^src\/nyc\/chunkLod/, ['chunk-lod', 'nyc', 'memory-city']],
++  [/^src\/nyc\/vehicle/, ['vehicles', 'chunk-lod']],
+   [/^src\/zfix\.ts$/, ['zfight']],
+   [/^src\/(meshlod|meshlod-core)\.ts$|^src\/vendor\/meshopt|^scripts\/(build_vehicles\.mjs|lib\/simplify-doc\.mjs)$|^public\/assets\/vehicles\//, ['meshlod', 'vehicles']],
+   [/^src\/(minimap|nyc\/minimap-nyc)\.ts$/, ['minimap']],
+diff --git a/src/nyc.ts b/src/nyc.ts
+index b09f577..4d25ee0 100644
+--- a/src/nyc.ts
++++ b/src/nyc.ts
+@@ -7,6 +7,7 @@ import { carMesh, Traffic } from './nyc/vehicles';
+ import { busStop, noParking } from './nyc/vehicleBusStop';
+ import { Pedestrians } from './nyc/people';
+ import { CityVis } from './nyc/occlusion'; // [vis] chunk visibility / occlusion / HLOD (WP2)
++import { chunkLodReady, chunkLodSteps, chunkLevel, setChunkLevel, type ChunkLod } from './nyc/chunkLod'; // far LODs of the merged meshes
+ export { avenueName, streetName };
+ export { SHOPS } from './nyc/buildings';
+ export { setNight } from './nyc/buildings';
+@@ -40,6 +41,10 @@ interface Chunk {
+   portals: Portal[];
+   /** building outlines in world coordinates (occlusion / HLOD) */
+   hulls?: Hull[];
++  /** the merged meshes' coarse twins (nyc/chunkLod.ts); absent until they are built (the first time the block is far) */
++  lod?: ChunkLod;
++  /** the level shown (0: the originals); absent until one is set */
++  level?: number;
+ }
+ 
+ export class NycLevel implements Level {
+@@ -118,11 +123,40 @@ export class NycLevel implements Level {
+         }
+         if (performance.now() - t0 > NycLevel.BUILD_BUDGET_MS) break;
+       }
++    } else if (chunkLodReady()) {
++      // far LODs (nyc/chunkLod.ts): while no block is being built, the coarse twins of the farthest block that is
++      // far enough to show them and has none yet, a few ms per frame within the same budget. A block is on
++      // screen with its originals as soon as it is built; the twins take over when they are ready
++      if (!this.lodJob) {
++        let best: Chunk | null = null, bestD = 0;
++        for (const [k, ch] of this.chunks) {
++          if (ch.lod) continue;
++          const [x, z] = k.split(',').map(Number);
++          const d = Math.hypot(Math.max(0, Math.abs(p.x - x * AX) - AX / 2), Math.max(0, Math.abs(p.z - z * SZ) - SZ / 2));
++          if (chunkLevel(d, 0) > 0 && d > bestD) { best = ch; bestD = d; }
++        }
++        if (best) {
++          const lod: ChunkLod = [];
++          this.lodJob = { ch: best, lod, it: chunkLodSteps(best.group, lod) };
++        }
++      }
++      if (this.lodJob) {
++        const t0 = performance.now();
++        for (;;) {
++          if (this.lodJob.it.next().done) {
++            this.lodJob.ch.lod = this.lodJob.lod;
++            this.lodJob = null;
++            break;
++          }
++          if (performance.now() - t0 > NycLevel.BUILD_BUDGET_MS) break;
++        }
++      }
+     }
+     for (const [k, ch] of this.chunks) {
+       const [x, z] = k.split(',').map(Number);
+       if (Math.abs(x - cx) > RX + 1 || Math.abs(z - cz) > RZ + 1) {
+         this.vis.remove(x, z); // [vis]
++        if (this.lodJob?.ch === ch) this.lodJob = null;
+         this.group.remove(ch.group);
+         disposeTree(ch.group);
+         this.chunks.delete(k);
+@@ -134,6 +168,15 @@ export class NycLevel implements Level {
+     for (const [k, ch] of this.chunks) {
+       const [x, z] = k.split(',').map(Number);
+       setBlockDetail(ch.group, Math.abs(x - cx) <= 1 && Math.abs(z - cz) <= 1);
++      // far LODs: a block draws its merged meshes' coarse twins by the distance of its nearest point (CHUNK_LOD.levels)
++      if (ch.lod) {
++        const dx = Math.max(0, Math.abs(p.x - x * AX) - AX / 2), dz = Math.max(0, Math.abs(p.z - z * SZ) - SZ / 2);
++        const level = chunkLevel(Math.hypot(dx, dz), ch.level ?? 0);
++        if (level !== ch.level) {
++          ch.level = level;
++          setChunkLevel(ch.lod, level);
++        }
++      }
+     }
+     this.vis.update(new THREE.Vector3(p.x, p.y + 1.6, p.z), cx, cz, RX, RZ); // [vis]
+     const key = `${cx},${cz},${this.chunks.size}`;
+@@ -186,6 +229,8 @@ export class NycLevel implements Level {
+ 
+   /** [vis] a chunk being built across frames (see update) */
+   private pending: { cx: number; cz: number; it: Generator<void, Chunk> } | null = null;
++  /** the far LOD of a block, being built across frames (see update) */
++  private lodJob: { ch: Chunk; lod: ChunkLod; it: Generator<void, void, void> } | null = null;
+   /** [vis] true while a chunk is being built across frames */
+   get streaming() {
+     if (this.pending) return true;
+diff --git a/src/nyc/chunkLod.ts b/src/nyc/chunkLod.ts
+new file mode 100644
+index 0000000..fdc42f8
+--- /dev/null
++++ b/src/nyc/chunkLod.ts
+@@ -0,0 +1,228 @@
++import * as THREE from 'three';
++import { simplifierReady, simplifyMesh, compact, remapAttribute } from '../meshlod-core';
++
++/**
++ * Far LODs of a street block's merged static meshes.
++ *
++ * bake() (common.ts) merges a block's static parts into a few meshes per material, up to ~33k triangles each
++ * and ~140k per block. A block is drawn whole whenever any of it is in view, so the blocks down an avenue cost
++ * as many triangles at 150 m as the one the player stands in: about a million triangles per frame in the
++ * street view, most of them where one of those triangles is well under a pixel.
++ *
++ * Here every merged mesh above CHUNK_LOD.minTris gets a coarse twin per level: the same material, vertex
++ * colours, uvs and bounds, simplified with meshoptimizer (meshlod-core) to a geometric error of at most `error`
++ * metres with normals, uv seams and colour borders weighed in, compacted to the vertices it uses (about a third
++ * of the triangles at 6 cm). A block whose nearest point is farther than a level's `dist` shows that level's
++ * twins (setChunkLevel), a nearer one the originals. The error is about one pixel of a 1600 px high drawable at
++ * the distance where the level starts (70 degree field of view: 6 cm at 70 m), so a twin is within a pixel of
++ * the original from where it is used. What that leaves out: parts thinner than the error (a 3 cm door sill, a
++ * thin rod) collapse to nothing.
++ * Shadows follow (a twin casts when the original did). The block's small details (`fine`, buildings.ts
++ * setBlockDetail) are not touched: they are only shown on the nearest blocks anyway.
++ *
++ * When: NycLevel.update builds the twins of a block the first time it is far enough to show them, in the frames
++ * where no block is being built, a few ms at a time; until then the block shows its originals. Blocks the
++ * player never leaves the neighbourhood of get none. Memory: a twin holds about a third of its original's vertices.
++ *
++ * Cost: the simplifier takes ~4 ms per 1000 triangles of input whatever the target (attribute quadrics over
++ * unwelded flat-shaded parts): ~0.4 s per block and level, in steps of CHUNK_LOD.stepTris triangles.
++ * That is why there is one level: a second one ({ dist: 35, back: 5, error: 0.03 }, ~55 % of the triangles for
++ * the blocks next to the player's) is measured to take another 100k triangles off the street view and doubles
++ * that time.
++ */
++export const CHUNK_LOD = {
++  /** switch for comparisons (labs, tests) */
++  on: true,
++  /**
++   * coarser levels after the originals: blocks whose nearest point is beyond `dist` (m) show twins within `error`
++   * (m) of the originals, and come back to the finer level inside dist - back
++   */
++  levels: [{ dist: 70, back: 8, error: 0.06 }],
++  /** triangles simplified per step (~4 ms per 1000 in V8) */
++  stepTris: 1500,
++  /** merged meshes under this many triangles keep one version */
++  minTris: 400,
++  /** a twin is kept when it has at most this share of the triangles of the level before it */
++  gain: 0.8,
++  /** totals so far (tools, tests): merged meshes with a twin, their triangles, the twins' triangles per level */
++  stats: { meshes: 0, tris: 0, lodTris: [0] },
++};
++
++// for tools that drive the game from outside (benchmarks: on = false shows the originals again)
++(globalThis as unknown as { __chunkLod: typeof CHUNK_LOD }).__chunkLod = CHUNK_LOD;
++
++let ok = false;
++simplifierReady.then(() => (ok = true)).catch(() => {});
++/** the simplifier's wasm has loaded and the LODs are on */
++export const chunkLodReady = () => ok && CHUNK_LOD.on;
++
++/** per merged mesh of a block: [original, twin of level 1, twin of level 2, ...] (null: the level before it serves) */
++export type ChunkLod = (THREE.Mesh | null)[][];
++
++type Attr = THREE.BufferAttribute & { isInterleavedBufferAttribute?: boolean };
++const f32 = (g: THREE.BufferGeometry, name: string, size: number) => {
++  const a = g.getAttribute(name) as Attr | undefined;
++  return a && a.array instanceof Float32Array && a.itemSize === size && !a.normalized && !a.isInterleavedBufferAttribute ? a : null;
++};
++
++/**
++ * Where a merged mesh can be cut into pieces that share no vertex: mergeGeometries appends part after part, so
++ * both the triangles and the vertices of a part are contiguous. Returns [first index, end index, first vertex,
++ * end vertex] per piece of about `tris` triangles (one piece when there is no such cut).
++ */
++function pieces(ix: Uint32Array, tris: number): [number, number, number, number][] {
++  const n = ix.length / 3;
++  // lowest vertex used from triangle t on
++  const low = new Uint32Array(n + 1);
++  low[n] = 0xffffffff;
++  for (let t = n - 1; t >= 0; t--) low[t] = Math.min(low[t + 1], ix[t * 3], ix[t * 3 + 1], ix[t * 3 + 2]);
++  const out: [number, number, number, number][] = [];
++  let start = 0, high = -1;
++  for (let t = 0; t < n; t++) {
++    high = Math.max(high, ix[t * 3], ix[t * 3 + 1], ix[t * 3 + 2]);
++    // a cut after triangle t: nothing later uses a vertex up to `high`
++    if (t + 1 === n || (t + 1 - start >= tris && low[t + 1] > high)) {
++      out.push([start * 3, (t + 1) * 3, low[start], high + 1]);
++      start = t + 1;
++    }
++  }
++  return out;
++}
++
++/**
++ * `src` (the geometry of `mesh`) simplified within `error`; null when that gains too little. A step per piece
++ * of CHUNK_LOD.stepTris triangles: the simplifier's time goes with its input, and a merged mesh is thousands of
++ * separate parts, so simplifying it piece by piece gives the same result in steps of a few ms.
++ */
++function* twinSteps(mesh: THREE.Mesh, src: THREE.BufferGeometry, error: number): Generator<void, THREE.Mesh | null, void> {
++  const index = src.index;
++  if (!index || src.groups.length || Array.isArray(mesh.material)) return null;
++  const tris = index.count / 3;
++  if (tris < CHUNK_LOD.minTris) return null;
++  const P = f32(src, 'position', 3);
++  if (!P) return null;
++  const mat = mesh.material as THREE.MeshStandardMaterial;
++  if (mat.transparent || mat.alphaTest > 0) return null;
++  const N = f32(src, 'normal', 3), C = f32(src, 'color', 3) ?? f32(src, 'color', 4);
++  // uvs matter only where the material samples a texture with them (bake() gives every mesh a uv attribute)
++  const textured = !!(mat.map || mat.normalMap || mat.roughnessMap || mat.metalnessMap || mat.emissiveMap || mat.aoMap || mat.userData?.pbr);
++  const U = textured ? f32(src, 'uv', 2) : null;
++  const ix = index.array instanceof Uint32Array ? index.array : new Uint32Array(index.array as ArrayLike<number>);
++  const sub = (a: Attr | null, v0: number, v1: number) => (a ? (a.array as Float32Array).subarray(v0 * a.itemSize, v1 * a.itemSize) : null);
++  const done: Uint32Array[] = [];
++  let kept = 0, worst = 0;
++  for (const [i0, i1, v0, v1] of pieces(ix, CHUNK_LOD.stepTris)) {
++    const local = new Uint32Array(i1 - i0);
++    for (let i = i0; i < i1; i++) local[i - i0] = ix[i] - v0;
++    const r = simplifyMesh(
++      { index: local, position: sub(P, v0, v1)!, normal: sub(N, v0, v1), uv: sub(U, v0, v1), color: sub(C, v0, v1), colorSize: C?.itemSize },
++      { targetTris: 0, error, absolute: true, permissive: true, prune: true },
++    );
++    for (let i = 0; i < r.index.length; i++) r.index[i] += v0;
++    done.push(r.index);
++    kept += r.index.length;
++    worst = Math.max(worst, r.error);
++    yield;
++  }
++  const lodTris = kept / 3;
++  if (lodTris < 1 || lodTris > tris * CHUNK_LOD.gain) return null;
++  const all = new Uint32Array(kept);
++  let at = 0;
++  for (const d of done) {
++    all.set(d, at);
++    at += d.length;
++  }
++  const c = compact(all);
++  const lg = new THREE.BufferGeometry();
++  for (const [name, a] of Object.entries(src.attributes)) {
++    const b = a as Attr;
++    if (!(b.array instanceof Float32Array) || b.isInterleavedBufferAttribute) return null;
++    lg.setAttribute(name, new THREE.BufferAttribute(remapAttribute(b.array, b.itemSize, c.remap, c.count), b.itemSize, b.normalized));
++  }
++  lg.setIndex(new THREE.BufferAttribute(c.count > 65535 ? c.index : new Uint16Array(c.index), 1));
++  // the original's bounds: culled, shadow-tagged (lighting.ts casterR) and sorted exactly like it
++  const g = mesh.geometry;
++  if (!g.boundingSphere) g.computeBoundingSphere();
++  if (!g.boundingBox) g.computeBoundingBox();
++  lg.boundingSphere = g.boundingSphere!.clone();
++  lg.boundingBox = g.boundingBox!.clone();
++  const twin = new THREE.Mesh(lg, mesh.material);
++  twin.name = mesh.name;
++  twin.castShadow = mesh.castShadow;
++  twin.receiveShadow = mesh.receiveShadow;
++  twin.renderOrder = mesh.renderOrder;
++  twin.layers.mask = mesh.layers.mask;
++  twin.position.copy(mesh.position);
++  twin.quaternion.copy(mesh.quaternion);
++  twin.scale.copy(mesh.scale);
++  twin.userData.owned = true;
++  twin.userData.baked = true;
++  twin.userData.chunkLod = { tris: lodTris, error: worst };
++  twin.visible = false;
++  return twin;
++}
++
++/**
++ * Build the twins of a block's merged meshes into `out`, in steps of a few ms (twinSteps). The twins are added
++ * next to their originals, hidden; setChunkLevel shows them.
++ */
++export function* chunkLodSteps(group: THREE.Object3D, out: ChunkLod): Generator<void, void, void> {
++  const todo: THREE.Mesh[] = [];
++  const visit = (o: THREE.Object3D) => {
++    if (o.userData.fine) return; // small details: hidden beyond the nearest blocks (setBlockDetail)
++    const m = o as THREE.Mesh;
++    if (m.isMesh && m.userData.baked && !m.userData.chunkLod && !(m as unknown as THREE.InstancedMesh).isInstancedMesh && m.parent) todo.push(m);
++    for (const c of o.children) visit(c);
++  };
++  visit(group);
++  const st = CHUNK_LOD.stats;
++  for (const mesh of todo) {
++    if (group.userData.disposed) return;
++    const entry: (THREE.Mesh | null)[] = [mesh];
++    let any = false;
++    try {
++      // each level from the original, so its error is the whole budget (from the level before it the errors add
++      // up and a third more triangles are left); kept only when it gains on the level before it
++      let prev = mesh.geometry.index ? mesh.geometry.index.count / 3 : 0;
++      for (const [i, level] of CHUNK_LOD.levels.entries()) {
++        let twin = yield* twinSteps(mesh, mesh.geometry, level.error);
++        if (twin && twin.geometry.index!.count / 3 > prev * CHUNK_LOD.gain) {
++          twin.geometry.dispose();
++          twin = null;
++        }
++        entry.push(twin);
++        if (!twin) continue;
++        any = true;
++        prev = twin.geometry.index!.count / 3;
++        st.lodTris[i] = (st.lodTris[i] ?? 0) + prev;
++        mesh.parent!.add(twin);
++      }
++    } catch {
++      // (a twin already added stays: the entry lists it)
++    }
++    if (!any) continue;
++    while (entry.length <= CHUNK_LOD.levels.length) entry.push(null);
++    st.meshes++;
++    st.tris += mesh.geometry.index!.count / 3;
++    out.push(entry);
++  }
++}
++
++/** show a block's merged meshes at a level: 0 the originals, n the twins of CHUNK_LOD.levels[n - 1] */
++export function setChunkLevel(lod: ChunkLod, level: number) {
++  for (const entry of lod) {
++    let show = Math.min(level, entry.length - 1);
++    while (show > 0 && !entry[show]) show--;
++    for (let i = 0; i < entry.length; i++) {
++      const m = entry[i];
++      if (m) m.visible = i === show;
++    }
++  }
++}
++
++/** the level of a block whose nearest point is `d` metres away and that shows level `cur` now */
++export function chunkLevel(d: number, cur: number) {
++  let level = 0;
++  if (CHUNK_LOD.on) for (const [i, l] of CHUNK_LOD.levels.entries()) if (d > l.dist - (cur > i ? l.back : 0)) level = i + 1;
++  return level;
++}
+diff --git a/src/nyc/vehicleFleet.ts b/src/nyc/vehicleFleet.ts
+index c126fc9..5d37e9b 100644
+--- a/src/nyc/vehicleFleet.ts
++++ b/src/nyc/vehicleFleet.ts
+@@ -4,6 +4,7 @@ import { mergeGeometries, toCreasedNormals } from 'three/examples/jsm/utils/Buff
+ import { gltf, configureLoader } from '../detail';
+ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+ import { getNight } from '../lighting';
++import { simplifierReady, simplifyMesh, simplifySloppyMesh, compact, remapAttribute } from '../meshlod-core';
+ 
+ /**
+  * The traffic fleet: detailed CC-BY car models (scripts/build_vehicles.mjs -> public/assets/vehicles/), each with a
+@@ -598,6 +599,79 @@ function merged(p: Prepared, level: 1 | 2, paint: boolean): THREE.BufferGeometry
+   return mergedCache.get(key)!;
+ }
+ 
++// ---------------------------------------------------------------- distant LOD (simplified at load)
++
++let simplifierOk = false;
++simplifierReady.then(() => (simplifierOk = true)).catch(() => {});
++/** the distant LOD: at most this share of the far LOD's triangles, within this error (m) */
++export const FLEET_DISTANT = { ratio: 0.12, error: 0.07, minTris: 96 };
++const distantCache = new Map<string, THREE.BufferGeometry | null>();
++/**
++ * The far LOD of a model simplified once more for cars beyond FLEET_LOD.FAR, where a car is a few dozen pixels
++ * long and the far LOD's 1.5-2.8k triangles are several per pixel (at 90 m and a 70 degree field of view a pixel
++ * of a 1600 px high drawable is 8 cm). Same attributes and materials as merged(p, 2, paint), so no new shader.
++ * The far LOD is a set of open patches with their seams doubled (hard edges), which stops edge collapse at
++ * ~65 %: vertices at the same place with the same colour are welded first (each keeps one of its normals, good
++ * enough at this size), then edge collapse within FLEET_DISTANT.error keeps the silhouette and the colour
++ * borders; where that still leaves too much, the topology-free simplifier takes over. undefined until the
++ * simplifier's wasm is ready, null when the far LOD is already small or nothing is gained.
++ */
++function distant(p: Prepared, paint: boolean): THREE.BufferGeometry | null | undefined {
++  const key = `${p.id}|${paint}`;
++  if (distantCache.has(key)) return distantCache.get(key)!;
++  if (!simplifierOk) return undefined;
++  let out: THREE.BufferGeometry | null = null;
++  const src = merged(p, 2, paint);
++  try {
++    const tris = src?.index ? src.index.count / 3 : 0;
++    if (src && tris >= FLEET_DISTANT.minTris * 2) {
++      const f32 = (name: string) => {
++        const a = src.getAttribute(name) as THREE.BufferAttribute | undefined;
++        return a && a.array instanceof Float32Array && !a.normalized ? a : null;
++      };
++      const P = f32('position'), N = f32('normal'), C = f32('color');
++      if (P) {
++        const index = src.index!.array instanceof Uint32Array ? (src.index!.array as Uint32Array) : new Uint32Array(src.index!.array as ArrayLike<number>);
++        const target = Math.max(FLEET_DISTANT.minTris, Math.round(tris * FLEET_DISTANT.ratio));
++        // weld: the first vertex at the same position (0.1 mm) with the same colour (1/256)
++        const pa = P.array as Float32Array, ca = C ? (C.array as Float32Array) : null, cs = C?.itemSize ?? 0;
++        const first = new Map<string, number>();
++        const welded = new Uint32Array(index.length);
++        const weld = new Uint32Array(P.count);
++        for (let v = 0; v < P.count; v++) {
++          let k = `${Math.round(pa[v * 3] * 1e4)},${Math.round(pa[v * 3 + 1] * 1e4)},${Math.round(pa[v * 3 + 2] * 1e4)}`;
++          if (ca) k += `,${Math.round(ca[v * cs] * 255)},${Math.round(ca[v * cs + 1] * 255)},${Math.round(ca[v * cs + 2] * 255)}`;
++          let f = first.get(k);
++          if (f === undefined) first.set(k, (f = v));
++          weld[v] = f;
++        }
++        for (let i = 0; i < index.length; i++) welded[i] = weld[index[i]];
++        const m = { index: welded, position: pa, color: ca, colorSize: cs || undefined };
++        let r = simplifyMesh(m, { targetTris: target, error: FLEET_DISTANT.error, absolute: true, permissive: true });
++        if (r.index.length / 3 > target * 1.5) {
++          const r2 = simplifySloppyMesh({ ...m, index: r.index }, target, FLEET_DISTANT.error * 1.5);
++          if (r2.index.length >= FLEET_DISTANT.minTris * 3 * 0.5 && r2.index.length < r.index.length) r = r2;
++        }
++        if (r.index.length >= 12 && r.index.length / 3 < tris * 0.6) {
++          const c = compact(r.index);
++          out = new THREE.BufferGeometry();
++          for (const [name, a] of [['position', P], ['normal', N], ['color', C]] as const)
++            if (a) out.setAttribute(name, new THREE.BufferAttribute(remapAttribute(a.array as Float32Array, a.itemSize, c.remap, c.count), a.itemSize));
++          out.setIndex(new THREE.BufferAttribute(c.count > 65535 ? c.index : new Uint16Array(c.index), 1));
++          // the far LOD's bounds: the instances are placed and culled exactly as before
++          out.boundingSphere = src.boundingSphere;
++          out.boundingBox = src.boundingBox;
++          out.userData.distantLod = { tris: c.index.length / 3, of: tris, error: r.error };
++        }
++      }
++    }
++  } catch {
++    out = null;
++  }
++  distantCache.set(key, out);
++  return out;
++}
++
+ // ---------------------------------------------------------------- lamps (night head/tail lights, brake lights)
+ 
+ /** a soft round glow, for lamp cards and the headlight pool */
+@@ -755,8 +829,14 @@ export function nearObject(p: Prepared, paint: THREE.Material) {
+ 
+ // ---------------------------------------------------------------- instanced mid/far LODs
+ 
+-/** distances (m): near LOD inside NEAR, instanced mid LOD to MID (with shadows), instanced far LOD beyond */
+-export const FLEET_LOD = { NEAR: 12, MID: 40, SHADOW: 25 };
++/**
++ * distances (m): near LOD inside NEAR, instanced mid LOD to MID (with shadows), instanced far LOD to FAR, the
++ * distant LOD (the far LOD simplified at load, distant()) beyond; a car on the distant LOD comes back to the far
++ * LOD only inside FAR - FAR_BACK, so one that keeps pace with the player at the boundary does not flicker
++ */
++export const FLEET_LOD = { NEAR: 12, MID: 40, SHADOW: 25, FAR: 90, FAR_BACK: 8 };
++// for tools that drive the game from outside (benchmarks: FAR = Infinity keeps every far car on the far LOD)
++(globalThis as unknown as { __fleetLod: typeof FLEET_LOD }).__fleetLod = FLEET_LOD;
+ /** which representation a car (whose model has loaded) uses at distance d; 'near' only once its near file is in */
+ export function fleetLevel(d: number, nearLoaded: boolean): 'near' | 'mid' | 'far' {
+   return d < FLEET_LOD.NEAR && nearLoaded ? 'near' : d < FLEET_LOD.MID ? 'mid' : 'far';
+@@ -776,6 +856,8 @@ interface Entry {
+   color: THREE.Color;
+   /** null until the model's near LOD has loaded: the car stays on the instanced mid LOD up close */
+   near: THREE.Object3D | null;
++  /** drawn with the distant LOD last frame (hysteresis at FLEET_LOD.FAR) */
++  distant?: boolean;
+ }
+ /** a growable InstancedMesh for one (model, level, paint|rest) */
+ class Batch {
+@@ -835,7 +917,9 @@ class Batch {
+ export class FleetInstances {
+   root = new THREE.Group();
+   private cars = new Set<Entry>();
+-  private batches = new Map<string, Record<'midP' | 'midR' | 'farP' | 'farR' | 'shP' | 'shR' | 'head' | 'tail', Batch | null>>();
++  private batches = new Map<string, Record<'midP' | 'midR' | 'farP' | 'farR' | 'disP' | 'disR' | 'shP' | 'shR' | 'head' | 'tail', Batch | null>>();
++  /** per model: whether its distant LOD exists (absent until the simplifier has been asked) */
++  private hasDistant = new Map<string, boolean>();
+   constructor() {
+     this.root.name = 'fleet-instances';
+   }
+@@ -860,17 +944,33 @@ export class FleetInstances {
+       };
+       const lamp = (g: THREE.BufferGeometry | undefined, m: THREE.Material, colored: boolean) => (g ? new Batch(this.root, g, m, false, colored) : null);
+       b = {
+-        midP: mk(1, true), midR: mk(1, false), farP: mk(2, true), farR: mk(2, false),
++        midP: mk(1, true), midR: mk(1, false), farP: mk(2, true), farR: mk(2, false), disP: null, disR: null,
+         shP: sh(true), shR: sh(false),
+         head: lamp(p.lamps?.headGeo, HEAD_MAT, false), tail: lamp(p.lamps?.tailGeo, TAIL_MAT, true),
+       };
+       this.batches.set(id, b);
+     }
++    // the distant LOD, once the simplifier is ready (until then, and for models it gains nothing on: the far LOD)
++    if (!this.hasDistant.has(id)) {
++      const p = ready.get(id)!;
++      const gp = distant(p, true), gr = distant(p, false);
++      if (gp !== undefined && gr !== undefined) {
++        // a half that is small already (or gains nothing) is drawn with its far geometry in the distant batch too
++        const has = !!(gp || gr);
++        const fp = has ? (gp ?? merged(p, 2, true)) : null, fr = has ? (gr ?? merged(p, 2, false)) : null;
++        if (fp) b.disP = new Batch(this.root, fp, FAR_PAINT, false, true);
++        if (fr) b.disR = new Batch(this.root, fr, FAR_REST, false, false);
++        this.hasDistant.set(id, has);
++      }
++    }
+     return b;
+   }
+   /** stats for labs/QA: cars by level */
+   census = { near: 0, mid: 0, far: 0 };
++  /** how many of census.far are on the distant LOD */
++  distant = 0;
+   update(eye: THREE.Vector3) {
++    let distantCars = 0;
+     for (const b of this.batches.values()) for (const x of Object.values(b)) x?.begin();
+     const c = { near: 0, mid: 0, far: 0 };
+     const pos = new THREE.Vector3();
+@@ -915,11 +1015,19 @@ export class FleetInstances {
+         b.midR?.push(e.obj.matrixWorld, e.color);
+         c.mid++;
+       } else {
+-        b.farP?.push(e.obj.matrixWorld, e.color);
+-        b.farR?.push(e.obj.matrixWorld, e.color);
++        e.distant = this.hasDistant.get(e.id) === true && d > (e.distant ? FLEET_LOD.FAR - FLEET_LOD.FAR_BACK : FLEET_LOD.FAR);
++        if (e.distant) {
++          b.disP?.push(e.obj.matrixWorld, e.color);
++          b.disR?.push(e.obj.matrixWorld, e.color);
++          distantCars++;
++        } else {
++          b.farP?.push(e.obj.matrixWorld, e.color);
++          b.farR?.push(e.obj.matrixWorld, e.color);
++        }
+         c.far++;
+       }
+     }
++    this.distant = distantCars;
+     for (const b of this.batches.values()) for (const x of Object.values(b)) x?.end();
+     this.census = c;
+   }
+diff --git a/tests/chunk-lod.test.ts b/tests/chunk-lod.test.ts
+new file mode 100644
+index 0000000..6b3b505
+--- /dev/null
++++ b/tests/chunk-lod.test.ts
+@@ -0,0 +1,125 @@
++/**
++ * Far LODs of a block's merged meshes (src/nyc/chunkLod.ts): the twins exist, are much smaller, stay within their
++ * error of the originals in both directions, keep material / attributes / bounds / shadow flags, and exactly one
++ * version of each merged mesh is shown per level.
++ */
++import * as THREE from 'three';
++import { test, expect, between, fmt } from './qa';
++import { nycChunk } from './world';
++import { simplifierReady, surfaceDistance } from '../src/meshlod-core';
++import { CHUNK_LOD, chunkLodSteps, chunkLevel, setChunkLevel, type ChunkLod } from '../src/nyc/chunkLod';
++import { FLEET_LOD } from '../src/nyc/vehicleFleet';
++
++const tris = (m: THREE.Mesh) => m.geometry.index!.count / 3;
++const arrays = (m: THREE.Mesh) => {
++  const ix = m.geometry.index!.array;
++  return { p: m.geometry.getAttribute('position').array as Float32Array, i: ix instanceof Uint32Array ? ix : new Uint32Array(ix) };
++};
++
++let built: ChunkLod | null = null;
++async function lodOf() {
++  if (built) return built;
++  await simplifierReady;
++  const c = nycChunk(1, 0, 0);
++  const lod: ChunkLod = [];
++  let steps = 0, longest = 0;
++  const t0 = performance.now();
++  let t = t0;
++  for (const _ of chunkLodSteps(c.group, lod)) {
++    steps++;
++    longest = Math.max(longest, performance.now() - t);
++    t = performance.now();
++  }
++  const full = lod.reduce((n, e) => n + tris(e[0]!), 0);
++  console.log(`far LODs of one block: ${lod.length} merged meshes (${full} triangles) in ${fmt(performance.now() - t0)} ms, ${steps} steps, longest ${fmt(longest)} ms`);
++  expect(steps >= full / CHUNK_LOD.stepTris / 4, `${steps} steps for ${full} triangles: the merged meshes are not cut into pieces`);
++  expect(steps >= lod.length, `${steps} steps for ${lod.length} merged meshes`);
++  // a second pass finds nothing new (twins are not originals)
++  const again: ChunkLod = [];
++  for (const _ of chunkLodSteps(c.group, again)) void _;
++  expect(again.length === lod.length, `a second pass lists the same ${lod.length} originals, not their twins (${again.length})`);
++  for (const e of again) for (const t of e.slice(1)) if (t) { t.parent?.remove(t); t.geometry.dispose(); }
++  return (built = lod);
++}
++
++test('a block gets coarse twins of its merged meshes: the far level has under 45 % of their triangles', async () => {
++  const lod = await lodOf();
++  expect(lod.length >= 5, `${lod.length} merged meshes with a twin`);
++  let full = 0;
++  const level = CHUNK_LOD.levels.map(() => 0);
++  for (const e of lod) {
++    expect(e.length === CHUNK_LOD.levels.length + 1, `entry has ${e.length} versions`);
++    full += tris(e[0]!);
++    let shown = e[0]!;
++    for (let i = 1; i < e.length; i++) {
++      if (e[i]) {
++        expect(tris(e[i]!) <= tris(shown) * CHUNK_LOD.gain, `level ${i}: ${tris(e[i]!)} of ${tris(shown)} triangles is not worth a twin`);
++        shown = e[i]!;
++      }
++      level[i - 1] += tris(shown);
++    }
++  }
++  between(level[level.length - 1] / full, 0.02, 0.45, `far level share of ${full} triangles`);
++  for (let i = 1; i < level.length; i++) expect(level[i] <= level[i - 1], `level ${i + 1} has more triangles than level ${i}`);
++});
++
++test('a twin stays within its error of the original (both ways) and keeps material, attributes, bounds and shadow flags', async () => {
++  const lod = await lodOf();
++  for (const e of lod) {
++    const o = e[0]!, a = arrays(o);
++    for (let i = 1; i < e.length; i++) {
++      const t = e[i];
++      if (!t) continue;
++      const err = CHUNK_LOD.levels[i - 1].error;
++      expect(t.material === o.material, 'same material (no new shader, same textures)');
++      expect(t.castShadow === o.castShadow && t.receiveShadow === o.receiveShadow, 'same shadow flags');
++      expect(t.parent === o.parent && t.userData.baked === true && t.userData.owned === true, 'next to the original, owned by the block (freed with it)');
++      expect(Object.keys(t.geometry.attributes).sort().join() === Object.keys(o.geometry.attributes).sort().join(), 'same attributes');
++      expect(t.geometry.boundingSphere!.equals(o.geometry.boundingSphere!), 'same bounding sphere (culled and shadow-tagged alike)');
++      expect(t.geometry.getAttribute('position').count <= o.geometry.getAttribute('position').count, 'compacted');
++      const b = arrays(t);
++      // sampled distances (area-weighted). The twin never sticks out of the original by more than the error. The
++      // other way round, parts thinner than the error (rods, wires, rails, a 3 cm door sill: under a pixel where
++      // the level is used) collapse to nothing, so a small share of the original's surface has no twin surface nearby
++      const lim = err * 1.5 + 0.005;
++      const lost = surfaceDistance(a.p, a.i, b.p, b.i, 3000, lim), added = surfaceDistance(b.p, b.i, a.p, a.i, 3000, lim);
++      expect(added.max <= lim, `level ${i} (${tris(o)} -> ${tris(t)} tris): sticks out ${fmt(added.max)} m (limit ${err} m)`);
++      expect(lost.over <= 0.08, `level ${i} (${tris(o)} -> ${tris(t)} tris): ${fmt(lost.over * 100)} % of the original's surface is farther than ${err} m from the twin (max ${fmt(lost.max)} m)`);
++    }
++  }
++});
++
++test('exactly one version of each merged mesh is shown per level; the level follows distance with hysteresis', async () => {
++  const lod = await lodOf();
++  for (let level = CHUNK_LOD.levels.length; level >= 0; level--) {
++    setChunkLevel(lod, level);
++    for (const e of lod) {
++      const shown = e.filter((m) => m?.visible);
++      expect(shown.length === 1, `level ${level}: ${shown.length} versions visible`);
++      // the coarsest version up to that level
++      let want = Math.min(level, e.length - 1);
++      while (want > 0 && !e[want]) want--;
++      expect(shown[0] === e[want], `level ${level}: shows version ${e.indexOf(shown[0]!)} instead of ${want}`);
++    }
++  }
++  const L = CHUNK_LOD.levels;
++  expect(chunkLevel(0, 0) === 0 && chunkLevel(L[0].dist - 0.1, 0) === 0, 'near: the originals');
++  expect(chunkLevel(500, 0) === L.length, 'far away: the coarsest level');
++  for (const [i, l] of L.entries()) {
++    const next = L[i + 1]?.dist ?? Infinity;
++    if (l.dist + 0.1 < next) expect(chunkLevel(l.dist + 0.1, i) === i + 1, `beyond ${l.dist} m: level ${i + 1}`);
++    if (l.dist - l.back > (L[i - 1]?.dist ?? 0)) {
++      expect(chunkLevel(l.dist - l.back + 0.1, i + 1) === i + 1, `coming back: level ${i + 1} until ${l.dist - l.back} m`);
++      expect(chunkLevel(l.dist - l.back - 0.1, i + 1) === i, `coming back: level ${i} inside ${l.dist - l.back} m`);
++    }
++  }
++  CHUNK_LOD.on = false;
++  expect(chunkLevel(500, L.length) === 0, 'switched off: the originals');
++  CHUNK_LOD.on = true;
++  // one pixel of a 1600 px high drawable at 70 degrees: a level's error is at most ~1 px where it starts
++  for (const l of CHUNK_LOD.levels) expect(l.error <= ((l.dist * 2 * Math.tan((35 * Math.PI) / 180)) / 1600) * 1.05, `error ${l.error} m at ${l.dist} m is over a pixel`);
++});
++
++test('cars: the distant LOD starts beyond the far LOD', () => {
++  expect(FLEET_LOD.MID < FLEET_LOD.FAR - FLEET_LOD.FAR_BACK, 'MID < FAR - FAR_BACK');
++});
+-- 
+2.43.0
+

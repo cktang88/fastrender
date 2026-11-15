@@ -71,6 +71,8 @@ export class WebGLRenderer extends FastRenderer {
 //   basic         every mesh material -> MeshBasicMaterial (same color/map): no lighting at all
 //   noenv         scene.environment = null (no IBL)
 //   nomaps        drop normal/roughness/metalness/ao/emissive/bump maps (keeps map)
+//   nofarlod      the game's far LODs off (patches/3d-world-objects-0004: the blocks' merged meshes beyond 70 m and
+//                 the cars beyond 90 m are drawn with their full versions again): the frame before that patch
 const P = (globalThis.__fr && globalThis.__fr.params) || (globalThis.__frHost && globalThis.__frHost.params) || {};
 const ablate = new Set(String(P.ablate || '').split(',').filter(Boolean));
 let ablateFrame = 0;
@@ -89,6 +91,11 @@ function applyAblate(scene) {
   const stats = ablateFrame === 120 ? { lights: {}, zero: 0, transparent: 0, meshes: 0, materials: {} } : null;
   const kind = ablate.has('basic') ? 'basic' : ablate.has('lambert') ? 'lambert' : null;
   if (ablate.has('noenv')) scene.environment = null;
+  if (ablate.has('nofarlod')) {
+    // (switches the game exports for tools: src/nyc/chunkLod.ts CHUNK_LOD, src/nyc/vehicleFleet.ts FLEET_LOD)
+    if (globalThis.__chunkLod) globalThis.__chunkLod.on = false;
+    if (globalThis.__fleetLod) globalThis.__fleetLod.FAR = Infinity;
+  }
   scene.traverse((o) => {
     if (o.isLight) {
       if (stats) { stats.lights[o.type] = (stats.lights[o.type] || 0) + (o.visible ? 1 : 0); if (o.visible && o.intensity === 0) stats.zero++; }
