@@ -180,14 +180,17 @@ const WHAT = {
 const STEPS = [
   ['webgl', 'webgl-trim', 'generic: dark lights out, under WebGL'],
   ['webgl-trim', 'webgl-opt', 'generic: discarding draws last, under WebGL'],
+  ['webgl', 'webgl-opt', 'generic, free per frame: dark lights out + discarding draws last, under WebGL'],
   ['webgl-opt', 'webgl-opt-inst', 'generic, at a JS price: only the instances in view, under WebGL'],
   ['webgl', 'best', 'every generic method together: what a WebGL build can have'],
+  ['best', 'fastrender', 'THE GAP THAT IS LEFT: the native renderer (Metal backend, architecture, native-only tricks)'],
+  ['webgl-opt-inst', 'fastrender', 'backend + renderer architecture, every trick on both sides'],
+  ['webgl-opt', 'fastrender', 'the gap with only the free generic methods on the WebGL side'],
+  ['webgl-trim', 'fastrender-trimonly', 'backend + renderer architecture, dark lights out on both sides'],
+  ['webgl', 'fastrender-bare', 'backend + renderer architecture, no trick on either side'],
   ['fastrender-bare', 'fastrender-trimonly', 'dark lights out, under fastrender (the same method)'],
   ['fastrender-trimonly', 'fastrender', 'instance culling + discard ordering, under fastrender'],
-  ['webgl', 'fastrender-bare', 'backend + renderer architecture, no trick on either side'],
-  ['webgl-trim', 'fastrender-trimonly', 'backend + renderer architecture, dark lights out on both sides'],
-  ['webgl-opt-inst', 'fastrender', 'backend + renderer architecture, every trick on both sides'],
-  ['best', 'fastrender', 'THE GAP THAT IS LEFT: the native renderer (Metal backend, architecture, native-only tricks)'],
+  ['fastrender-bare', 'fastrender', 'the same three methods, under fastrender (its own versions on / off)'],
   ['webgl', 'fastrender', 'the whole gap'],
 ];
 const ladder = [];

@@ -36,7 +36,7 @@ with one-thing-apart steps, "best WebGL -> fastrender" and checks.
 - `fastrender-bare` / `-trimonly`: bundles build; `DOCS_RS=1 cargo check --release --target aarch64-apple-darwin` of
   the addon passes (it now prints `[fastrender] draws per pass (last frame): ...; FASTRENDER_V3_DEBUG=n` at
   shutdown, which the report reads); the report was run on records made from the Air's JSON. **Not run on Metal.**
-- `webgpu-trim`: not run (no WebGPU adapter here).
+- `webgpu-trim`: not run (no WebGPU device here: stock `webgpu` is lost the same way under SwiftShader).
 
 **Found on the way.** `js/gpu-census.js` evaluated `#if` arithmetic with `Function`, which the Electron pages' CSP
 forbids, so every numeric `#if` counted as true there (in the city, all 9 lit materials looked like they discard
