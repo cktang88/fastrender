@@ -1,0 +1,58 @@
+name: play-smoke
+# Play mode (docs/HOST.md "Play mode"): the one-command script users run to play the real game, unattended for a few
+# seconds per variant (host/electron/scripts/play-world.sh --play-seconds): the world starts on the real clock, the
+# drawable follows a window resize, a click gets pointer lock, W moves the player, full screen and back.
+# Its own workflow (not a job of mac.yml): it only runs when play mode's files change, and it must not wait in
+# mac.yml's queue, where a later push replaces the waiting run. Never gates anything: the PASS / FAIL lines are
+# annotations, the logs, the JSON and a screencapture are in the artifact.
+# !!! The runner's GPU is paravirtual and its display 1x: fps is not an Air's, and the Retina path is not covered.
+on:
+  push:
+    branches: [claude/focused-keller-jtmxe0]
+    paths:
+      - host/electron/game/main.js
+      - host/electron/game/boot.mjs
+      - host/electron/game/preload.js
+      - host/electron/game/play/**
+      - host/electron/scripts/play-world.sh
+      - host/electron/scripts/bundle-game.mjs
+      - host/electron/scripts/world-game.sh
+      - .github/workflows/play-smoke.yml
+  workflow_dispatch:
+concurrency:
+  group: play-smoke-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  play-smoke:
+    runs-on: macos-26
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: play-smoke - fastrender (PARAVIRTUAL GPU - fps is not an Air's)
+        continue-on-error: true
+        timeout-minutes: 40
+        run: |
+          sw_vers; sysctl -n machdep.cpu.brand_string
+          rc=0; bash host/electron/scripts/play-world.sh --fps --play-seconds 15 --out "$GITHUB_WORKSPACE/play-out" --timeout 900 > play-fastrender.log 2>&1 || rc=$?
+          echo "play-world.sh exit $rc"
+          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE)|^\[fastrender\]|pointer lock|MISSING|^== " play-fastrender.log | cut -c1-900; } > play-fastrender-summary.txt
+          bash .github/annotate.sh notice "play-smoke fastrender (exit $rc)" play-fastrender-summary.txt 40
+          grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" play-fastrender.log | tail -80
+      - name: play-smoke - the same game copy on stock WebGLRenderer, second run of the script (nothing to rebuild)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          rc=0; bash host/electron/scripts/play-world.sh --webgl --fps --play-seconds 10 --out "$GITHUB_WORKSPACE/play-out" --timeout 600 > play-webgl.log 2>&1 || rc=$?
+          echo "play-world.sh exit $rc"
+          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE)|pointer lock|MISSING|^== " play-webgl.log | cut -c1-900; } > play-webgl-summary.txt
+          bash .github/annotate.sh notice "play-smoke webgl (exit $rc)" play-webgl-summary.txt 40
+          grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" play-webgl.log | tail -60
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: play-smoke
+          path: |
+            play-out/
+            play-*.log

@@ -202,8 +202,9 @@ What `--play` changes against the golden run:
 - **Network.** Remote requests are refused, as in the golden and the benchmark. `--online` lets the game stream its
   objects from Hugging Face; that content has never been through fastrender.
 - **CI.** `--play-seconds N` runs unattended: waits for the world, resizes the window, clicks, holds `W`, runs N
-  seconds, goes full screen and back, and prints PASS / FAIL lines (plus a `screencapture` of the screen). Job `play-smoke` in `.github/workflows/mac.yml` runs it for both variants when
-  the head commit's message mentions `play-smoke`. It never fails the workflow.
+  seconds, goes full screen and back, and prints PASS / FAIL lines (plus a `screencapture` of the screen).
+  `.github/workflows/play-smoke.yml` runs it for both variants when play mode's
+  files change. It gates nothing.
 
 Not covered: `contentsScale` is read once when the view is created, so a window dragged to a display with another
 scale factor keeps the old one until restart. The game's `G` key switches to its `high` / `ultra` tiers
