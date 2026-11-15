@@ -1,10 +1,11 @@
 name: mac
 on: [push, workflow_dispatch]
 concurrency:
-  # Many agents push to this branch and macOS runners are scarce: a newer push supersedes every older run, queued or
-  # running. Its run tests all earlier commits too.
+  # Many agents push to this branch and macOS runners are scarce. A started run FINISHES (cancelling running ones
+  # meant no run ever completed while pushes kept landing); only the newest waiting run is kept, and it tests all
+  # earlier commits too.
   group: mac-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   run:
     strategy:
