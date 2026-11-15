@@ -1,0 +1,442 @@
+From feeed790c69c6e0b0a4130e683350d52cea180a0 Mon Sep 17 00:00:00 2001
+From: Kwuang Tang <arctangent20@yahoo.com>
+Date: Sun, 15 Nov 2026 10:26:03 +0000
+Subject: [PATCH] three r187 (latest): PMREM cube-target env blend, CSM breaks,
+ vColor vec4, Timer, HDRLoader, PCFShadowMap
+
+- three ^0.170 -> ^0.187.0, @types/three ^0.187.0
+- lighting.ts: CubeUVReflectionMapping was removed (r187 PMREMs are cube render targets with
+  explicit mip levels): the blended sky environment is now a PMREM-shaped WebGLCubeRenderTarget
+  (isPMREMTexture, 256 px, mips to 8 px) rendered per mip level and face from the source PMREMs
+  with a samplerCube/textureLod blend material and a CubeCamera
+- lighting.ts: CSM.getExtendedBreaks() is private now: the [prev, break] pairs are rebuilt from
+  the public csm.breaks; dropped the getPointShadow patch of CSMShader (fixed upstream)
+- lighting.ts: RGBELoader (deprecated r180) -> HDRLoader
+- main.ts: PCFSoftShadowMap (deprecated r182) -> PCFShadowMap; THREE.Clock (deprecated r183) -> THREE.Timer
+- buildings-shop.ts, shopkit/filler.ts: vColor is always vec4 in the shaders now (use .rgb)
+- tests/crossing.test.ts: Box3.setFromObject no longer recomputes stale world matrices (r185),
+  so frozen pedestrians are posed before their stature is measured
+- type fixes: materials.ts (defines), district-showcase.ts (morphAttributes)
+
+Verified: tsc --noEmit clean; npm run build ok; npm run qa 260/260 (interior 14/14); headless
+Chromium: world, museum and ~20 labs compile every program (no shader errors) and render.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BpmvtRPd6KcQVro9zRPwoL
+---
+ package-lock.json            | 44 ++++++++---------
+ package.json                 |  4 +-
+ src/lighting.ts              | 94 ++++++++++++++++++++----------------
+ src/main.ts                  |  5 +-
+ src/materials.ts             |  2 +-
+ src/nyc/buildings-shop.ts    |  2 +-
+ src/nyc/district-showcase.ts |  2 +-
+ src/shopkit/filler.ts        |  2 +-
+ tests/crossing.test.ts       |  5 ++
+ 9 files changed, 88 insertions(+), 72 deletions(-)
+
+diff --git a/package-lock.json b/package-lock.json
+index 2540f19..f6d59e4 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -8,11 +8,11 @@
+       "name": "fractal-world",
+       "version": "0.1.0",
+       "dependencies": {
+-        "three": "^0.170.0"
++        "three": "^0.187.0"
+       },
+       "devDependencies": {
+         "@gltf-transform/cli": "^4.1.1",
+-        "@types/three": "^0.170.0",
++        "@types/three": "^0.187.0",
+         "typescript": "^5.7.3",
+         "vite": "^6.0.7"
+       }
+@@ -39,6 +39,13 @@
+         "kuler": "^2.0.0"
+       }
+     },
++    "node_modules/@dimforge/rapier3d-compat": {
++      "version": "0.12.0",
++      "resolved": "https://registry.npmjs.org/@dimforge/rapier3d-compat/-/rapier3d-compat-0.12.0.tgz",
++      "integrity": "sha512-uekIGetywIgopfD97oDL5PfeezkFpNhwlzlaEYNOA0N6ghdsOvh/HYjSMek5Q2O1PYvRSDFcqFVJl4r4ZBwOow==",
++      "dev": true,
++      "license": "Apache-2.0"
++    },
+     "node_modules/@donmccurdy/caporal": {
+       "version": "0.0.10",
+       "resolved": "https://registry.npmjs.org/@donmccurdy/caporal/-/caporal-0.0.10.tgz",
+@@ -1776,18 +1783,18 @@
+       "license": "MIT"
+     },
+     "node_modules/@types/three": {
+-      "version": "0.170.0",
+-      "resolved": "https://registry.npmjs.org/@types/three/-/three-0.170.0.tgz",
+-      "integrity": "sha512-CUm2uckq+zkCY7ZbFpviRttY+6f9fvwm6YqSqPfA5K22s9w7R4VnA3rzJse8kHVvuzLcTx+CjNCs2NYe0QFAyg==",
++      "version": "0.187.0",
++      "resolved": "https://registry.npmjs.org/@types/three/-/three-0.187.0.tgz",
++      "integrity": "sha512-v+vKNarUtk4n2QRZ4+CN5ygMM0ARUjXjIQl0R/unMUfmStFeVqGbgqarbrpoGTXRZoulSH16ePrVJVxPJEbMUA==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
++        "@dimforge/rapier3d-compat": "~0.12.0",
+         "@tweenjs/tween.js": "~23.1.3",
+         "@types/stats.js": "*",
+-        "@types/webxr": "*",
+-        "@webgpu/types": "*",
+-        "fflate": "~0.8.2",
+-        "meshoptimizer": "~0.18.1"
++        "@types/webxr": ">=0.5.17",
++        "fflate": "~0.8.3",
++        "meshoptimizer": "~1.1.1"
+       }
+     },
+     "node_modules/@types/tmp": {
+@@ -1818,13 +1825,6 @@
+       "dev": true,
+       "license": "MIT"
+     },
+-    "node_modules/@webgpu/types": {
+-      "version": "0.1.74",
+-      "resolved": "https://registry.npmjs.org/@webgpu/types/-/types-0.1.74.tgz",
+-      "integrity": "sha512-lgiI4hbuLcI9unnm2cL/tvCaQU45dp0xcLWJh5uB/9MBGvIA4F8XIk7nSiBeg+K4xWGYwgZKn80LmERI5CxoTA==",
+-      "dev": true,
+-      "license": "BSD-3-Clause"
+-    },
+     "node_modules/ajv": {
+       "version": "6.15.0",
+       "resolved": "https://registry.npmjs.org/ajv/-/ajv-6.15.0.tgz",
+@@ -3001,9 +3001,9 @@
+       }
+     },
+     "node_modules/meshoptimizer": {
+-      "version": "0.18.1",
+-      "resolved": "https://registry.npmjs.org/meshoptimizer/-/meshoptimizer-0.18.1.tgz",
+-      "integrity": "sha512-ZhoIoL7TNV4s5B6+rx5mC//fw8/POGyNxS/DZyCJeiZ12ScLfVwRE/GfsxwiTkMYYD5DmK2/JXnEVXqL4rF+Sw==",
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/meshoptimizer/-/meshoptimizer-1.1.1.tgz",
++      "integrity": "sha512-oRFNWJRDA/WTrVj7NWvqa5HqE1t9MYDj2VaWirQCzCCrAd2GHrqR/sQezCxiWATPNlKTcRaPRHPJwIRoPBAp5g==",
+       "dev": true,
+       "license": "MIT"
+     },
+@@ -4366,9 +4366,9 @@
+       "license": "MIT"
+     },
+     "node_modules/three": {
+-      "version": "0.170.0",
+-      "resolved": "https://registry.npmjs.org/three/-/three-0.170.0.tgz",
+-      "integrity": "sha512-FQK+LEpYc0fBD+J8g6oSEyyNzjp+Q7Ks1C568WWaoMRLW+TkNNWmenWeGgJjV105Gd+p/2ql1ZcjYvNiPZBhuQ==",
++      "version": "0.187.0",
++      "resolved": "https://registry.npmjs.org/three/-/three-0.187.0.tgz",
++      "integrity": "sha512-Qiu7R+Cmh8CstZsY1uJOSWnVlfo7ZtNLV7mF8Jltk3LB3AtDu9cRZlcnRKkAk8Y4z6KKw35z7Y7Urd7jWY8etA==",
+       "license": "MIT"
+     },
+     "node_modules/tmp": {
+diff --git a/package.json b/package.json
+index 5d7e7b9..723bd2e 100644
+--- a/package.json
++++ b/package.json
+@@ -13,11 +13,11 @@
+     "assets": "python3 scripts/fetch_catalog.py 80 && python3 scripts/build_assets.py"
+   },
+   "dependencies": {
+-    "three": "^0.170.0"
++    "three": "^0.187.0"
+   },
+   "devDependencies": {
+     "@gltf-transform/cli": "^4.1.1",
+-    "@types/three": "^0.170.0",
++    "@types/three": "^0.187.0",
+     "typescript": "^5.7.3",
+     "vite": "^6.0.7"
+   }
+diff --git a/src/lighting.ts b/src/lighting.ts
+index a38d0c1..2b615e7 100644
+--- a/src/lighting.ts
++++ b/src/lighting.ts
+@@ -1,5 +1,5 @@
+ import * as THREE from 'three';
+-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
++import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
+ import { CSM } from 'three/examples/jsm/csm/CSM.js';
+ import { FLAGS } from './flags';
+ import { WeakList } from './dispose'; // [memory]
+@@ -221,7 +221,9 @@ function applyCascadeHook(csm: CSM | null) {
+   });
+ }
+ /**
+- * three r170's WebGLShadowMap tests object layers against the MAIN camera, not the shadow camera,
++ * three r170's WebGLShadowMap tests object layers against the MAIN camera, not the shadow camera
++ * (r187 uses a light's shadow-camera layers, but only when they enable something besides layer 0, so cascade 0's
++ * layer-0-only mask would still fall back to the main camera: the swap below is kept and is a no-op where r187 agrees),
+  * so per-cascade layer masks (CASTER_MID / CASTER_FAR, the HLOD proxy layer) had no effect. While
+  * the shadow maps render, each cascade light swaps its shadow camera's mask onto the main camera
+  * (shadow.updateMatrices runs right before that light's scene traversal); the mask is restored
+@@ -750,36 +752,31 @@ void main() {
+ }`,
+ };
+ 
++/**
++ * Blends up to three PMREMs (cube render targets since r187, one mip level per roughness) into the
++ * scene's environment map: rendered per mip level and cube face, like PMREMGenerator itself does.
++ */
+ const EnvBlendShader = {
+   uniforms: {
+     eA: { value: null as THREE.Texture | null }, eB: { value: null as THREE.Texture | null }, eC: { value: null as THREE.Texture | null },
+     wA: { value: 0 }, wB: { value: 1 }, wC: { value: 0 },
++    uLod: { value: 0 },
+   },
+-  vertexShader: /* glsl */ `varying vec2 vUv;
+-void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+-  fragmentShader: /* glsl */ `uniform sampler2D eA, eB, eC;
+-uniform float wA, wB, wC;
+-varying vec2 vUv;
++  vertexShader: THREE.ShaderChunk.cube_vert,
++  fragmentShader: /* glsl */ `uniform samplerCube eA, eB, eC;
++uniform float wA, wB, wC, uLod;
++varying vec3 vWorldDirection;
+ void main() {
++  vec3 d = vWorldDirection;
+   vec4 c = vec4(0.0);
+-  if (wA > 0.0) c += texture2D(eA, vUv) * wA;
+-  if (wB > 0.0) c += texture2D(eB, vUv) * wB;
+-  if (wC > 0.0) c += texture2D(eC, vUv) * wC;
++  if (wA > 0.0) c += textureLod(eA, d, uLod) * wA;
++  if (wB > 0.0) c += textureLod(eB, d, uLod) * wB;
++  if (wC > 0.0) c += textureLod(eC, d, uLod) * wC;
+   gl_FragColor = c;
+ }`,
+ };
+ 
+ const smooth = (t: number) => t * t * (3 - 2 * t);
+-/**
+- * three r170's CSMShader.lights_fragment_begin (installed globally by new CSM()) still calls
+- * getPointShadow() without the shadowIntensity argument added in r169, so any point light that
+- * casts shadows (interiors' follow light) fails to compile. Patch the installed chunk.
+- */
+-function fixCsmChunk() {
+-  const c = THREE.ShaderChunk.lights_fragment_begin;
+-  const bad = 'getPointShadow( pointShadowMap[ i ], pointLightShadow.shadowMapSize, pointLightShadow.shadowBias';
+-  if (c.includes(bad)) THREE.ShaderChunk.lights_fragment_begin = c.split(bad).join('getPointShadow( pointShadowMap[ i ], pointLightShadow.shadowMapSize, pointLightShadow.shadowIntensity, pointLightShadow.shadowBias');
+-}
+ function dirOf(azDeg: number, elDeg: number) {
+   const el = THREE.MathUtils.degToRad(elDeg), az = THREE.MathUtils.degToRad(azDeg);
+   return new THREE.Vector3(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
+@@ -806,9 +803,9 @@ export class Lighting {
+   private skyForEnv = new Sky();
+   private skyEnv: THREE.WebGLRenderTarget | null = null;
+   private dome: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
+-  private envRT: THREE.WebGLRenderTarget;
+-  private blendQuad: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
+-  private blendCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
++  private envRT: THREE.WebGLCubeRenderTarget;
++  private blendBox: THREE.Mesh<THREE.BoxGeometry, THREE.ShaderMaterial>;
++  private blendCam: THREE.CubeCamera;
+   private envKey = '';
+   private env: Env | null = null;
+   private sunDir = new THREE.Vector3(0.4, 0.8, 0.3);
+@@ -895,16 +892,19 @@ export class Lighting {
+       this.dome.updateMatrixWorld();
+     };
+     scene.add(this.dome);
+-    // the blended environment map (same CubeUV layout as a PMREM of ENV_SIZE)
+-    this.envRT = new THREE.WebGLRenderTarget(3 * Math.max(ENV_SIZE, 16 * 7), 4 * ENV_SIZE, {
++    // the blended environment map: a PMREM-shaped cube target (ENV_SIZE faces, mips down to 8 px, as PMREMGenerator allocates)
++    this.envRT = new THREE.WebGLCubeRenderTarget(ENV_SIZE, {
+       type: THREE.HalfFloatType, format: THREE.RGBAFormat, colorSpace: THREE.LinearSRGBColorSpace, depthBuffer: false,
+-      generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
++      generateMipmaps: false, minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter,
+     });
+-    this.envRT.texture.mapping = THREE.CubeUVReflectionMapping;
+-    this.envRT.texture.name = 'lighting.env';
+-    const bm = new THREE.ShaderMaterial({ ...EnvBlendShader, uniforms: THREE.UniformsUtils.clone(EnvBlendShader.uniforms), depthTest: false, depthWrite: false, toneMapped: false });
+-    this.blendQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bm);
+-    this.blendQuad.frustumCulled = false;
++    const envTex = this.envRT.texture as THREE.Texture & { isPMREMTexture: boolean };
++    for (let lod = 0, n = Math.log2(ENV_SIZE) - 3; lod <= n; lod++) (envTex.mipmaps as unknown[]).push({ width: ENV_SIZE >> lod, height: ENV_SIZE >> lod });
++    envTex.isPMREMTexture = true;
++    envTex.name = 'lighting.env';
++    const bm = new THREE.ShaderMaterial({ ...EnvBlendShader, uniforms: THREE.UniformsUtils.clone(EnvBlendShader.uniforms), side: THREE.BackSide, blending: THREE.NoBlending, depthTest: false, depthWrite: false, toneMapped: false });
++    this.blendBox = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), bm);
++    this.blendBox.frustumCulled = false;
++    this.blendCam = new THREE.CubeCamera(0.1, 10, this.envRT);
+ 
+     // street lamps: a small pool of real spot lights near the viewer...
+     for (let i = 0; i < LAMP_POOL; i++) {
+@@ -1401,7 +1401,7 @@ export class Lighting {
+       this.sky.visible = false;
+       this.dome.visible = true;
+       this.scene.background = null;
+-      const du = this.dome.material.uniforms, eu = this.blendQuad.material.uniforms;
++      const du = this.dome.material.uniforms, eu = this.blendBox.material.uniforms;
+       du.tA.value = A?.h.tex ?? null; du.tB.value = B?.h.tex ?? null; du.tC.value = C?.h.tex ?? null;
+       du.wA.value = wa * (A?.scale ?? 0) * w.skyMul; du.wB.value = wb * (B?.scale ?? 0) * w.skyMul; du.wC.value = wc * (C?.scale ?? 0) * w.skyMul;
+       eu.eA.value = A?.h.env ?? null; eu.eB.value = B?.h.env ?? null; eu.eC.value = C?.h.env ?? null;
+@@ -1409,13 +1409,7 @@ export class Lighting {
+       const key = `${A?.name}:${eu.wA.value.toFixed(4)}|${B?.name}:${eu.wB.value.toFixed(4)}|${C?.name}:${eu.wC.value.toFixed(4)}`;
+       if (key !== this.envKey) {
+         this.envKey = key;
+-        const prev = this.renderer.getRenderTarget();
+-        const xr = this.renderer.xr.enabled;
+-        this.renderer.xr.enabled = false;
+-        this.renderer.setRenderTarget(this.envRT);
+-        this.renderer.render(this.blendQuad, this.blendCam);
+-        this.renderer.setRenderTarget(prev);
+-        this.renderer.xr.enabled = xr;
++        this.blendEnv();
+       }
+       this.scene.environment = this.envRT.texture;
+       this.scene.environmentIntensity = w.skyMul;
+@@ -1435,6 +1429,19 @@ export class Lighting {
+     this.dome.material.uniforms.uFog.value.copy(fog.color);
+   }
+ 
++  /** render the weighted blend of the source PMREMs into envRT, one mip level at a time (CubeCamera restores the render target) */
++  private blendEnv() {
++    const rt = this.envRT, cam = this.blendCam, u = this.blendBox.material.uniforms;
++    for (let lod = 0, n = rt.texture.mipmaps.length; lod < n; lod++) {
++      u.uLod.value = lod;
++      cam.activeMipmapLevel = lod;
++      // the renderer uses the target viewport as is (not scaled to the mip), as PMREMGenerator does
++      rt.viewport.set(0, 0, rt.width >> lod, rt.width >> lod);
++      cam.update(this.renderer, this.blendBox);
++    }
++    rt.viewport.set(0, 0, rt.width, rt.height);
++  }
++
+   private physicalSky(dir: THREE.Vector3) {
+     const d = dir.clone();
+     d.y = Math.max(d.y, 0.02);
+@@ -1465,7 +1472,7 @@ export class Lighting {
+     let pr = hdriCache.get(key);
+     if (!pr) {
+       const url = `https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/${res}/${name}_${res}.hdr`;
+-      pr = new RGBELoader()
++      pr = new HDRLoader()
+         .setDataType(THREE.HalfFloatType)
+         .loadAsync(url)
+         .then((tex) => {
+@@ -1559,7 +1566,6 @@ export class Lighting {
+     });
+     csm.fade = q !== 'low';
+     // the wider cascades only draw casters big enough to matter at their distance (applyCascadeHook)
+-    fixCsmChunk();
+     csm.lights.forEach((l, i) => {
+       l.shadow.bias = -0.00025 * (i + 1);
+       l.shadow.normalBias = [0.02, 0.06, 0.15][i] ?? 0.15;
+@@ -1601,7 +1607,11 @@ export class Lighting {
+   private setupCsmMaterials(wrap = true) {
+     const csm = this.csm!;
+     const u = this.csmUniforms;
+-    csm.getExtendedBreaks(u.breaks.value);
++    // (CSM's own getExtendedBreaks() is private now: the [prev, break] pairs are rebuilt from the public breaks)
++    const br = u.breaks.value;
++    while (br.length < csm.breaks.length) br.push(new THREE.Vector2());
++    br.length = csm.breaks.length;
++    for (let i = 0; i < csm.cascades; i++) br[i].set(csm.breaks[i - 1] || 0, csm.breaks[i]);
+     u.near.value = this.camera.near;
+     u.far.value = Math.min(this.camera.far, csm.maxFar);
+     const fade = csm.fade;
+diff --git a/src/main.ts b/src/main.ts
+index fff50bc..4b7618a 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -55,7 +55,7 @@ renderer.shadowMap.enabled = true;
+ installMemProbe(renderer);
+ if (new URLSearchParams(location.search).has('mem')) enableMemTracker();
+ let memTick = 0;
+-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
++renderer.shadowMap.type = THREE.PCFShadowMap; // r182+: PCFShadowMap is the soft one (PCFSoftShadowMap is deprecated)
+ // AgX keeps hue in bright sunlit/neon areas instead of ACES' skew to yellow/cyan; ?tm= to compare
+ renderer.toneMapping = ({ aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping } as Record<string, THREE.ToneMapping>)[new URLSearchParams(location.search).get('tm') ?? ''] ?? THREE.AgXToneMapping;
+ renderer.outputColorSpace = THREE.SRGBColorSpace;
+@@ -795,7 +795,7 @@ function setupTouch() {
+ 
+ // ---------------------------------------------------------------- loop
+ 
+-const clock = new THREE.Clock();
++const clock = new THREE.Timer(); // r183: THREE.Clock is deprecated
+ const bootTimes: { firstFrame?: number } = {};
+ (window as unknown as { __boot: typeof bootTimes }).__boot = bootTimes;
+ let time = 0;
+@@ -822,6 +822,7 @@ function dynamicResolution(raw: number) {
+ }
+ 
+ function frame() {
++  clock.update();
+   const raw = clock.getDelta();
+   const dt = Math.min(0.05, raw);
+   if (!document.hidden) dynamicResolution(Math.min(raw, 0.5));
+diff --git a/src/materials.ts b/src/materials.ts
+index ad52cec..f645b8e 100644
+--- a/src/materials.ts
++++ b/src/materials.ts
+@@ -658,7 +658,7 @@ export function enhance(m: THREE.MeshStandardMaterial, kind: string, hasUv = fal
+   p.userData.enhanced = true;
+   p.userData.kind = kind;
+   const u = uniformsFor(kind, spec);
+-  const defs: Record<string, string> = { ...(p.defines ?? {}) };
++  const defs = { ...(p.defines ?? {}) } as Record<string, string>;
+   if (hasUv) {
+     defs.TRI_UV = '';
+     defs.TRI_UVK = (opts.uvScale ?? 1).toExponential();
+diff --git a/src/nyc/buildings-shop.ts b/src/nyc/buildings-shop.ts
+index 2f20d5f..8eac012 100644
+--- a/src/nyc/buildings-shop.ts
++++ b/src/nyc/buildings-shop.ts
+@@ -356,7 +356,7 @@ function glyphAtlas() {
+ let textMats: { sign: THREE.MeshStandardMaterial; neon: THREE.MeshStandardMaterial; paint: THREE.MeshStandardMaterial } | null = null;
+ function vcEmissive(m: THREE.MeshStandardMaterial, key: string) {
+   m.onBeforeCompile = (sh) => {
+-    sh.fragmentShader = sh.fragmentShader.replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n totalEmissiveRadiance *= vColor;');
++    sh.fragmentShader = sh.fragmentShader.replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n totalEmissiveRadiance *= vColor.rgb;');
+   };
+   void key; // sign / neon / panel: one program
+   m.customProgramCacheKey = () => 'vcEmissive';
+diff --git a/src/nyc/district-showcase.ts b/src/nyc/district-showcase.ts
+index aab9e05..e2e5f25 100644
+--- a/src/nyc/district-showcase.ts
++++ b/src/nyc/district-showcase.ts
+@@ -224,7 +224,7 @@ function flatten(root: THREE.Object3D): THREE.Group {
+     if (g.index) g = g.toNonIndexed();
+     for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(k)) g.deleteAttribute(k);
+     if (!g.getAttribute('normal')) g.computeVertexNormals();
+-    for (const k of Object.keys(g.morphAttributes)) delete g.morphAttributes[k];
++    for (const k of Object.keys(g.morphAttributes)) delete (g.morphAttributes as Record<string, unknown>)[k];
+     const sig = `${mesh.material.uuid}|${g.getAttribute('uv') ? 1 : 0}`;
+     let b = buckets.get(sig);
+     if (!b) buckets.set(sig, (b = { m: mesh.material, geos: [] }));
+diff --git a/src/shopkit/filler.ts b/src/shopkit/filler.ts
+index 739d260..e17ab53 100644
+--- a/src/shopkit/filler.ts
++++ b/src/shopkit/filler.ts
+@@ -117,7 +117,7 @@ function labelMat(rough: number, metal: number) {
+   vec4 lab = texture2D( map, vMapUv );
+   float lum = pow( lab.r, 2.2 );
+   #ifdef USE_COLOR
+-  diffuseColor.rgb *= mix( vec3( lum ), lum * vColor, lab.g );
++  diffuseColor.rgb *= mix( vec3( lum ), lum * vColor.rgb, lab.g );
+   #else
+   diffuseColor.rgb *= lum;
+   #endif
+diff --git a/tests/crossing.test.ts b/tests/crossing.test.ts
+index 746a7c1..78f3587 100644
+--- a/tests/crossing.test.ts
++++ b/tests/crossing.test.ts
+@@ -43,7 +43,12 @@ async function simulatePeople(seconds: number): Promise<PedLog> {
+   }
+   // the stature as drawn (the body's box with shoes and hair; base-mesh height constants under-read short people)
+   for (const pd of P.peds as unknown as { p: { root: THREE.Object3D } }[]) {
++    // far / off-screen people are frozen (Person.root.updateMatrixWorld is a no-op); measure them posed. (since r185
++    // Box3.setFromObject() no longer recomputes a stale world matrix, so the stature of a frozen person read as garbage)
++    const frozen = pd.p.frozen;
++    pd.p.frozen = false;
+     pd.p.root.updateMatrixWorld(true);
++    pd.p.frozen = frozen;
+     const b = new THREE.Box3().setFromObject(pd.p.root);
+     log.heights.push(b.max.y - b.min.y);
+   }
+-- 
+2.43.0
+
