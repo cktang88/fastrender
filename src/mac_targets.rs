@@ -858,13 +858,15 @@ impl ThreeScene {
         if memoryless_reload {
             self.targets.report(format!("render target {id}: depth reused across passes but kept in tile memory (cleared instead)"));
         }
+        let Some(mut enc) = cb.render_pass(&rp) else { return };
+        // only now: a pass that could not be started wrote nothing, so the next one still clears instead of loading
+        // what was never stored
         if let Some(rt) = self.targets.rts.get_mut(&id) {
             rt.init.insert((face, level));
             if depth_stored {
                 rt.depth_init.insert((face, level));
             }
         }
-        let Some(mut enc) = cb.render_pass(&rp) else { return };
         self.targets.stats[2] += 1;
         let mut mips = false;
         for j in group.clone() {
