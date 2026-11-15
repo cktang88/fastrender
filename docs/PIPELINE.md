@@ -27,6 +27,7 @@ fastrender native (Rust + Metal): registry → cull/sort → shadow (the game's 
 | 3. Native backend | `src/mac_three.rs` + `fs_three`/`vs_three` | **done**: registry, culling, sorting, transparency, double-sided, mirrored winding, cofactor normals, shadows | CI on macOS (paravirtual GPU), golden images |
 | 4. Golden images | the same scene in browser three.js and natively, diffed | **done**, runs on every push | `js/golden/` |
 | 5. Custom shaders | `ShaderMaterial` / `onBeforeCompile` → MSL | **translation done** (4/4: glslang `-R` → SPIR-V → SPIRV-Cross); **native binding next** | `js/shader-port/`, CI compiles the output with Apple's `metal` |
+| 5b. three's own programs | every material (built-in or custom) runs three's exact GLSL, translated; uniforms from three's own code | **JS side done** (`js/three-programs.js`, `FastRenderer({ programs: 'three' })`, protocol v3; sources and 190 uniform values identical to WebGLRenderer, r170 + r187); native binding next | `js/test/three-programs.test.mjs`, `docs/notes/three-programs.md` |
 | 6. Host | where game JS runs | **JavaScriptCore works** (CI); **Electron + napi addon** is chosen for full DOM/WebAudio compatibility, spike pending (needs a Mac) | `docs/HOST.md` |
 | 7. Bundling | game → one script | esbuild IIFE (`js/build.mjs`); `three` stays real | CI builds the example |
 | 8. Air tuning | quality tiers, MetalFX, dynamic resolution | renderer-level knobs exist (scale, MetalFX, cached shadows, dynres) | bench matrix on real hardware (pending) |

@@ -14,11 +14,20 @@
 //
 // Materials are described by value (type, colour, roughness, metalness, emissive, maps, opacity,
 // side, flags) and deduplicated by content, so 1000 meshes sharing a look share one native material.
+//
+// With { programs: 'three' } (protocol v3) materials are instead three.js's OWN programs: the exact GLSL
+// WebGLRenderer would compile (host.program(key, vertex, fragment) -> reflected uniform layout) and,
+// per frame, the uniform values three's own code computes, packed per material instance
+// (js/three-programs.js, docs/PROTOCOL.md).
+
+import { ThreePrograms, TEX, SHADOW_KIND } from './three-programs.js';
 
 export const PROTOCOL = 2;
 const MAGIC = 0x46524d32; // 'FRM2'
-export const OP = { CAMERA: 1, LIGHTS: 2, FOG: 3, BACKGROUND: 4, DRAWS: 5, TONEMAP: 6, SHADOW: 7 };
+const MAGIC3 = 0x46524d33; // 'FRM3': programs: 'three'
+export const OP = { CAMERA: 1, LIGHTS: 2, FOG: 3, BACKGROUND: 4, DRAWS: 5, TONEMAP: 6, SHADOW: 7, MATERIAL_UNIFORMS: 8, SHADOWS: 9 };
 export const KIND = { GEOMETRY: 1, TEXTURE: 2, MATERIAL: 3, INSTANCES: 4 };
+export { TEX };
 // draw flags
 export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256 };
 // light kinds
@@ -36,7 +45,7 @@ function materialModel(m) {
 }
 
 export class FastRenderer {
-  /** @param {{host?: object, maxDraws?: number}} opts */
+  /** @param {{host?: object, commandWords?: number, programs?: 'three', dfgLUT?: object}} opts */
   constructor(opts = {}) {
     this.host = opts.host || globalThis.__fr;
     if (!this.host || !this.host.upload) throw new Error('fastrender-three: no host (globalThis.__fr with upload/attach)');
@@ -52,7 +61,7 @@ export class FastRenderer {
     this.domElement = opts.canvas || { style: {}, addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1, height: 1 }) };
     this.shadowMap = { enabled: false, type: 1, autoUpdate: true, needsUpdate: false };
     this.toneMapping = 0; this.toneMappingExposure = 1; this.outputColorSpace = 'srgb';
-    this.autoClear = true; this.sortObjects = true; this.localClippingEnabled = false;
+    this.autoClear = true; this.sortObjects = true; this.localClippingEnabled = false; this.clippingPlanes = [];
     this.info = { render: { calls: 0, triangles: 0, frame: 0 }, memory: { geometries: 0, textures: 0 }, programs: [], unsupported: {} };
     this.capabilities = { isWebGL2: true, maxTextureSize: 16384, maxAnisotropy: 16, getMaxAnisotropy: () => 16 };
     this.extensions = { get: () => null, has: () => false };
@@ -64,6 +73,17 @@ export class FastRenderer {
     this._drawList = [];
     this._size = { w: 1, h: 1 }; this._pixelRatio = 1;
     this._clearColor = [0, 0, 0]; this._clearAlpha = 1;
+    this._meshes = []; this._lightsCopy = []; this._used = []; this._frameNo = 0;
+    // protocol v3: three's own programs + uniform blocks
+    this._tp = null;
+    if (opts.programs === 'three') {
+      if (!this.host.program) throw new Error("fastrender-three: programs: 'three' needs host.program(key, vertex, fragment)");
+      this._tp = new ThreePrograms({
+        renderer: this, host: this.host, dfgLUT: opts.dfgLUT, newId: () => this._nextId++, unsupported: (w) => this._unsupported(w),
+        releaseInstance: (inst) => { if (this.host.release) this.host.release(KIND.MATERIAL, inst.id); },
+      });
+      this._textureId = (t) => this._texture(t);
+    }
   }
 
   // ------------------------------------------------------------------ WebGLRenderer surface (no-ops / stubs)
@@ -142,7 +162,7 @@ export class FastRenderer {
     if (img && img.data && img.width && img.height) { px = img.data; w = img.width; h = img.height; }
     else if (img && this.host.imagePixels) { const r = this.host.imagePixels(img); if (r) ({ data: px, width: w, height: h } = r); }
     if (!px) { this._unsupported('texture source without pixels'); return 0; }
-    const meta = { width: w, height: h, srgb: t.colorSpace === 'srgb', repeat: [t.repeat.x, t.repeat.y], offset: [t.offset.x, t.offset.y], wrap: [t.wrapS, t.wrapT], flipY: !!t.flipY, mipmaps: t.generateMipmaps !== false, magFilter: t.magFilter, minFilter: t.minFilter, anisotropy: t.anisotropy || 1 };
+    const meta = { width: w, height: h, srgb: t.colorSpace === 'srgb', repeat: [t.repeat.x, t.repeat.y], offset: [t.offset.x, t.offset.y], wrap: [t.wrapS, t.wrapT], flipY: !!t.flipY, mipmaps: t.generateMipmaps !== false, magFilter: t.magFilter, minFilter: t.minFilter, anisotropy: t.anisotropy || 1, format: t.format, type: t.type, depth: (img && img.depth) || 1 };
     this.host.upload(KIND.TEXTURE, id, meta, px instanceof Uint8Array || px instanceof Uint8ClampedArray ? px : new Uint8Array(px.buffer, px.byteOffset, px.byteLength));
     this._versions.set(id, t.version);
     this.info.memory.textures++;
@@ -185,6 +205,27 @@ export class FastRenderer {
     return id;
   }
 
+  /** v3: (material, object) -> three's program + uniform-block instance; uploads the instance once */
+  _materialInstance(m, o) {
+    const inst = this._tp.instance(m, o);
+    if (inst.frame !== this._frameNo) {
+      inst.frame = this._frameNo;
+      this._used.push(inst);
+      // pipeline state is read from the material every draw by WebGLRenderer, so re-check it every frame
+      const st = `${m.side}|${m.transparent}|${m.blending}|${m.blendSrc}|${m.blendDst}|${m.blendEquation}|${m.premultipliedAlpha}|${m.depthTest}|${m.depthWrite}|${m.depthFunc}|${m.colorWrite}|${m.alphaToCoverage}|${m.polygonOffset}|${m.polygonOffsetFactor}|${m.polygonOffsetUnits}|${m.wireframe}`;
+      if (inst.state !== st || inst.uploadedProgram !== inst.program) {
+        inst.state = st; inst.uploadedProgram = inst.program;
+        this.host.upload(KIND.MATERIAL, inst.id, {
+          programKey: inst.program.key, name: m.name, type: m.type,
+          side: m.side, transparent: m.transparent, opacity: m.opacity, blending: m.blending, blendSrc: m.blendSrc, blendDst: m.blendDst, blendEquation: m.blendEquation,
+          premultipliedAlpha: m.premultipliedAlpha, depthTest: m.depthTest, depthWrite: m.depthWrite, depthFunc: m.depthFunc, colorWrite: m.colorWrite,
+          alphaToCoverage: m.alphaToCoverage, polygonOffset: m.polygonOffset ? [m.polygonOffsetFactor, m.polygonOffsetUnits] : null, wireframe: m.wireframe,
+        });
+      }
+    }
+    return inst.id;
+  }
+
   /** InstancedMesh matrices (+ colours) -> instance buffer id */
   _instances(mesh) {
     const id = this._id(mesh.instanceMatrix);
@@ -225,18 +266,27 @@ export class FastRenderer {
       f[w++] = fg.color.r; f[w++] = fg.color.g; f[w++] = fg.color.b;
       f[w++] = fg.isFogExp2 ? 1 : 0; f[w++] = fg.isFogExp2 ? fg.density : fg.near; f[w++] = fg.isFogExp2 ? 0 : fg.far;
     }
-    // walk the scene: lights and draws (three.js visibility + layers semantics)
-    const lights = [], draws = this._drawList;
-    draws.length = 0;
+    // walk the scene: lights and meshes (three.js visibility + layers semantics)
+    const lights = [], draws = this._drawList, meshes = this._meshes;
+    draws.length = 0; meshes.length = 0;
+    this._frameNo++;
     const walk = (o) => {
       if (!o.visible || !o.layers.test(camera.layers)) return;
       if (o.isLight) lights.push(o);
-      else if (o.isMesh) this._collect(o, draws);
+      else if (o.isMesh) meshes.push(o);
       else if (o.isSprite || o.isPoints || o.isLine) this._unsupported(o.type);
       const ch = o.children;
       for (let i = 0; i < ch.length; i++) walk(ch[i]);
     };
     walk(scene);
+    if (this._tp) {
+      // three's lights state (WebGLLights.setup sorts its input, so it gets its own copy)
+      const lc = this._lightsCopy; lc.length = 0;
+      for (let i = 0; i < lights.length; i++) lc.push(lights[i]);
+      this._tp.beginFrame(scene, camera, lc);
+      this._used.length = 0;
+    }
+    for (let i = 0; i < meshes.length; i++) this._collect(meshes[i], draws);
     // lights, 16 words each: kind, castShadow, colour*intensity (3), position (3), direction (3),
     // distance, decay, then hemisphere ground colour (3) or spot angle, penumbra, 0
     u[w++] = OP.LIGHTS; const lightsAt = w++; const lightsStart = w;
@@ -269,6 +319,7 @@ export class FastRenderer {
       f.set(vp.elements, w); w += 16;
       f[w++] = caster.shadow.mapSize.x; f[w++] = caster.shadow.bias;
     }
+    if (this._tp) w = this._writePrograms(w);
     // draws
     u[w++] = OP.DRAWS; u[w++] = 1 + draws.length * DRAW_WORDS; u[w++] = draws.length;
     if (w + draws.length * DRAW_WORDS + 8 > u.length) throw new Error(`fastrender-three: command buffer too small for ${draws.length} draws`);
@@ -281,16 +332,47 @@ export class FastRenderer {
       w += DRAW_WORDS;
       tris += (d.count / 3) * Math.max(1, d.instanceCount);
     }
-    u[0] = MAGIC; u[1] = w;
+    u[0] = this._tp ? MAGIC3 : MAGIC; u[1] = w;
     this.info.render.calls = draws.length; this.info.render.triangles = tris | 0; this.info.render.frame++;
     if (this.host.present) this.host.present(w);
+  }
+
+  /** v3 ops: SHADOWS (three's shadow casters, in lights-state order) and MATERIAL_UNIFORMS (a packed block per instance in use) */
+  _writePrograms(w) {
+    const u = this.u32, f = this.f32, tp = this._tp;
+    const casters = tp.shadowCasters();
+    if (casters.length && this.shadowMap.enabled) {
+      u[w++] = OP.SHADOWS; u[w++] = 1 + casters.length * 28; u[w++] = casters.length;
+      const vp = this._shadowVP3 || (this._shadowVP3 = casters[0].light.shadow.camera.projectionMatrix.clone());
+      for (const c of casters) {
+        const l = c.light, s = l.shadow, cam = s.camera, m = l.matrixWorld.elements;
+        u[w++] = SHADOW_KIND[c.kind]; u[w++] = c.index;
+        f[w++] = s.mapSize.x; f[w++] = s.mapSize.y; f[w++] = s.bias; f[w++] = s.normalBias; f[w++] = s.radius;
+        f[w++] = cam.near; f[w++] = cam.far; f[w++] = m[12]; f[w++] = m[13]; f[w++] = m[14];
+        vp.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+        f.set(vp.elements, w); w += 16;
+      }
+    }
+    const used = this._used;
+    u[w++] = OP.MATERIAL_UNIFORMS; const at = w++; const start = w;
+    u[w++] = used.length;
+    for (let i = 0; i < used.length; i++) {
+      const inst = used[i], c = inst.program.packer;
+      if (!c) throw new Error('fastrender-three: host.program returned no layout');
+      if (w + 3 + c.words + c.textures.length + 64 > u.length) throw new Error('fastrender-three: command buffer too small for uniform blocks');
+      u[w] = inst.id; u[w + 1] = c.words * 4; u[w + 2] = c.textures.length;
+      tp.pack(inst, f, u, (w + 3) * 4, this._textureId, u, w + 3 + c.words);
+      w += 3 + c.words + c.textures.length;
+    }
+    u[at] = w - start;
+    return w;
   }
 
   _collect(o, out) {
     const g = o.geometry;
     if (!g || !g.attributes || !g.attributes.position) return;
-    if (o.isSkinnedMesh) this._unsupported('SkinnedMesh (drawn in bind pose)');
-    if (g.morphAttributes && Object.keys(g.morphAttributes).length) this._unsupported('morph targets');
+    if (o.isSkinnedMesh && !this._tp) this._unsupported('SkinnedMesh (drawn in bind pose)');
+    if (!this._tp && g.morphAttributes && Object.keys(g.morphAttributes).length) this._unsupported('morph targets');
     const geometry = this._geometry(g);
     const inst = o.isInstancedMesh ? this._instances(o) : 0;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -309,7 +391,7 @@ export class FastRenderer {
       if (o.frustumCulled === false) flags |= F.NO_CULL;
       if (inst) flags |= F.INSTANCED;
       out.push({
-        geometry, material: this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT)), flags, instances: inst,
+        geometry, material: this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT)), flags, instances: inst,
         start: grp.start, count: Math.min(grp.count, indexCount - grp.start), instanceCount: inst ? o.count : 1,
         renderOrder: o.renderOrder, matrix: o.matrixWorld.elements,
       });

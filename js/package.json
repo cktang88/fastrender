@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node test/shim.test.mjs && node test/three-renderer.test.mjs && THREE_PKG=three-r170 node test/three-renderer.test.mjs"
+    "test": "node test/shim.test.mjs && node test/three-renderer.test.mjs && THREE_PKG=three-r170 node test/three-renderer.test.mjs && node --import ./test/three-alias.mjs test/three-programs.test.mjs && THREE_PKG=three-r170 node --import ./test/three-alias.mjs test/three-programs.test.mjs && node test/three-programs.test.mjs",
+    "capture-three-programs": "node test/capture-three-programs.mjs && THREE_PKG=three-r170 node test/capture-three-programs.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
