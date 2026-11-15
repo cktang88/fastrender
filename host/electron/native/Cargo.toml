@@ -1,0 +1,33 @@
+[package]
+name = "fastrender-electron"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Own workspace root: keeps the main `fastrender` crate/binary build unchanged.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = { version = "3.16.2", default-features = false, features = ["napi9"] }
+napi-derive = "3.5"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-metal = "0.3.2"
+objc2-quartz-core = "0.3.2"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

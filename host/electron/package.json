@@ -1,0 +1,26 @@
+{
+  "name": "fastrender-electron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron host spike: Metal view under transparent web contents, napi-rs addon, shared-memory frame mailbox",
+  "main": "app/main.js",
+  "scripts": {
+    "build": "napi build --release --platform --manifest-path native/Cargo.toml --output-dir native",
+    "build:debug": "napi build --platform --manifest-path native/Cargo.toml --output-dir native",
+    "start": "electron app/main.js",
+    "spike": "electron app/main.js --frames 120 --out ../..",
+    "test": "node test/host-wrapper.test.mjs"
+  },
+  "napi": {
+    "binaryName": "fastrender-electron",
+    "targets": [
+      "aarch64-apple-darwin"
+    ]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.12",
+    "electron": "45.3.2",
+    "esbuild": "^0.28.2",
+    "three": "0.187.0"
+  }
+}
