@@ -1564,6 +1564,10 @@ impl ThreeScene {
                 None => (&n.white_2d, &p.linear_clamp),
             };
         }
+        if t.sample != "float" {
+            // integer samplers: no integer texture uploads yet (three's batchingIdTexture): a zero integer texture
+            return (if t.sample == "uint" { &n.uint_2d } else { &n.int_2d }, &p.nearest_clamp);
+        }
         if self.dbg & 16 != 0 {
             return (&n.white_2d, &p.linear_clamp);
         }

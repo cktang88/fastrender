@@ -460,6 +460,9 @@ export class FastRenderer {
   _collect(o) {
     const g = o.geometry;
     if (!g || !g.attributes || !g.attributes.position) return;
+    // BatchedMesh: three draws it with multi-draw (gl_DrawID -> batchingIdTexture, an integer texture); one plain
+    // draw of the whole geometry would put every sub-mesh at the batch origin: skipped, counted
+    if (o.isBatchedMesh) { this._unsupported('BatchedMesh'); return; }
     if (o.isSkinnedMesh && !this._tp) this._unsupported('SkinnedMesh (drawn in bind pose)');
     if (!this._tp && g.morphAttributes && hasKeys(g.morphAttributes)) this._unsupported('morph targets');
     const geometry = this._geometry(g);

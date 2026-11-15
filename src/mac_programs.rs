@@ -85,6 +85,9 @@ pub struct Neutral {
     pub white_cube: Texture,
     pub white_2d_array: Texture,
     pub white_3d: Texture,
+    /// 1x1 zero R32Uint / R32Sint: what an integer sampler (`usampler2D`, `isampler2D`) reads when we have nothing
+    pub uint_2d: Texture,
+    pub int_2d: Texture,
     /// depth 1.0 everywhere: a shadow lookup into it is fully lit
     pub lit_2d: Option<Texture>,
     pub lit_cube: Option<Texture>,
@@ -166,6 +169,16 @@ impl Programs {
             white_cube: mk(MTLTextureType::TypeCube, 6, 1)?,
             white_2d_array: mk(MTLTextureType::Type2DArray, 1, 1)?,
             white_3d: mk(MTLTextureType::Type3D, 1, 1)?,
+            uint_2d: {
+                let t = dev.newTextureWithDescriptor(&tex_desc(MTLPixelFormat::R32Uint, MTLTextureType::Type2D, 1, 1, 1)).ok_or("neutral uint texture")?;
+                fill(&t, 1, 1, 1, 1, 4, &[0; 4]);
+                t
+            },
+            int_2d: {
+                let t = dev.newTextureWithDescriptor(&tex_desc(MTLPixelFormat::R32Sint, MTLTextureType::Type2D, 1, 1, 1)).ok_or("neutral int texture")?;
+                fill(&t, 1, 1, 1, 1, 4, &[0; 4]);
+                t
+            },
             lit_2d: None,
             lit_cube: None,
         };

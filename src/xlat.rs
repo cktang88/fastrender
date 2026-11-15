@@ -390,6 +390,14 @@ pub struct Texture {
     /// a compare function (three: `LessEqualCompare`, linear filtering).
     #[serde(default)]
     pub shadow: bool,
+    /// What sampling returns: `float`, `uint` (`usampler2D`) or `int` (`isampler2D`): the bound texture's pixel
+    /// format must match (Metal validation rejects an RGBA8 texture for a `texture2d<uint>`).
+    #[serde(default = "sample_float")]
+    pub sample: String,
+}
+
+fn sample_float() -> String {
+    "float".into()
 }
 
 fn kind_2d() -> String {
@@ -713,7 +721,14 @@ fn image_kind(c: &Msl, ty: spirv_cross2::handle::Handle<spirv_cross2::handle::Ty
         (Dim::DimCube, false) => "cube",
         (d, a) => return Err(format!("unsupported texture dimension {d:?} (arrayed: {a})")),
     };
-    Ok((kind.into(), depth))
+    // integer samplers (usampler2D: three's batchingIdTexture) need an integer texture bound: carried as `kind:uint`
+    // until the Texture is built (see `sample`)
+    let sample = match sc(c.type_description(img.sampled_type))?.inner {
+        TypeInner::Scalar(sc_) if sc_.kind == ScalarKind::Uint => ":uint",
+        TypeInner::Scalar(sc_) if sc_.kind == ScalarKind::Int => ":int",
+        _ => "",
+    };
+    Ok((format!("{kind}{sample}"), depth))
 }
 
 const KEY_DEFAULT: u32 = 0;
@@ -1058,7 +1073,8 @@ fn translate_normalized(vertex: &str, fragment: &str) -> Result<Program, String>
         if textures.iter().any(|t| t.name == *name) {
             continue;
         }
-        textures.push(Texture { name: name.clone(), index: textures.len() as u32, vertex: None, fragment: None, kind: kind.clone(), shadow: *shadow });
+        let (kind, sample) = kind.split_once(':').unwrap_or((kind, "float"));
+        textures.push(Texture { name: name.clone(), index: textures.len() as u32, vertex: None, fragment: None, kind: kind.into(), shadow: *shadow, sample: sample.into() });
         array_slot.push(*arr);
     }
     let vsm = fragment.lines().any(|l| l.trim() == "#define SHADOWMAP_TYPE_VSM");
