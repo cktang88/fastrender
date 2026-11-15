@@ -3,6 +3,33 @@
 Short entries, newest first: what was tested, how, what came out.
 
 
+
+## 2026-11-15: first macOS CI run since the morning: all goldens pass on the M-0 seam; trimLights 3.3x on main; warm launch 4x
+
+Run 43749233588 (commit adf7b28: M-0 backend seam, trimLights, instance runs, discard order, WP3 async compile +
+archive fix, patches 0001-0005; before the review fixes). It was the first mac run to finish in ~5 h: 13 runs queued
+before `concurrency` existed held the macOS slots (one "in progress" for 4.5 h); they were cancelled by hand and
+mac.yml now lets a started run finish (`cancel-in-progress: false`).
+
+| golden (MAE) | gate | result |
+|---|--:|--:|
+| three-city (JSC / Electron) | < 1.0 | 0.97 / 0.97 |
+| parity PCF / VSM / Basic | | 0.96 / 0.84 / 0.83 |
+| IBL (PMREM) / IBL bloom | | 0.10 / 0.22 |
+| real game, CLI (JSC) / Electron | < 10 | 6.58 / 3.01 |
+| backend seam script on metal3: three-native / three-city | | 2.23 / 0.97 |
+
+GPU cost A/B, real game, paravirtual GPU (same process, 40 frames each): `alllights` (= before trimLights) main 52.65
+ms vs `none` 15.99 ms: **3.3x** on the main pass. Instance runs: 47,724 of 183,466 instances drawn in 796 runs. The
+shadow group is 4-5 ms here (0.2-1.3 ms on the Air).
+
+Compile launch, real game (ms since renderer init, paravirtual GPU, so absolute times are far above a real Mac):
+cold blocking first frame 38.9-53.6 s; **warm (manifest + binary archive) 12.1 s**, 0 render-thread waits, 68 of 73
+pipelines from the archive; warm without the archive and OS cache 27.9 s. three-city: async cold first frame 394 ms
+(vs 1,750 blocking), warm 278 ms. The archive now serialises (ca59b7b).
+
+Not in this run: the review fixes (601fd5c..156e1bc); the next mac run covers them.
+
 ## 2026-11-15: review fixes: light-count steps no longer empty the lit scene, shadow maps per light, instance culling only where bounds are known; nothing run on a Mac
 
 A review of the day's work (trimLights, instance culling, async compile, render targets, patches/0004) found eight
