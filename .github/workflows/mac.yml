@@ -51,6 +51,36 @@ jobs:
           ./target/release/fastrender matrix --size 1280x800 --frames 60 --warmup 10 --props 60000 --rounds 1
           ./target/release/fastrender voxel-mesh
           ./target/release/fastrender selftest --scene voxel --path forward --upscale metalfx --scale 0.5 --size 640x400
+      # Electron host spike (docs/HOST.md "Spike (Nov 2026)"): never blocks the pipeline (continue-on-error),
+      # prints PASS/FAIL lines, writes electron-*.png / electron-*-spike.json into the artifact below.
+      - name: electron spike - build addon (napi-rs 3) + Electron 45
+        id: electron_build
+        continue-on-error: true
+        working-directory: host/electron
+        run: |
+          (cd native && RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" cargo test --release) || echo "[spike] FAIL native unit tests"
+          npm ci
+          npm run build
+          node scripts/bundle.mjs
+          npm test
+          ls -la native/*.node
+          npx electron --version
+      - name: electron spike - Metal view under transparent web contents (subview stacking)
+        if: steps.electron_build.outcome == 'success'
+        continue-on-error: true
+        working-directory: host/electron
+        run: |
+          set -o pipefail
+          npx electron app/main.js --frames 120 --out "$GITHUB_WORKSPACE" --tag electron-subview --stack subview 2>&1 | tee "$GITHUB_WORKSPACE/electron-subview.log"
+          echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-subview.log" || true
+      - name: electron spike - fallback stacking (child NSWindow below a transparent parent)
+        if: steps.electron_build.outcome == 'success'
+        continue-on-error: true
+        working-directory: host/electron
+        run: |
+          set -o pipefail
+          npx electron app/main.js --frames 60 --out "$GITHUB_WORKSPACE" --tag electron-childwindow --stack childwindow 2>&1 | tee "$GITHUB_WORKSPACE/electron-childwindow.log"
+          echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-childwindow.log" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -58,3 +88,5 @@ jobs:
           path: |
             *.png
             bench-results.json
+            electron-*-spike.json
+            electron-*.log

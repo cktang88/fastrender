@@ -1,0 +1,50 @@
+// node test/host-wrapper.test.mjs: the REAL FastRenderer + real three.js driving host.js over a fake addon.
+// Checks the attach(Uint32Array over the renderer's own ArrayBuffer) / present(words) contract and that
+// the stream decodes the way the Rust side (native/src/shm.rs parse_frame) decodes it.
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import * as THREE from 'three';
+import { FastRenderer } from '../../../js/fastrender-three.js';
+
+const require = createRequire(import.meta.url);
+const { createHost } = require('../host.js');
+
+function parseFrame(w) { // mirror of shm.rs parse_frame
+  const f = new Float32Array(w.buffer, w.byteOffset, w.length);
+  assert.equal(w[0], 0x46524d32);
+  let i = 2, draws = 0, bg = null;
+  while (i + 2 <= w[1]) {
+    const op = w[i], n = w[i + 1], p = i + 2;
+    if (op === 4) bg = [f[p], f[p + 1], f[p + 2]];
+    if (op === 5) draws = w[p];
+    i = p + n;
+  }
+  assert.equal(i, w[1], 'stream tiles exactly');
+  return { draws, bg };
+}
+
+const calls = { attach: 0, present: [], upload: 0, frames: [] };
+let view = null;
+const fake = {
+  attach(handle, buf, shm) { calls.attach++; view = buf; assert.ok(buf instanceof Uint32Array); assert.equal(handle, null); assert.equal(shm, '/fr-test'); return shm; },
+  present(words) { calls.present.push(words); calls.frames.push(parseFrame(view.subarray(0, words))); },
+  upload(kind, id, meta, arrays) { calls.upload++; assert.equal(typeof meta, 'string'); assert.ok(arrays.every((a) => a instanceof Uint8Array)); },
+  release() {}, stats: () => ({}),
+};
+const host = createHost(fake, { shmName: '/fr-test' });
+const renderer = new FastRenderer({ host, commandWords: 1 << 16 });
+assert.equal(calls.attach, 1);
+assert.equal(view.buffer, renderer.cmd, "addon sees FastRenderer's own ArrayBuffer (zero extra copy)");
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x336699);
+for (let i = 0; i < 7; i++) scene.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()));
+const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100);
+renderer.render(scene, camera);
+assert.equal(calls.present.length, 1);
+assert.ok(calls.upload >= 7, 'geometry uploads went through host.upload');
+const fr = calls.frames[0];
+assert.equal(fr.draws, 7);
+const c = new THREE.Color(0x336699);
+assert.ok(Math.abs(fr.bg[0] - c.r) < 1e-6 && Math.abs(fr.bg[2] - c.b) < 1e-6);
+console.log('host-wrapper ok:', JSON.stringify({ words: calls.present[0], draws: fr.draws, uploads: calls.upload }));
