@@ -14,7 +14,7 @@ bash host/electron/scripts/world-game.sh "$game" > /dev/null || { echo "cannot p
 cargo build --release -q || exit 1
 (cd js && npm ci --silent) >/dev/null 2>&1 || true
 node js/examples/world-objects.build.mjs "$game" js/dist/world-objects.js --target jsc --three three >/dev/null || exit 1
-out="bench-results/$(date +%F)-gpu-ablate-$(sysctl -n hw.model 2>/dev/null || echo mac)"; mkdir -p "$out"
+out="bench-results/$(date +%F)-gpu-ablate-$(sysctl -n hw.model 2>/dev/null || echo mac)$( [ "$size" = 1280x800 ] || echo "-$size" )"; mkdir -p "$out"
 # alllights = the frame before trimLights (dark padding lights in every lit fragment); none = what ships now.
 # nofarlod = the frame before patches/...-0004 (blocks beyond 70 m and cars beyond 90 m drawn with their full meshes).
 # nostatic = the JS frame before patches/...-0005 (the blocks' parts in three's matrix walk again): same picture, same

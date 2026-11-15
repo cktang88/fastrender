@@ -35,7 +35,8 @@ Draw flags: 1 cast shadow, 2 receive shadow, 4 transparent, 8 double-sided, 16 b
 128 no frustum cull, 256 flat shading; v3 also: 512 unsorted (`renderer.sortObjects === false`: draws keep their
 order), 1024 points, 2048 line segments, 4096 line strip, 8192 line loop (drawn as a strip; Metal has no loop),
 16384 BatchedMesh entry (the instance-buffer word is the multi-draw index, drawn as the base instance: three's
-`gl_DrawID`, xlat rule 8). Draws are ordered by renderOrder first (three's painterSortStable /
+`gl_DrawID`, xlat rule 8), 32768 marked for cluster LOD (`userData.frClusters` / `clusters: 'auto'`, only with
+the renderer's `clusters` option on: docs/notes/clusters.md). Draws are ordered by renderOrder first (three's painterSortStable /
 reversePainterSortStable: then state for opaque draws, back to front for transparent ones; equal keys keep the draw
 order); groupOrder (a Group's renderOrder) is not applied.
 

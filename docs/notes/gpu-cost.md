@@ -215,6 +215,7 @@ Read the `gpu passes ... main` number of each row against `none`:
 | `lights0`, `nopoint` | cross-checks: must equal `none` now |
 | `nolights`, `noenv`, `nomaps`, `lambert`, `basic` | the remaining shader, piece by piece; `basic` is the floor (fill + vertex) |
 | `notransparent` | transparent overdraw |
+| `clusters`, `clusters-basic` | `none` / `basic` with cluster LOD on (docs/notes/clusters.md, off by default): against `none` / `basic`; the `clusters:` line has the triangles in -> out |
 
 Then the like-for-like table again:
 
