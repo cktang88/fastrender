@@ -79,3 +79,28 @@ Deliberately the final item, after the Metal 4 port, caching, threading and the 
 
 Not planned: porting *shaders* to TSL for speed. It would not make any of the three renderers faster, because the
 bottleneck is CPU-side JS, not the shader language.
+
+## Planned, on hold: optional M3+ tier
+
+Held until the user says to go ahead. This tier comes from inspecting Pocketcat (AmelieHeinrich/Pocketcat, Metal 4,
+M3+ only). The full technique list, with verdicts, is in `docs/research/pocketcat-techniques.md`.
+
+Every item is opt-in on `supportsFamily(Apple9)` (M3 and later) with hardware ray tracing or mesh-shader indirect
+command buffer support. The M1/M2 path (including the user's M2 Air) stays the default and the fallback.
+
+- [ ] **Ray-traced sun shadows.** Replace or augment shadow maps when the GPU has hardware RT. The acceleration
+  structures are built from three's geometry (a BLAS per geometry, the TLAS from the draw list).
+- [ ] **Ray-traced ambient occlusion.**
+- [ ] **Ray-traced reflections.** For PBR materials with low roughness; replaces or augments the PMREM env lookup.
+- [ ] **Ray-traced global illumination.** One bounce, denoised.
+- [ ] **MetalFX denoised upscaler** (`MTLFXTemporalDenoisedScaler`): denoise and upscale the RT signals in one pass.
+- [ ] **GPU-driven TLAS build.**
+- [ ] **GPU-driven visibility buffer with mesh shaders and meshlet culling/LOD.** Driven by an indirect mesh-shader
+  command buffer. Only worth it if profiling shows draw or vertex cost dominates; three.js games are usually
+  CPU-bound in JS.
+- [ ] **Reference path tracer.** A debug/ground-truth mode for comparing raster against RT, not for gameplay.
+
+Constraints carried over from the main pipeline:
+- Three's materials stay the source of truth. RT effects feed into three's lighting through the existing translated
+  programs (e.g. as an AO/shadow/reflection texture input), not through a separate material model.
+- Every item gets a golden image and an Air-vs-M3 benchmark before it is enabled by default.
