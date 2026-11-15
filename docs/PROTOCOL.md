@@ -1,4 +1,4 @@
-# fastrender protocol v2 (`js/fastrender-three.js` ↔ native)
+# fastrender protocol v2 / v3 (`js/fastrender-three.js` ↔ native)
 
 A real three.js scene graph is walked by `FastRenderer` (a drop-in `WebGLRenderer`). There are two channels.
 
@@ -33,6 +33,83 @@ Materials are deduplicated by content. Texture ids inside a material refer to up
 Draw flags: 1 cast shadow, 2 receive shadow, 4 transparent, 8 double-sided, 16 back side, 32 instanced, 64 vertex colours,
 128 no frustum cull, 256 flat shading.
 
+## v3: three.js's own programs (`new FastRenderer({ programs: 'three' })`)
+
+v3 is v2 plus the additions below; every v2 op keeps its meaning. The stream's magic is `0x46524D33` ('FRM3').
+Instead of describing materials by value for a hand-written shader, JS hands the native side three.js's **exact** program
+sources (what `WebGLRenderer` would pass to `gl.shaderSource`, produced at runtime by `js/three-programs.js` with no
+WebGL) and, each frame, the uniform values three's own code computes, packed into the layout the native translator
+(`src/xlat.rs`: glslang → SPIR-V → SPIRV-Cross → MSL) reflected. See `docs/notes/three-programs.md`.
+
+### PROGRAM: `host.program(key, vertexGlsl, fragmentGlsl) -> layout`
+
+Called synchronously, once per new three program cache key (three's `WebGLPrograms.getProgramCacheKey`). The sources are
+GLSL ES 3.00 exactly as three builds them; the host applies `normalizeGlsl` (same rules in `js/three-programs.js` and
+`xlat::normalize_glsl`, checked against `tests/fixtures/xlat/normalize`), translates, and returns the layout (object or
+JSON string):
+
+```js
+{
+  size: 416,                       // bytes of the default uniform block (multiple of 16); buffer(1) in both stages
+  members: [                       // only members of the merged default block; offsets are MSL byte offsets
+    { name: "projectionMatrix", offset: 0, type: "mat4", count: 1, stride: 0, matrixStride: 16 },
+    { name: "directionalLights[0].direction", offset: 352, type: "vec3", count: 1, stride: 0, matrixStride: 0 },
+    { name: "morphTargetInfluences", offset: 96, type: "float", count: 8, stride: 16, matrixStride: 0 },
+  ],
+  textures: [ { name: "map", index: 0 }, { name: "directionalShadowMap[0]", index: 2 } ],  // texture(i) + sampler(i)
+  attributes: [ { name: "position", location: 0 }, { name: "instanceMatrix", location: 3 } ],  // mat4: 4 locations
+  objectBlock: { size: 176, members: [...] } | null   // FrObject, buffer(2)
+}
+```
+
+- Arrays of structs are flattened to leaves (`pointLights[1].color`); arrays of primitives are one entry with `count` > 1
+  and `stride`. Matrices are column-major, `matrixStride` = bytes between columns (16 for mat2/3/4).
+- A GLSL `bool` is a 4-byte `uint` (0/1) and is reported as `uint`; the packer writes three's booleans as 0/1.
+- Texture indices are program-wide (fragment textures first, then vertex-only); a sampler array is listed per element.
+- `FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; }` (offsets 0/64/128) replaces those three
+  uniforms; the native side fills it per draw from the DRAWS 3×4 rows and the camera. JS never packs them.
+- buffer(3) is reserved for a per-frame shared block (see "per-frame block" below); vertex buffers use indices ≥ 4.
+- `projectionMatrix` is three's (OpenGL clip space); the translator's `fixup_clipspace` remaps z. A temporal upscaler's
+  jitter is applied by JS when packing: `host.projectionJitter()` (or `renderer.projectionJitter`) returns `[jx, jy]`
+  in NDC units and JS adds `j × row 3` to rows 0/1 of the projection (both camera types). It must equal the native
+  jitter of that frame (`core::jittered`).
+- `host.releaseProgram(key)` (optional) when three would release the program.
+
+### MATERIAL (kind 3) in v3
+
+A native material id is a **material instance**: one three material × the object variant three compiles separately
+(instanced / skinned / morphed / batched / vertex alpha / tangents...) × `receiveShadow` (only when the program reads
+it; it is a per-object uniform in three) × the object itself for skinned / morphed / batched meshes (their bone and
+morph uniforms are per object). The id stays the same when three picks another program for it (lights added, fog or
+tone mapping changed): the material is re-uploaded with the new `programKey`. Meta:
+
+`{ programKey, name, type, side, transparent, opacity, blending, blendSrc, blendDst, blendEquation, premultipliedAlpha,
+depthTest, depthWrite, depthFunc, colorWrite, alphaToCoverage, polygonOffset: [factor, units] | null, wireframe }`
+
+Re-sent when the program or any of these pipeline-state fields change (WebGLRenderer reads them every draw).
+`host.release(3, id)` when the three material is disposed.
+
+### TEXTURE (kind 2) additions
+
+meta gains `format`, `type` (three constants) and `depth`; the data is the raw bytes of `image.data` (Float32 for
+bone/morph textures, Uint16 half floats, ...).
+
+### Per frame
+
+| op | payload |
+|---|---|
+| 8 MATERIAL_UNIFORMS | n, then per material instance used this frame: id, byteSize, textureCount, `byteSize/4` words of the packed default block, `textureCount` texture ids (one per `layout.textures` entry, same order) |
+| 9 SHADOWS | n, then n × 28: kind (1 directional, 2 spot, 3 point, 4 sun), index (three's lights-state index), mapSize x y, bias, normalBias, radius, camera near, far, light world position xyz, shadow camera view-projection 4×4 (point lights: face 0) |
+
+Texture ids in MATERIAL_UNIFORMS are uploaded texture ids or special ids:
+`0xFF000000 | kind << 16 | index` = the shadow map the native side rendered for SHADOWS entry (kind, index);
+`0xFE000001` three's DFG LUT (r178+, `src/renderers/shaders/DFGLUTData.js`) unless JS was given it (`dfgLUT` option);
+`0xFE000002` the transmission render target; `0` none (bind a neutral texture).
+
+Every block of every instance in use is packed every frame: three refreshes material uniforms on every material switch,
+and games edit `material.color` / `uniforms.x.value` without `needsUpdate`, so there is no cheap dirty signal.
+The draw list's material id is the instance id; draw flags are unchanged.
+
 ## Memory ownership
 
 - **Electron host:** JS allocates the buffer and calls `host.attach(buffer)` once (the V8 memory cage forbids native-backed
@@ -43,8 +120,9 @@ See `docs/HOST.md`.
 
 ## Not covered yet (counted in `renderer.info.unsupported`)
 
-- ShaderMaterial and `onBeforeCompile` (planned: GLSL→MSL translation)
+- v2 only: ShaderMaterial and `onBeforeCompile`, SkinnedMesh (bind pose), morph targets (v3 covers all three)
 - Sprites, Points, Lines
-- SkinnedMesh (drawn in bind pose) and morph targets
+- v3: environment maps / PMREM (`scene.environment`, `material.envMap`: programs are built without them) and the
+  transmission pass
 - render targets / EffectComposer (planned: map known passes to native equivalents)
 - non-colour backgrounds
