@@ -179,6 +179,25 @@ Everything else (`WebGLProgram`, `WebGLLights.setup/setupView`, `WebGLMaterials`
   `ENVMAP_TYPE_PMREM`; r170: the CubeUV atlas). The transmission pass is still unsupported (counted).
 - `RawShaderMaterial` programs written in GLSL ES 1.00 (three's `OutputPass`, many `ShaderPass`es) are lifted to 3.00
   with three's own compatibility defines (`liftGlsl1`) before they reach the host.
+- **Per-instance attributes** (`InstancedBufferAttribute`, Nov 2026): sent with the geometry upload, meta
+  `{ name, itemSize, perInstance: true }`, one element per instance (`meshPerAttribute` > 1 is expanded in JS so the
+  native step rate is always 1). Natively `Geo::inst_attrs`, bound by reflected name with
+  `MTLVertexStepFunction.PerInstance` (`StreamSig` `SIG_INSTANCE | n`, like `instanceMatrix`); a draw never steps
+  past the shortest per-instance stream. An edit (version bump) re-uploads the geometry.
+- **BatchedMesh**: one DRAWS record per visible, active instance, through a proxy object whose prototype is the batch
+  (`isBatchedMesh = false`, so three builds the plain program; its own world matrix = batch × `getMatrixAt`), drawn
+  over that instance's `_geometryInfo` range of the batch's one geometry upload. Batch instance colours are counted
+  (`BatchedMesh instance colours`). True multi-draw (gl_DrawID + `batchingIdTexture`) would need integer texture uploads.
+- **Shadow update rules**: `beginFrame` applies WebGLShadowMap's: a light's map is re-rendered only while
+  `renderer.shadowMap.autoUpdate || needsUpdate` and `shadow.autoUpdate || shadow.needsUpdate` (needsUpdate then
+  cleared, and the shadow matrix only updated with the map). A kept map is sent as SHADOWS kind `| 0x100`
+  (SHADOW_KEEP); the native side renders no pass for it and keeps binding its last map (lit if it never rendered).
+- **r170 shadow maps** (RGBA-packed, `DEPTH_TEXTURE_SHADOWS` false): rendered natively for directional and spot
+  lights into an RGBA8 target cleared to white, every caster through `vs_three_depth` + `fs_three_pack_depth`
+  (packing.glsl.js r170's packDepthToRGBA of the GL window z); three's depth programs are not used there (alphaTest
+  cut-outs and skinned casters render solid / in bind pose). r170 point maps (4:2 packed distance) and r170 VSM still
+  bind a lit map.
+
 - glslang 15.1 (`glslangValidator` here) refuses to link a program whose fragment stage declares an input the vertex
   stage never writes (three does this: e.g. `vNormal` in programs whose vertex stage does not output it; WebGL accepts
   it). The mock host adds the missing `out` declarations to the vertex stage and relinks. If `src/xlat.rs` links both

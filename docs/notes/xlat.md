@@ -54,6 +54,23 @@ derives from) cannot be configured out through these crates. LTO might trim some
      **The block always declares all three members**, even if the stage declared only one. That keeps the block
      identical in both stages (the stages share one buffer) and makes its layout a constant: 176 bytes. (The brief said
      "only those declared"; with that, vertex and fragment could disagree on offsets.)
+  5b. **`#define SHADER_NAME <name>`** (three writes `material.name` there unescaped). If the name has a character
+     outside `[A-Za-z0-9_]` and ``-.,:;+*=<>!&|^%~?()[]{}'``, the name is trimmed and each such character (Unicode
+     scalar) becomes `_`; other lines are kept. glslang rejects `#` and `"` in a macro body (WebGL does not): the real
+     game's `painted_metal #414234` broke 6 of its programs (27 % of its draws). `/` (comment openers) and `\`
+     (continuation) are replaced too.
+  5c. **Vulkan-only keywords.** `VULKAN_RESERVED` (src/xlat.rs, same list in js/three-programs.js): 55 words that are
+     keywords in GLSL 4.50 for Vulkan but free identifiers in GLSL ES 3.00: `sampler`, `samplerShadow`, `buffer`,
+     `shared`, `precise`, `texture1D…textureCubeArray`, `itexture*`, `utexture*`, `subpassInput*`, `image2DMS*`,
+     `imageCubeArray` (+ i/u), `attachmentEXT`, `pervertexNV`. The list was generated, not typed: every GLSL 4.50 /
+     Vulkan GLSL keyword and reserved word was compiled as a parameter name with glslang under `#version 300 es` and
+     `#version 450 -V`; the ones only the second rejects are listed (`shared` is added by hand: ANGLE reserves it in
+     ES 3.00, glslang already does). Each whole identifier in the list becomes `fr_kw_<word>`, outside `//` and `/* */`
+     comments (block state tracked across lines), on every line rules 1–2 keep, **unless the source `#define`s that
+     name** (three's `#define texture2D texture`: a macro never reaches the parser, and renaming it would change every
+     fragment program). The reflected uniform, texture and attribute names are mapped back (`demangle`), so the layout
+     keeps the game's names (`u.fr_kw_shared` → `u.shared`). three's transmission chunk (`textureBicubic( sampler2D
+     sampler, … )`) needed it. `tests/fixtures/xlat/normalize/names-and-reserved-words` covers both rules.
   6. Lines are split on `\n` or `\r\n`, a final newline adds no extra empty line, and the output is the lines joined
      with `\n` plus a trailing `\n`. Every other line is kept byte for byte, so line numbers in glslang errors match
      three's source, shifted by one after the inserted block.
@@ -94,11 +111,14 @@ Argument buffers are off. The target is MSL 3.0, platform macOS.
 { "size": 1056,
   "members": [ { "name": "directionalLights[0].direction", "offset": 816, "type": "vec3", "count": 1, "stride": 0, "matrixStride": 0 },
                { "name": "directionalShadowMatrix", "offset": 352, "type": "mat4", "count": 2, "stride": 64, "matrixStride": 16 }, … ],
-  "textures": [ { "name": "map", "index": 0 }, { "name": "directionalShadowMap[0]", "index": 2 }, … ],
+  "textures": [ { "name": "map", "index": 0, "kind": "2d", "sample": "float" }, { "name": "directionalShadowMap[0]", "index": 2 }, … ],
   "attributes": [ { "name": "instanceMatrix", "location": 0 }, { "name": "position", "location": 5 }, … ],
   "objectBlock": { "size": 176, "members": [ … ] } }        // null when the program never declares the object uniforms
 ```
 
+- A texture's `sample` is what sampling returns: `float`, or `uint` / `int` for `usampler*` / `isampler*` (three's
+  `batchingIdTexture`). The native side must bind a texture of a matching pixel format (Metal API validation stops on an
+  RGBA8 texture for a `texture2d<uint>`); with no integer texture uploads yet it binds a 1×1 zero R32Uint / R32Sint.
 - Members are leaves, sorted by offset. Arrays of structs are flattened per element (`pointLights[1].color`). Arrays of
   primitives or matrices are one entry, with `count` = the length and `stride` = the byte stride (std140: always a
   multiple of 16, so `float x[5]` has stride 16). A declared array of length 1 keeps `stride` > 0.
