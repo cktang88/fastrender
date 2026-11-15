@@ -1,4 +1,6 @@
-# GPU ablation, real game, MacBook Air M2 (Mac14,2), 1280x800 (2026-11-15)
+# GPU ablation, real game, MacBook Air M2 (Mac14,2), 1280x800 (2026-11-15) — OLD COMMIT a0816db
+
+> **Measured at the old commit `a0816db`**, before the 8 GPU-cost commits that followed (instance culling, discard order, half precision). See the sibling folder for the rerun on newer code.
 
 `scripts/gpu-ablate.sh 1280x800` (180 frames, 60 warmup, scale 1, `--gpu-passes 1`) at **`a0816db`**, on AC power.
 Each row switches one feature off (FASTRENDER_ABLATE); the picture changes on purpose, only ms matter.
