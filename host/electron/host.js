@@ -7,7 +7,7 @@
 // - present(words): the Uint32Array is passed to the addon on every call, which memcpy's the first
 //   `words` words into the shared-memory mailbox and wakes the Metal render thread in the main process.
 //   A detached buffer (transfer/postMessage) is detected and throws instead of reading freed memory.
-//   `opts.subarray` (contextBridge mode): pass only the used words, since the bridge copies arguments.
+//   `opts.subarray` (contextBridge mode): pass a copy of only the used words (slice): the bridge copies a view's WHOLE underlying buffer (measured 1.4 ms per call for the 4 MB command buffer even with subarray).
 // - upload(kind, id, meta, ...typedArrays): ordered, non-droppable resource channel with bytes.
 //   napi-rs 3 has no rest args, so we spread here.
 
@@ -24,7 +24,7 @@ function createHost(native, opts = {}) {
     },
     present(words) {
       const k = live();
-      if (opts.subarray) native.present(k.subarray(0, words === undefined ? k[1] : words));
+      if (opts.subarray) native.present(k.slice(0, words === undefined ? k[1] : words));
       else native.present(k, words);
     },
     upload(kind, id, meta, ...arrays) {
