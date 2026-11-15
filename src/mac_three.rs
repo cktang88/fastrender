@@ -902,10 +902,21 @@ impl ThreeScene {
             if self.dbg & 128 != 0 && drawn == 0 {
                 let m = &self.mats3[&d.material].meta;
                 println!(
-                    "v3 first draw: {} prog {} geo {} flags {:#x} start {} count {} inst {} x{} block@{} obj@{} frame@{} pipe {} geo attrs {:?}",
+                    "v3 first draw: {} prog {} geo {} flags {:#x} start {} count {} inst {} x{} block@{} obj@{} frame@{} pipe {} geo attrs {:?} side {} blend {:?} depth {} {} {}",
                     m.ty, m.program, d.geometry, d.flags, d.start, d.count, d.instances, d.instance_count, v.block, v.obj, self.frame_off, v.pipe,
-                    self.geos.get(&d.geometry).map(|g| g.attrs.iter().map(|a| (a.0, a.2)).collect::<Vec<_>>())
+                    self.geos.get(&d.geometry).map(|g| g.attrs.iter().map(|a| (a.0, a.2)).collect::<Vec<_>>()),
+                    m.side, three::blend_of(m), m.depth_test, m.depth_func, m.depth_write
                 );
+                if let Some(p) = self.progs.progs.get(&m.program) {
+                    let ring = self.slots[slot_i].ring.contents().as_ptr() as *const u8;
+                    let f = |o: u32| unsafe { (ring.add(v.block + o as usize) as *const f32).read_unaligned() };
+                    let u = |o: u32| unsafe { (ring.add(v.block + o as usize) as *const u32).read_unaligned() };
+                    let vals: Vec<String> = p.layout.members.iter().map(|mb| if mb.ty == "uint" || mb.ty == "int" { format!("{}={}", mb.name, u(mb.offset)) } else { format!("{}={:.3}", mb.name, f(mb.offset)) }).collect();
+                    println!("v3 first draw block ({} B): {}", p.layout.size, vals.join(" "));
+                    println!("v3 first draw attrs {:?} textures {:?} ids {:?}", p.attrs.iter().map(|a| (a.name, a.location, a.comps, a.cols)).collect::<Vec<_>>(),
+                        p.layout.textures.iter().map(|t| (t.name.as_str(), t.index, t.kind.as_str(), t.shadow)).collect::<Vec<_>>(),
+                        &self.uni_tex[v.tex..(v.tex + p.layout.textures.len()).min(self.uni_tex.len())]);
+                }
             }
             let mat = &self.mats3[&d.material];
             if (self.dbg & 4 != 0 && d.flags & flag::INSTANCED != 0)
@@ -927,7 +938,7 @@ impl ThreeScene {
             }
             // WebGLState.setMaterial: DoubleSide = no culling; flipSided = BackSide xor mirrored transform
             let m = &mat.meta;
-            enc.setCullMode(if m.side == 2 { MTLCullMode::None } else { MTLCullMode::Back });
+            enc.setCullMode(if m.side == 2 && self.dbg & 256 == 0 { MTLCullMode::None } else { MTLCullMode::Back });
             let mirrored = Self::winding(d) == MTLWinding::Clockwise;
             enc.setFrontFacingWinding(if (m.side == 1) != mirrored { MTLWinding::Clockwise } else { MTLWinding::CounterClockwise });
             let bias = m.polygon_offset.map_or((0.0, 0.0), |p| (p[0], p[1]));
