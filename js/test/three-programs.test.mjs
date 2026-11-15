@@ -458,3 +458,39 @@ function decode(buf) {
   assert.ok(perDraw < 8, `allocation does not grow with draws (${perDraw.toFixed(2)} B per extra draw)`);
   console.log(`[three r${REV}] unchanged frame: 0 of ${s.r.info.uniformBlocks.total} blocks repacked, same stream; ${edits.length} kinds of edit repack only what changed and equal a from-scratch pack; a static frame allocates ${(small / 1024).toFixed(1)} KB (300 draws) / ${(large / 1024).toFixed(1)} KB (3000 draws)`);
 }
+
+// ------------------------------------------------------------------ 7. a second scene per frame; material.envMap swaps
+{
+  // the main scene and a HUD scene (no fog, other lights) every frame: each keeps its programs (per-scene lights and
+  // epoch, as WebGLRenderer's render states), so an unchanged frame picks no program
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0x99aabb, 5, 80);
+  const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(4, 10, 2);
+  scene.add(sun, new THREE.AmbientLight(0x404040));
+  const mats = Array.from({ length: 30 }, (_, i) => new THREE.MeshStandardMaterial({ color: i * 997 }));
+  for (let i = 0; i < 60; i++) { const m = new THREE.Mesh(new THREE.BoxGeometry(), mats[i % 30]); m.position.set(i % 10, 0, -Math.floor(i / 10)); scene.add(m); }
+  const hud = new THREE.Scene();
+  hud.add(new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshBasicMaterial({ color: 0xff0000 })), new THREE.Mesh(new THREE.BoxGeometry(), mats[3]));
+  const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 3, 8); camera.lookAt(0, 0, 0);
+  const hudCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10); hudCam.position.z = 5;
+  const r = new FastRenderer({ host: makeHost(), programs: 'three', commandWords: 1 << 20 });
+  r.autoClear = false;
+  const frame = () => { r.clear(); r.render(scene, camera); r.clearDepth(); r.render(hud, hudCam); };
+  for (let i = 0; i < 3; i++) frame();
+  const tp = r._tp, get0 = tp._getProgram;
+  let calls = 0;
+  tp._getProgram = function (...a) { calls++; return get0.apply(this, a); };
+  for (let i = 0; i < 3; i++) frame();
+  assert.equal(calls, 0, `scene + HUD every frame: ${calls} program picks (expected 0)`);
+  // material.envMap swapped between two cube textures: the material's env map follows (WebGLRenderer re-checks it)
+  const cube = (v) => { const c = new THREE.CubeTexture(Array.from({ length: 6 }, () => ({ width: 1, height: 1, data: new Uint8Array([v, v, v, 255]) }))); c.needsUpdate = true; return c; };
+  const a = cube(10), b = cube(200);
+  const m0 = new THREE.MeshPhongMaterial({ envMap: a });
+  scene.add(new THREE.Mesh(new THREE.BoxGeometry(), m0));
+  frame();
+  m0.envMap = b;
+  frame();
+  assert.equal(tp.properties.get(m0).envMap, b, 'material.envMap swap: the material properties follow');
+  tp._getProgram = get0;
+  console.log(`[three r${REV}] scene + HUD scene per frame: 0 program picks on an unchanged frame; material.envMap swap followed`);
+}

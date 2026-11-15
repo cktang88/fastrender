@@ -81,6 +81,8 @@ pub mod flag {
     pub const INSTANCED: u32 = 32;
     pub const VERTEX_COLORS: u32 = 64;
     pub const NO_CULL: u32 = 128;
+    /// renderer.sortObjects === false: draws keep their order (three renders its lists unsorted)
+    pub const UNSORTED: u32 = 512;
 }
 
 pub mod light {

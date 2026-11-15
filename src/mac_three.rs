@@ -973,8 +973,10 @@ impl ThreeScene {
         self.casters.clear();
         self.vis3.clear();
         let v3 = self.view.v3;
-        let mut opaque: Vec<(u64, usize)> = Vec::new();
-        let mut transparent_list: Vec<(f32, usize)> = Vec::new();
+        // three's painterSortStable / reversePainterSortStable: renderOrder first (then state for opaque draws, back to
+        // front for transparent ones); renderer.sortObjects = false keeps the draw order
+        let mut opaque: Vec<(i32, u64, usize)> = Vec::new();
+        let mut transparent_list: Vec<(i32, f32, usize)> = Vec::new();
         let mut shadow_only: Vec<usize> = Vec::new();
         let mut is_caster: Vec<bool> = vec![false; self.draws.len()];
         for (i, d) in self.draws.iter().enumerate() {
@@ -1003,15 +1005,17 @@ impl ThreeScene {
                 }
                 continue;
             }
+            let unsorted = d.flags & flag::UNSORTED != 0;
             if transparent {
-                transparent_list.push((c.distance_squared(cam), i));
+                transparent_list.push(if unsorted { (0, 0.0, i) } else { (d.render_order, c.distance_squared(cam), i) });
             } else {
-                opaque.push((((d.material as u64) << 32) | d.geometry as u64, i));
+                opaque.push(if unsorted { (0, i as u64, i) } else { (d.render_order, ((d.material as u64) << 32) | d.geometry as u64, i) });
             }
         }
         let mut transparent = transparent_list;
-        opaque.sort_unstable_by_key(|o| o.0);
-        transparent.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        opaque.sort_by_key(|o| (o.0, o.1));
+        // stable: equal keys keep the draw order, as three's sort ends with the object id
+        transparent.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)));
         let n = opaque.len() + transparent.len() + shadow_only.len();
         if self.slots[slot_i].cap < n {
             // grow the object records only: the slot's ring already holds this frame's uniform blocks (update()), and
@@ -1024,7 +1028,7 @@ impl ThreeScene {
         }
         let s = &self.slots[slot_i];
         let objs = s.objects.contents().as_ptr() as *mut ThreeObj;
-        for (k, i) in opaque.iter().map(|o| o.1).chain(transparent.iter().map(|t| t.1)).enumerate() {
+        for (k, i) in opaque.iter().map(|o| o.2).chain(transparent.iter().map(|t| t.2)).enumerate() {
             let d = &self.draws[i];
             let g = &self.geos[&d.geometry];
             let inst_colors = d.flags & flag::INSTANCED != 0 && self.insts.get(&d.instances).is_some_and(|x| x.colors.is_some());

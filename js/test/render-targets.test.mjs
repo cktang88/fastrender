@@ -221,6 +221,41 @@ const targets = (h) => new Map(h.uploads.filter((x) => x.kind === KIND.RENDER_TA
   console.log(`[three r${REV}] equirect env map -> PMREM inside render(): ${f.length - 1} passes before the screen pass`);
 }
 
+// ------------------------------------------------------------------ 5. a render() from onBeforeRender (three's Reflector)
+{
+  const { Reflector } = await import('three/examples/jsm/objects/Reflector.js');
+  for (const autoClear of [true, false]) {
+    const h = makeHost({ zeroes: true });
+    const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 21 });
+    r.autoClear = autoClear;
+    const scene = new THREE.Scene();
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+    const box = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial({ color: 0xff8800 }));
+    box.position.y = 1;
+    const mirror = new Reflector(new THREE.PlaneGeometry(4, 4), { textureWidth: 128, textureHeight: 128 });
+    mirror.rotation.x = -Math.PI / 2;
+    const box2 = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshLambertMaterial({ color: 0x0088ff }));
+    box2.position.set(1.5, 0.5, 0);
+    scene.add(box, mirror, box2); // the mirror is drawn between the two boxes: its hook renders mid-pass
+    const cam = new THREE.PerspectiveCamera(50, 1.6, 0.1, 50); cam.position.set(0, 2, 5); cam.lookAt(0, 0, 0);
+    const rtId = () => [...targets(h).keys()].pop();
+    for (let i = 0; i < 3; i++) {
+      const f = h.frame(() => { if (!autoClear) r.clear(); r.render(scene, cam); });
+      const passes = f.filter((s) => !s.copy && s.draws.length);
+      const screen = passes.filter((s) => s.target === 0), refl = passes.filter((s) => s.target !== 0);
+      assert.equal(screen.length, 1, `frame ${i}: the screen pass is kept (autoClear ${autoClear})`);
+      assert.equal(screen[0].draws.length, 3, `frame ${i}: box, mirror and box in the screen pass`);
+      assert.equal(refl.length, 1, `frame ${i}: one reflection pass`);
+      assert.equal(refl[0].target, rtId(), 'into the reflector target');
+      assert.ok(f.indexOf(refl[0]) < f.indexOf(screen[0]), 'the reflection pass runs before the pass that samples it');
+      assert.equal(refl[0].draws.length, 2, 'the reflection pass draws the boxes (the mirror hides itself)');
+      const rtTex = targets(h).get(rtId()).colors[0].id;
+      assert.ok(screen[0].textures.includes(rtTex), 'the mirror samples the reflection');
+    }
+  }
+  console.log(`[three r${REV}] Reflector: render() from onBeforeRender mid-pass -> the reflection pass, then the whole screen pass`);
+}
+
 function dump(h, dir) {
   mkdirSync(dir, { recursive: true });
   let i = 0;

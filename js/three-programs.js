@@ -601,6 +601,11 @@ export class ThreePrograms {
     this.programCache = WebGLPrograms.length >= 7
       ? new WebGLPrograms(facade, env.cubemaps, env.cubeuvmaps, extensions, capabilities, bindingStates, this.clipping)
       : new WebGLPrograms(facade, env, extensions, capabilities, bindingStates, this.clipping);
+    // per scene (as WebGLRenderer's WebGLRenderStates): its own WebGLLights and program epoch, so a second scene
+    // rendered every frame (a HUD, an EffectComposer quad, PMREM) does not invalidate the main scene's programs
+    this._extensions = extensions;
+    this._sceneStates = new WeakMap();
+    this._epochs = 0;
     this.lights = new WebGLLights(extensions);
     this.materials = new WebGLMaterials(facade, this.properties);
     this.morphtargets = new WebGLMorphtargets(gl, capabilities, { allocateTextureUnit: () => 0, setTexture2D() {}, setTexture2DArray() {}, resetTextureUnits() {} });
@@ -614,7 +619,7 @@ export class ThreePrograms {
       isOrthographic: { value: false }, logDepthBufFC: { value: 0 }, toneMappingExposure: { value: 1 },
     };
     this._camPos = { x: 0, y: 0, z: 0 };
-    this._epoch = 0; this._frameKey = [];
+    this._epoch = 0; this._savePool = [];
     this._frameNo = 0;
     // the light uniforms every lit program reads, wired from lights.state each frame (as WebGLRenderer.getProgram
     // wires them into each material's uniforms): one { value } holder per uniform name
@@ -656,6 +661,9 @@ export class ThreePrograms {
     if (shadows.length !== ns) shadows.length = ns; // (not cleared with length = 0: V8 would drop its backing store)
     if (!HAS_PCF_SOFT && r.shadowMap.enabled && r.shadowMap.type === 2 && shadows.length) r.shadowMap.type = 1;
     this.lightList = lights;
+    let ss = this._sceneStates.get(scene);
+    if (ss === undefined) this._sceneStates.set(scene, (ss = { lights: new WebGLLights(this._extensions), key: [], epoch: 0 }));
+    this.lights = ss.lights;
     this.lights.setup(lights);          // sorts `lights` in place in three's order
     this.lights.setupView(lights, camera);
     this._clippingEnabled = this.clipping.init(r.clippingPlanes || [], !!r.localClippingEnabled);
@@ -678,10 +686,47 @@ export class ThreePrograms {
     for (let i = 0; i < LIGHT_WIRING.length; i++) lh[LIGHT_WIRING[i][0]].value = state[LIGHT_WIRING[i][1]];
     // everything that can change a program for every material: bump the epoch when it changes
     const fog = scene.fog || null;
-    if (changed(this._frameKey, state.version, fog, fog !== null && fog.isFogExp2 === true, scene.environment || null, r.toneMapping, r.outputColorSpace,
-      r.shadowMap.enabled, r.shadowMap.type, this.clipping.numPlanes, this.clipping.numIntersection)) this._epoch++;
+    // (per scene: each scene keeps its own epoch; materials keep their variants per epoch)
+    if (changed(ss.key, state.version, fog, fog !== null && fog.isFogExp2 === true, scene.environment || null, r.toneMapping, r.outputColorSpace,
+      r.shadowMap.enabled, r.shadowMap.type, this.clipping.numPlanes, this.clipping.numIntersection)) ss.epoch = ++this._epochs;
+    this._epoch = ss.epoch;
     // what refreshFogUniforms reads (fog values; the colour space follows the output colour space)
     if (fog !== null && changed(this._fogKey, fog, fog.color.r, fog.color.g, fog.color.b, fog.near, fog.far, fog.density, r.outputColorSpace, 0, 0)) this._fogStamp++;
+  }
+
+  /**
+   * beginFrame's state, set aside while a hook renders another pass in the middle of this one (FastRenderer
+   * _suspendPass) and put back after it (restoreFrame): scene, camera, lights (view-space state redone for this
+   * camera), the frame holders, shadow list, epoch
+   */
+  saveFrame() {
+    const f = this.frame, s = this._savePool.pop() || { holders: [], shadows: [], keep: [] };
+    s.scene = this.scene; s.camera = this.camera; s.lights = this.lights; s.lightList = this.lightList; s.epoch = this._epoch;
+    s.clipping = this._clippingEnabled; s.height = this._height; s.trW = this._transmissionRT.width; s.trH = this._transmissionRT.height;
+    s.proj = f.projectionMatrix.value; s.view = f.viewMatrix.value; s.ortho = f.isOrthographic.value; s.exposure = f.toneMappingExposure.value; s.logDepth = f.logDepthBufFC.value;
+    s.cx = this._camPos.x; s.cy = this._camPos.y; s.cz = this._camPos.z;
+    s.shadows.length = 0; s.keep.length = 0;
+    for (const l of this.shadows) { s.shadows.push(l); s.keep.push(l.shadow._frKeep); }
+    s.holders.length = 0;
+    for (let i = 0; i < LIGHT_WIRING.length; i++) s.holders.push(this._lightHolders[LIGHT_WIRING[i][0]].value);
+    // the light list is sorted in place by setup(): the hook's render gets its own (FastRenderer swaps _lightsCopy)
+    return s;
+  }
+
+  restoreFrame(s) {
+    const f = this.frame;
+    this._frameNo++; // material uniforms and light blocks are refreshed again for this pass's camera
+    this.scene = s.scene; this.camera = s.camera; this.lights = s.lights; this.lightList = s.lightList; this._epoch = s.epoch;
+    this._clippingEnabled = s.clipping; this._height = s.height; this._transmissionRT.width = s.trW; this._transmissionRT.height = s.trH;
+    f.projectionMatrix.value = s.proj; f.viewMatrix.value = s.view; f.isOrthographic.value = s.ortho; f.toneMappingExposure.value = s.exposure; f.logDepthBufFC.value = s.logDepth;
+    this._camPos.x = s.cx; this._camPos.y = s.cy; this._camPos.z = s.cz; f.cameraPosition.value = this._camPos;
+    this.shadows.length = s.shadows.length;
+    for (let i = 0; i < s.shadows.length; i++) { this.shadows[i] = s.shadows[i]; s.shadows[i].shadow._frKeep = s.keep[i]; }
+    for (let i = 0; i < LIGHT_WIRING.length; i++) this._lightHolders[LIGHT_WIRING[i][0]].value = s.holders[i];
+    // the same scene's WebGLLights may have been set up for the hook's camera: view-space light state for ours again
+    if (this.lightList && this.camera) { this.lights.setup(this.lightList); this.lights.setupView(this.lightList, this.camera); }
+    s.scene = s.camera = s.lights = s.lightList = null;
+    this._savePool.push(s);
   }
 
   /** shadow casters in three's lights-state order: [{ light, kind: 'directionalShadowMap'|..., index }] */
@@ -714,8 +759,19 @@ export class ThreePrograms {
   instance(material, object) {
     const ms = this._materialState(material);
     if (this._clippingEnabled && this.facade.localClippingEnabled) this.clipping.setState(material, this.camera, false);
-    if (ms.version !== material.version || ms.epoch !== this._epoch) {
-      ms.version = material.version; ms.epoch = this._epoch; ms.variants.clear(); ms.lastVariant = null;
+    // WebGLRenderer re-checks material.envMap every draw (materialProperties.envMap !== envMap): a swap re-picks
+    if (ms.version !== material.version || ms.envMapSrc !== material.envMap) {
+      ms.version = material.version; ms.envMapSrc = material.envMap; ms.byEpoch.clear(); ms.epoch = -1;
+    }
+    if (ms.epoch !== this._epoch) {
+      // variants per frame-wide program inputs (per scene epoch): alternating scenes keep theirs
+      ms.epoch = this._epoch; ms.lastVariant = null;
+      let v = ms.byEpoch.get(this._epoch);
+      if (v === undefined) {
+        ms.byEpoch.set(this._epoch, (v = new Map()));
+        if (ms.byEpoch.size > 8) ms.byEpoch.delete(ms.byEpoch.keys().next().value);
+      }
+      ms.variants = v;
     }
     const sig = objectSignature(material, object, this.clipping, this.facade.getRenderTarget());
     // most materials are drawn with one object signature: remember the last variant
@@ -725,8 +781,14 @@ export class ThreePrograms {
       const program = this._getProgram(material, scene, object, ms);
       let slot = ms.slots.get(sig);
       if (!slot) ms.slots.set(sig, (slot = { inst: [null, null], perObject: new WeakMap() }));
-      variant = { program, slot };
+      const mp = this.properties.get(material);
+      variant = { program, slot, envMap: mp.envMap, environment: mp.environment, envMapRotation: mp.envMapRotation, fog: mp.fog };
       ms.variants.set(sig, variant);
+    }
+    if (variant !== ms.lastVariant) {
+      // what WebGLMaterials.refreshMaterialUniforms reads from the material properties, as this variant's program saw it
+      const mp = this.properties.get(material);
+      mp.envMap = variant.envMap; mp.environment = variant.environment; mp.envMapRotation = variant.envMapRotation; mp.fog = variant.fog;
     }
     ms.lastSig = sig; ms.lastVariant = variant;
     const prog = variant.program, slot = variant.slot;
@@ -754,7 +816,7 @@ export class ThreePrograms {
   _initMaterialState(material, p) {
     // variants: object signature -> { program, slot } (cleared when the material or the frame-wide program inputs
     // change); slots: object signature -> uniform-block instances, kept across clears so native ids stay stable
-    p.frState = { version: -1, epoch: -1, variants: new Map(), lastSig: -1, lastVariant: null, programs: new Map(), slots: new Map(), instances: new Set(), uniforms: null, uniformsGen: 0, refreshed: -1, fogStamp: -1, fogGen: -1 };
+    p.frState = { version: -1, envMapSrc: undefined, epoch: -1, byEpoch: new Map(), variants: null, lastSig: -1, lastVariant: null, programs: new Map(), slots: new Map(), instances: new Set(), uniforms: null, uniformsGen: 0, refreshed: -1, fogStamp: -1, fogGen: -1 };
     this._ms.set(material, p.frState);
     material.addEventListener('dispose', () => this._disposeMaterial(material));
     return p.frState;

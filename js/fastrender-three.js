@@ -34,7 +34,7 @@ export const PASS_WORDS = 24;
 export const COPY_WORDS = 12;
 export { TEX };
 // draw flags
-export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256 };
+export const F = { CAST: 1, RECEIVE: 2, TRANSPARENT: 4, DOUBLE: 8, BACK: 16, INSTANCED: 32, VERTEX_COLORS: 64, NO_CULL: 128, FLAT: 256, UNSORTED: 512 };
 // light kinds
 export const L = { AMBIENT: 1, HEMI: 2, DIRECTIONAL: 3, POINT: 4, SPOT: 5 };
 // material models
@@ -326,11 +326,14 @@ export class FastRenderer {
     // (counted) until it changes, instead of the whole frame
     if (this._failed && this._failed.get(m) === m.version) { this._unsupported('program failed to translate'); return 0; }
     let inst;
+    this._inProgram++;
     try { inst = this._tp.instance(m, o); } catch (e) {
+      this._inProgram--;
       (this._failed || (this._failed = new WeakMap())).set(m, m.version);
       this._unsupported('program failed to translate');
       return 0;
     }
+    this._inProgram--;
     if (!inst.program.packer) { this._unsupported(`program without layout (${inst.program.name})`); return 0; }
     if (inst.frame !== this._frameNo) {
       inst.frame = this._frameNo;
@@ -386,6 +389,16 @@ export class FastRenderer {
     this._texTarget = new WeakMap();  // render-target texture -> its render target (r170 textures have no .renderTarget)
     this._fbTex = new WeakMap();      // FramebufferTexture -> uploaded size
     this._renderDepth = 0; this._nestedRenders = 0; this._passNested = 0; this._aborted = false;
+    // a render() / clear() from an onBeforeRender hook (Reflector, Water, Refractor) while a pass is being written: the
+    // pass is suspended (its words and per-pass state set aside), the hook's passes go first, the pass resumes after
+    this._inHook = 0; this._hookSusp = null; this._passStart = 2; this._drawsAt = 0; this._inProgram = 0;
+    // WebGLRenderer.state: what hooks touch (Reflector: state.buffers.depth.setMask); GL state is per pass natively
+    const nop = () => {};
+    this.state = {
+      buffers: { depth: { setTest: nop, setMask: nop, setFunc: nop, setClear: nop, setLocked: nop, getReversed: () => false, setReversed: nop, reset: nop },
+        color: { setMask: nop, setClear: nop, setLocked: nop, reset: nop }, stencil: { setTest: nop, setMask: nop, setFunc: nop, setOp: nop, setClear: nop, setLocked: nop, reset: nop } },
+      enable: nop, disable: nop, setBlending: nop, setMaterial: nop, setFlipSided: nop, setCullFace: nop, viewport: nop, scissor: nop, reset: nop,
+    };
     // stream state: where the next pass goes, whether the host has zeroed word 0 (it marks frames), offscreen passes
     // written before the first frame
     this._streamEnd = 2; this._hostFrames = false; this._lastScreen = false; this._bootEnd = 2;
@@ -394,6 +407,7 @@ export class FastRenderer {
 
   /** where the next pass starts: a fresh stream at a frame boundary, else after the passes already in this frame */
   _streamStart() {
+    if (this._inHook > 0 && this._hookSusp === null) this._suspendPass();
     const u = this.u32;
     let w = this._streamEnd;
     if (u[0] !== MAGIC3) {
@@ -442,6 +456,7 @@ export class FastRenderer {
     }
     if (scissor) flags |= PASS_FLAG.SCISSOR;
     if (w + PASS_WORDS + 2 > u.length) throw new Error('fastrender-three: command buffer too small for another pass');
+    this._passStart = w;
     u[w++] = OP.PASS; u[w++] = PASS_WORDS;
     u[w++] = target; u[w++] = this._face; u[w++] = this._level; u[w++] = flags;
     f[w++] = vx; f[w++] = vy; f[w++] = vw; f[w++] = vh;
@@ -546,6 +561,9 @@ export class FastRenderer {
 
   render(scene, camera) {
     if (!this._tp) { this._render(scene, camera); return; }
+    // from an onBeforeRender hook while a pass is open (not from inside program selection: PMREM below): the hook's
+    // render is a pass of its own, written before the suspended one (_suspendPass / _resumePass)
+    if (this._inHook > 0 && this._hookSusp === null) this._suspendPass();
     // v3: render() may run inside render(): three converts an equirect / cube env map to PMREM (more render() calls)
     // while picking a program. The inner passes go into the stream where this pass began; this pass stops writing
     // at once and is rendered again after them (its programs are cached by then).
@@ -613,7 +631,7 @@ export class FastRenderer {
     this._scene = scene; this._camera = camera;
     // draws, written straight into the command buffer (the count is patched in after the walk). The ops are
     // order-independent; DRAWS comes before the ops that depend on what the draws used (MATERIAL_UNIFORMS).
-    u[w++] = OP.DRAWS; const drawsAt = w++; const countAt = w++;
+    u[w++] = OP.DRAWS; this._drawsAt = w; w += 2;
     this._w = w; this._tris = 0; this._nDraws = 0;
     this._passNested = nested0; this._aborted = false;
     for (let i = 0; i < meshes.length && !this._aborted; i++) this._collect(meshes[i]);
@@ -622,7 +640,8 @@ export class FastRenderer {
     setLength(this._drawObjects, nDraws); setLength(this._shadowRecs, nDraws);
     if (tp) setLength(this._used, this._nUsed);
     w = this._w;
-    u[drawsAt] = 1 + nDraws * DRAW_WORDS; u[countAt] = nDraws;
+    const drawsAt = this._drawsAt; // (moved if a hook's pass was written before this one)
+    u[drawsAt] = 1 + nDraws * DRAW_WORDS; u[drawsAt + 1] = nDraws;
     // lights, 16 words each: kind, castShadow, colour*intensity (3), position (3), direction (3),
     // distance, decay, then hemisphere ground colour (3) or spot angle, penumbra, 0
     u[w++] = OP.LIGHTS; const lightsAt = w++; const lightsStart = w;
@@ -766,12 +785,53 @@ export class FastRenderer {
     }
   }
 
+  /**
+   * Set the pass being written aside (a hook renders while it is open): its words from _passStart, the per-pass
+   * scratch arrays and counters, and three's frame state. The hook's passes are then written where this pass began
+   * and this pass is moved after them (_resumePass), so the stream order is the order the GPU work must run in.
+   */
+  _suspendPass() {
+    const u = this.u32, start = this._passStart, end = this._w;
+    const s = {
+      words: u.slice(start, end), start, w: end, drawsAt: this._drawsAt, tris: this._tris, nDraws: this._nDraws, nUsed: this._nUsed,
+      scene: this._scene, camera: this._camera, passNested: this._passNested, aborted: this._aborted, inHook: this._inHook, depth: this._renderDepth,
+      meshes: this._meshes, lights: this._lights, lightsCopy: this._lightsCopy, used: this._used, drawObjects: this._drawObjects, shadowRecs: this._shadowRecs,
+      tp: this._tp.saveFrame(),
+    };
+    this._meshes = []; this._lights = []; this._lightsCopy = []; this._used = []; this._drawObjects = []; this._shadowRecs = [];
+    // the hook's render is a top-level render of its own; its passes start where this pass began
+    this._renderDepth = 0; this._inHook = 0; this._aborted = false;
+    u[0] = MAGIC3; u[1] = start; this._streamEnd = start; this._lastScreen = false;
+    this._hookSusp = s;
+  }
+
+  _resumePass(s) {
+    const u = this.u32, at = this._streamEnd, d = at - s.start;
+    if (at + s.words.length + 64 > u.length) throw new Error('fastrender-three: command buffer too small for a hook\'s passes');
+    u.set(s.words, at);
+    this._passStart = at; this._w = s.w + d; this._drawsAt = s.drawsAt + d;
+    this._tris = s.tris; this._nDraws = s.nDraws; this._nUsed = s.nUsed; this._scene = s.scene; this._camera = s.camera;
+    this._aborted = s.aborted; this._inHook = s.inHook; this._renderDepth = s.depth;
+    this._passNested = this._nestedRenders; // renders nested in the hook's passes are done
+    this._meshes = s.meshes; this._lights = s.lights; this._lightsCopy = s.lightsCopy; this._used = s.used; this._drawObjects = s.drawObjects; this._shadowRecs = s.shadowRecs;
+    // a frame number of its own from here: instances this pass already listed stay listed once
+    this._frameNo++;
+    for (let i = 0; i < this._nUsed; i++) this._used[i].frame = this._frameNo;
+    this._tp.restoreFrame(s.tp);
+    this._hookSusp = null;
+  }
+
   /** one DRAWS record at this._w */
   _draw(o, g, m, grp, geometry, inst, start, count, indexCount) {
     if (!m || !m.visible || this._aborted) return;
     // WebGLRenderer.renderObject calls these right before the draw (games use them to set per-draw uniforms)
+    // (a hook may render: _streamStart / render() suspend this pass; it resumes here, after the hook's passes)
+    const h0 = this._inHook, susp0 = this._hookSusp;
+    this._inHook = h0 + 1; this._hookSusp = null;
     o.onBeforeRender(this, this._scene, this._camera, g, m, grp);
     if (m.onBeforeRender) m.onBeforeRender(this, this._scene, this._camera, g, o, grp);
+    if (this._hookSusp !== null) this._resumePass(this._hookSusp);
+    this._inHook = h0; this._hookSusp = susp0;
     let flags = 0;
     if (o.castShadow) flags |= F.CAST;
     if (o.receiveShadow) flags |= F.RECEIVE;
@@ -781,6 +841,7 @@ export class FastRenderer {
     if (m.flatShading) flags |= F.FLAT;
     if (o.frustumCulled === false) flags |= F.NO_CULL;
     if (inst) flags |= F.INSTANCED;
+    if (this.sortObjects === false) flags |= F.UNSORTED; // (native: renderOrder, then state / depth, unless unsorted)
     const material = this._tp ? this._materialInstance(m, o) : this._material(m, flags & (F.TRANSPARENT | F.DOUBLE | F.BACK | F.VERTEX_COLORS | F.FLAT));
     if (this._tp && this._nestedRenders !== this._passNested) { this._aborted = true; return; } // see render()
     if (!material) return; // v3: the host could not translate this program
