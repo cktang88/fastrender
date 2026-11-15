@@ -21,10 +21,18 @@ G.__worldRealNow = real;
 // timers: the host's own where it has them (node, browser); virtual ones (run by frame) in JavaScriptCore
 const timers = [];
 let timerId = 0;
+// virtual timers run on their own clock: the frame clock plus idle time (__worldIdle), as a browser's real timers keep
+// running between frames while performance.now (virtual) does not
+let skew = 0;
+const fireDue = () => {
+  if (!timers.length) return;
+  const due = timers.filter((t) => t.at <= now + skew).sort((a, b) => a.at - b.at);
+  for (const t of due) { timers.splice(timers.indexOf(t), 1); t.f(...t.a); }
+};
 if (typeof G.setTimeout !== 'function') {
-  G.setTimeout = (f, ms = 0, ...a) => { timers.push({ id: ++timerId, at: now + (+ms || 0), f, a }); return timerId; };
+  G.setTimeout = (f, ms = 0, ...a) => { timers.push({ id: ++timerId, at: now + skew + (+ms || 0), f, a }); return timerId; };
   G.clearTimeout = (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); };
-  G.setInterval = (f, ms = 0, ...a) => { const id = ++timerId; const tick = () => { f(...a); timers.push({ id, at: now + Math.max(1, +ms || 0), f: tick, a: [] }); }; timers.push({ id, at: now + Math.max(1, +ms || 0), f: tick, a: [] }); return id; };
+  G.setInterval = (f, ms = 0, ...a) => { const id = ++timerId; const tick = () => { f(...a); timers.push({ id, at: now + skew + Math.max(1, +ms || 0), f: tick, a: [] }); }; timers.push({ id, at: now + skew + Math.max(1, +ms || 0), f: tick, a: [] }); return id; };
   G.clearInterval = G.clearTimeout;
 }
 G.queueMicrotask ||= (f) => Promise.resolve().then(f);
@@ -37,12 +45,15 @@ G.cancelAnimationFrame = (id) => { raf = raf.filter((r) => r.id !== id); };
 /** one display frame: advance the clock by dt seconds, fire due virtual timers, then the rAF callbacks */
 G.__worldStep = (dt = 1 / 60) => {
   now += dt * 1000;
-  if (timers.length) {
-    const due = timers.filter((t) => t.at <= now).sort((a, b) => a.at - b.at);
-    for (const t of due) { timers.splice(timers.indexOf(t), 1); t.f(...t.a); }
-  }
+  fireDue();
   const q = raf; raf = [];
   for (const r of q) r.f(now);
   return q.length;
 };
 G.__worldNow = () => now;
+/**
+ * idle time between frames (virtual timers only; the frame clock does not move): what the browser golden gets from
+ * real time passing between its settle frames (its timers are real, SwiftShader frames take seconds), so streaming that
+ * waits on timers / idle callbacks gets as far natively before the measured frames
+ */
+G.__worldIdle = (ms) => { skew += ms; fireDue(); };

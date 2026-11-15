@@ -4,6 +4,25 @@
 const G = globalThis;
 const noop = () => {};
 
+// WebAssembly's async compile in JavaScriptCore resolves through the thread's run loop (JSC's deferred work), which a
+// host that only calls frame() never spins: WebAssembly.instantiate's promise never settles and everything behind it
+// waits forever (three's MeshoptDecoder.ready: every meshopt GLB, i.e. the game's cars, trees, people). In the native
+// JSC host (globalThis.__fr), compile synchronously and hand back settled promises (JSC has no size limit on sync
+// compiles; the result is the same module / instance).
+if (G.__fr && typeof G.WebAssembly === 'object' && !G.__fr.runLoop) {
+  const W = G.WebAssembly;
+  const sync = (src, imports) => {
+    const module = src instanceof W.Module ? src : new W.Module(src);
+    const instance = new W.Instance(module, imports || {});
+    return src instanceof W.Module ? instance : { module, instance };
+  };
+  const tryP = (f) => { try { return Promise.resolve(f()); } catch (e) { return Promise.reject(e); } };
+  W.instantiate = (src, imports) => tryP(() => sync(src, imports));
+  W.compile = (bytes) => tryP(() => new W.Module(bytes));
+  W.instantiateStreaming = (resp, imports) => Promise.resolve(resp).then((r) => r.arrayBuffer()).then((b) => sync(b, imports));
+  W.compileStreaming = (resp) => Promise.resolve(resp).then((r) => r.arrayBuffer()).then((b) => new W.Module(b));
+}
+
 // console: JavaScriptCore's host defines only console.log
 if (G.console) for (const k of ['warn', 'error', 'info', 'debug', 'trace', 'time', 'timeEnd', 'group', 'groupEnd', 'groupCollapsed', 'table', 'count', 'assert']) if (typeof G.console[k] !== 'function') G.console[k] = k === 'warn' || k === 'error' ? (...a) => G.console.log(`[${k}]`, ...a) : noop;
 

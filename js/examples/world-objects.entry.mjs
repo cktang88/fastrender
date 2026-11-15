@@ -21,6 +21,8 @@ G.frame = (_t, dt) => {
     for (const k in r.info.unsupported) delete r.info.unsupported[k];
   }
   G.__worldStep(dt > 0 && dt < 0.25 ? dt : 1 / 60);
+  // settle frames (the golden sleeps 500 ms + a SwiftShader frame between its settle frames): let idle time pass
+  if (running >= 1 && running <= 10) G.__worldIdle(500);
   // one summary line (CI greps it): what this frame needed that FastRenderer skipped, per frame, over the first 10 frames
   if (reportAt && running === reportAt + 1) {
     const r = G.__world.renderer, u = {};
