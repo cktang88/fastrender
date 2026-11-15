@@ -173,19 +173,20 @@ async function smoke() {
   const pos = () => js('(() => { const p = window.__world && window.__world.player && window.__world.player.pos; return p ? [p.x, p.y, p.z] : null; })()');
   const check = (name, ok, detail) => { (results.checks ||= {})[name] = !!ok; log(`${ok ? 'PASS' : 'FAIL'} ${name}: ${detail}`); };
   // a slow GPU (CI's is paravirtual) needs seconds per frame: poll, up to 20 s, instead of one fixed wait
-  const until = async (read, ok) => { let v = await read(); for (let i = 0; i < 40 && !ok(v) && !finished; i++) { await sleep(500); v = await read(); } return v; };
+  const until = async (read, ok, n = 40) => { let v = await read(); for (let i = 0; i < n && !ok(v) && !finished; i++) { await sleep(500); v = await read(); } return v; };
   const t0 = Date.now();
   let r = null;
   while (Date.now() - t0 < timeoutS * 1000 && !finished) { await sleep(1000); r = await rep(); if (r && r.started) break; }
   results.boot_s = +((Date.now() - t0) / 1000).toFixed(1);
   if (!r || !r.started) return finish(2, `play smoke: the world did not start in ${timeoutS} s: ${JSON.stringify(r)}`);
+  // the first frame is on screen (fastrender: every pipeline of the level is built before it)
+  await until(rep, (x) => x && (!x.native || x.native.rendered > 0), 240);
   await sleep(3000);
   const a = (results.before_resize = await rep());
   check('world started on the real clock', a.frames > 0, `${results.boot_s} s; ${JSON.stringify(a)}`);
   // what the window looks like (title bar, traffic lights, the DOM over the Metal view): for a human, in the artifact
   results.window = { frame: frameStyle, bounds: win.getBounds(), content: win.getContentBounds(), display: screen.getPrimaryDisplay().size, scale: screen.getPrimaryDisplay().scaleFactor };
   log('window', JSON.stringify(results.window));
-  if (process.platform === 'darwin') { fs.mkdirSync(outDir, { recursive: true }); await run('screencapture', ['-x', path.join(outDir, `${tag}-screen.png`)]); }
   const [cw, ch] = win.getContentSize();
   win.setContentSize(Math.max(320, cw - 160), Math.max(240, ch - 100));
   const size = (x) => (x.native ? x.native.drawable : x.size);
@@ -203,6 +204,7 @@ async function smoke() {
   win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'W' });
   check('W moves the player', moved > 0.2, `${moved.toFixed(2)} m`);
   await sleep(playSeconds * 1000);
+  if (process.platform === 'darwin') { fs.mkdirSync(outDir, { recursive: true }); await run('screencapture', ['-x', path.join(outDir, `${tag}-screen.png`)]); }
   // full screen and back (the View menu's action)
   const f0 = await rep();
   win.setFullScreen(true);

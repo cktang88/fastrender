@@ -128,7 +128,8 @@ function startPlay() {
     if (!el) {
       el = document.createElement('div');
       el.id = 'fr-fps';
-      el.style.cssText = 'position:fixed;left:8px;top:8px;z-index:2147483647;pointer-events:none;padding:4px 8px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre';
+      // top centre: the window's buttons and the game's own HUD have the corners
+      el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);top:6px;text-align:center;z-index:2147483647;pointer-events:none;padding:4px 8px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre';
       document.body.appendChild(el);
     }
     el.style.display = '';
