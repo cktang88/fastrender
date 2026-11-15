@@ -168,7 +168,9 @@ validation (Metal 15–25 s total).
    error term.
 2. Sprites + the VAT crowd; BatchedMesh instance colours (or true multi-draw: integer texture uploads).
 3. CSM per-cascade layer masks (the game's `shadowMap.render` wrapper), soft shadows' match.
-4. JS cost in JavaScriptCore: 36–69 ms/frame after streaming vs 16 ms in node (V8) for the same frame: profile
-   (`updateMatrixWorld` over 25k objects, per-draw uniform packing), then the game-side wins
-   (`matrixWorldAutoUpdate=false` on static blocks).
+4. **Done (15 Nov): the JavaScriptCore host ran without its JIT** (no `allow-jit` entitlement on a cargo-built
+   binary): 84 → 14 ms of JS per frame once signed, level with node / Electron (docs/research/jsc-vs-v8.md). The
+   36–74 ms JavaScriptCore figures above are interpreter numbers. What is left of the 14 ms: `updateMatrixWorld`
+   over 23.6k objects (4.6–4.9 ms; `matrixWorldAutoUpdate=false` on static blocks, game side), per-draw work in
+   `render()` (~6 ms), game update (~3.4 ms).
 5. Electron host for this game (2D canvas, DOM HUD, input, audio, workers, network) once the spike lands.

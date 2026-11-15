@@ -19,6 +19,47 @@ which feeds the native Metal renderer.
 **B becomes the lean path later** (`src/jsc.rs` already exists) for games written against a small API, or with a
 UI renderer of their own.
 
+## Lean JavaScriptCore app vs Electron (updated 15 Nov 2026)
+
+**JS speed no longer separates them.** The JavaScriptCore host looked 3-5x slower than Electron on the real game
+(64-84 ms of JS per frame vs 14-25). That was our binary, not the engine: on Apple Silicon the system
+JavaScriptCore only JITs in a process signed with `com.apple.security.cs.allow-jit`, and a `cargo build` binary has
+no entitlements, so the game ran in the interpreter. Signed, the same host runs the same frames in **14 ms**
+(docs/research/jsc-vs-v8.md; `fastrender` now signs itself on first run, `macos/sign.sh` for packaged builds).
+
+| 3d-world-objects, same CI runner, frames after streaming | JS ms/frame |
+|---|---:|
+| JavaScriptCore host, unsigned (before) | 84 (73 with `JSC_useJIT=0`: no difference) |
+| **JavaScriptCore host, signed with allow-jit (after)** | **14** |
+| Electron 45 (V8) | 14-25 |
+| node 24 (V8) | 17.5 |
+| bun 1.4 (its own JavaScriptCore) | 16.5 |
+
+So the choice is back to what each host provides, and what it costs in memory:
+
+| | Lean native app (JavaScriptCore + Metal, one process) | Electron |
+|---|---|---|
+| Game JS speed | same (14 ms) | same (14-25 ms) |
+| Memory on top of the game's own data | the engine and our renderer: tens of MB [I] | Chromium's browser, GPU and renderer processes: about 300 MB [I], plus a second copy of uploads in transit through the ring |
+| The game's own JS heap and typed arrays (this game: about 1.25 GB of JavaScriptCore heap + typed arrays at the end of a run, from `JSC_logGC`) | same | same |
+| 2D canvas (this game paints 106 textures with it: signs, facades, leaves, minimap) | missing: needs a native canvas (CoreGraphics) behind `__fr`. Today: golden MAE 6.58 vs Electron's 2.96 | real |
+| DOM HUD, CSS | missing: needs a UI of our own, or the game draws its HUD in three | real |
+| Input (pointer lock, keyboard, gamepad) | to write natively and feed to the game's DOM listeners | real |
+| WebAudio | missing: the largest single piece to rebuild | real |
+| Workers, fetch, WebSocket | workers inert today; fetch = local files only | real |
+| Signing | needs the `allow-jit` entitlement (ad hoc or Developer ID; hardened runtime is fine) | Electron's own |
+
+**Recommendation.**
+- Do not pick a host for JS speed: there is none to gain either way.
+- **Electron stays the host for running a game unchanged**, this game included: it needs the canvas, the HUD, audio
+  and input, and all four work there today.
+- **The lean app is now a real option for memory**, not a dead end. What it saves is Chromium's fixed overhead (about
+  300 MB [I]: measure both on the Air before committing), not the game's own data, which is the larger number for
+  this game. What it costs is the browser surface the game uses. For 3d-world-objects, in order of value: a native
+  2D canvas, input, a HUD, audio.
+- A cheaper first step toward less memory than rebuilding a browser: cut the game's own footprint (typed arrays kept
+  in JS after upload, the 25k-object scene graph), which helps in both hosts.
+
 ## A: how it works
 
 - **The command buffer is allocated in JS.**

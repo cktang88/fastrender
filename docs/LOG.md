@@ -114,6 +114,37 @@ should pass what its device supports. The real game calls `detectSupport` but sh
 `npm test`: the two new sections (10: frustum test and shadow casters; 11: instances, extensions) pass on r187 and
 r170 with the rest. New tools: `world-objects.node.mjs --profile` (V8 sampling profiler aggregated in process),
 `--matrix-stats`, `--ab`, CPU-time columns; `js/test/transforms.bench.mjs`.
+## 2026-11-15: the JavaScriptCore host ran without its JIT: 84 -> 14 ms of JS per frame once signed with allow-jit
+
+Question: the real game costs 64-84 ms of JS per frame in the JavaScriptCore host and 14-25 ms in Electron on the same
+runner. JavaScriptCore or our host? **Our host.** On Apple Silicon the system JavaScriptCore.framework enables its JIT
+only in a process whose signature has `com.apple.security.cs.allow-jit` (`isJITEnabled()` in WebKit's
+ExecutableAllocator.cpp, `HAVE(MAC_JIT_RESTRICTIONS)`); cargo's ad hoc linker signature has no entitlements, so every
+JavaScriptCore number we had from CI was the interpreter's. Full write-up: docs/research/jsc-vs-v8.md.
+
+Method: `fastrender jsbench` (new: the game's JS alone, `frame()` as the renderer calls it, no Metal), CI job
+`jsc-profile`, run 43717908948, 3d-world-objects frames 71-100, median ms/frame:
+
+| | JS ms/frame | boot |
+|---|---:|---:|
+| system JSC, binary as cargo links it | 84.1, 79.6 | 55-71 s |
+| + `JSC_useJIT=0` / `useDFGJIT=0` / `useFTLJIT=0` | 73.4 / 75.6 / 69.4 (no change: nothing to turn off) | 50-53 s |
+| hardened runtime, no entitlement | 82.5 | 56 s |
+| **ad hoc + allow-jit entitlement** | **14.4** | 10.9 s |
+| hardened runtime + allow-jit | 13.8 | 12.0 s |
+| bun 1.4.4 (own JSC), same bundle; without FTL / DFG / any JIT | 16.5; 17.5 / 29.8 / 66.6 | |
+| node 24 (V8): the game's node build; the JSC bundle in a `vm` context | 17.5; 30.2 | |
+
+Ruled out, each measured: polyfills and virtual timers (0.00 ms/frame in these frames), host bridging (all native
+callbacks 0.17-0.32 ms/frame for 69 uploads / 0.28 MB), a slower system JavaScriptCore (13.8-14.4 vs bun's 16.5),
+different hot paths (V8 and JSC profiles have the same shape: `updateMatrixWorld` 28 % / 22 %).
+
+Fix: `macos/fastrender.entitlements`, `macos/sign.sh`; `fastrender` signs itself with the entitlement on first run and
+restarts (`jsc::ensure_jit`, `FASTRENDER_NO_RESIGN=1` to skip); `ScriptHost` warns when the entitlement is missing.
+Not yet run on CI (macOS runners backlogged): the self-signing path and the with-Metal figure after the fix (before:
+`bench --three` JS 74.6 ms); the 14 ms was measured on a copy signed with the same entitlements file.
+Host decision (docs/HOST.md "Lean JavaScriptCore app vs Electron"): JS speed no longer separates the two; the lean
+app saves Chromium's fixed memory, and costs the browser surface the game uses (2D canvas, HUD, input, audio).
 
 ## 2026-11-15: Electron host runs the real renderer: three-city 0.97, 3d-world-objects 2.96, JS 14-25 ms/frame (JSC 64-74)
 
