@@ -196,7 +196,7 @@ instances N of N drawn in N runs`.
 
 ```bash
 xcodebuild -downloadComponent MetalToolchain      # once; optional (removes the build warning)
-git pull && scripts/gpu-ablate.sh                 # 1280x800, 18 rows of 240 frames; logs -> bench-results/<date>-gpu-ablate-<model>/
+git pull && scripts/gpu-ablate.sh                 # 1280x800, one row per entry in the script (19 at the time of writing), 180 frames each; logs -> bench-results/<date>-gpu-ablate-<model>/
 ```
 
 The script fetches the game into `host/electron/.bench/3d-world-objects` if it is not there and applies the patches
