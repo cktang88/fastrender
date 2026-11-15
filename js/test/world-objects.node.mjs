@@ -4,7 +4,7 @@
 // draw / program / material-instance counts and per-frame JS cost.
 //
 //   node js/test/world-objects.node.mjs <game dir> [--three three|three-r170] [--frames 120] [--search '?mode=world...']
-//        [--json out.json] [--view x,y,z,yaw,pitch] [--dump-programs dir] [--profile] [--matrix-stats] [--ab property]
+//        [--mesh-census 30] [--ablate nofarlod] [--json out.json] [--view x,y,z,yaw,pitch] [--dump-programs dir] [--profile] [--matrix-stats] [--ab property]
 //
 // --profile        V8's sampling profiler over the measured frames, aggregated in process (no file): top functions by
 //                  self time and the inclusive time of the renderer's stages, in ms per frame
@@ -14,6 +14,11 @@
 // --matrix-stats   which objects' matrixWorld changes over the measured frames (static / sometimes / every frame), and
 //                  what scene.updateMatrixWorld() costs as it is vs with matrixAutoUpdate = false on the static ones
 //                  (three's own optimisation for static objects; docs/notes/three-programs.md "Static transforms")
+//
+// --mesh-census N  the N largest triangle consumers of the screen pass by material | mesh name: triangles sent, drawn
+//                  with only the instances in view, by distance band. FR_CENSUS_PATH=n names from n ancestors,
+//                  FR_CENSUS_BY=chunk rows per ancestor with that userData key, FR_CENSUS_DUMP=text the largest draws
+//                  of the rows whose label contains it
 //
 // Canvas 2D (the game paints many textures on canvases) comes from @napi-rs/canvas when it is installed
 // (`npm i --no-save @napi-rs/canvas` in js/, or FR_CANVAS=<dir containing node_modules/@napi-rs/canvas>); without it
@@ -36,6 +41,7 @@ const search = opt('--search', '?mode=world&quality=low&weather=clear&tod=noon&s
 const jsonOut = opt('--json', '');
 const dumpDir = opt('--dump-programs', '');
 const viewArg = opt('--view', '');
+const meshCensusN = Number(opt('--mesh-census', '0')); // N: the N largest triangle consumers of the screen pass by material / mesh name, with distance bands and the instances in view
 const censusOut = opt('--gpu-census', ''); // '-' or a .json path: lights / shadow passes / draws per program / fragment sizes (js/gpu-census.js)
 const debugMaterial = opt('--debug-material', ''); // e.g. 'Standard' or a material name: its uniforms + textures as sent
 const size = opt('--size', '1280x800').split('x').map(Number);
@@ -60,6 +66,9 @@ const hrNow = () => Number(process.hrtime.bigint()) / 1e6;
 // process waits for a core, the CPU time does not
 const cpuNow = () => { const c = process.cpuUsage(); return (c.user + c.system) / 1000; };
 const host = makeGlslHost({});
+// --ablate a,b: the bundle's GPU-cost diagnostics (FASTRENDER_ABLATE of the native host; js/examples/world-objects.three.mjs)
+const ablateArg = opt('--ablate', '');
+if (ablateArg) host.params = { ...(host.params || {}), ablate: ablateArg };
 const hstats = { uploads: { 1: 0, 2: 0, 3: 0, 4: 0 }, uploadBytes: 0, presents: 0, words: 0, programs: 0, programMs: 0 };
 host.attach = () => {};
 host.upload = (kind, id, meta, ...arrays) => { hstats.uploads[kind]++; for (const a of arrays) if (a) hstats.uploadBytes += a.byteLength; };
@@ -277,6 +286,80 @@ if (mstat) {
   c.staticShare = +(c.static / c.objects).toFixed(3);
   matrixStats = c;
 }
+// --mesh-census: who the screen pass's triangles belong to. One more frame with FastRenderer._draw recorded; per
+// (material name, mesh / ancestor name): draws, instances, triangles sent, triangles of the instances in view (the
+// native side draws only those where it may: frustumCulled without per-instance attributes, or userData.frInstanceCull;
+// src/bindlist.rs), by distance from the camera (m). A node estimate: no GPU, no native culling runs here.
+async function meshCensus(top) {
+  const BANDS = [12, 40, 100, 200, Infinity];
+  const rows = new Map();
+  const draw0 = renderer._draw;
+  const seen = [];
+  renderer._draw = function (o, g, m, grp, geometry, inst, start, count, indexCount) { if (!this._rt && m && m.visible) seen.push([o, g, m, Math.min(count, indexCount - start)]); return draw0.apply(this, arguments); };
+  globalThis.__worldStep(1 / 60); await tick();
+  renderer._draw = draw0;
+  const cam = W().camera, ce = cam.matrixWorld.elements, ex = ce[12], ey = ce[13], ez = ce[14];
+  const P = renderer._planes;
+  const inFrustum = (x, y, z, r) => { for (let i = 0; i < 24; i += 4) if (P[i] * x + P[i + 1] * y + P[i + 2] * z + P[i + 3] < -r) return false; return true; };
+  const band = (d) => BANDS.findIndex((b) => d < b);
+  // the nearest named ancestors (FR_CENSUS_PATH=n of them, default 1; numbers folded to #), else the geometry's
+  // name / type. FR_CENSUS_SPLIT=1: one row per triangle count as well
+  const depth = Number(process.env.FR_CENSUS_PATH || 1);
+  // FR_CENSUS_BY=<userData key> (e.g. chunk): rows per nearest ancestor that has it, labelled with its offset from the camera
+  const by = process.env.FR_CENSUS_BY;
+  const label = (o, g) => { const names = [];
+    if (by) for (let p = o; p; p = p.parent) if (p.userData[by] !== undefined) { const e = p.matrixWorld.elements; return `${by} ${Math.round(e[12] - ex)},${Math.round(e[14] - ez)}${o.userData.baked ? ' baked' : ''}${o.isInstancedMesh ? ' instanced' : ''}`; } for (let p = o; p && names.length < depth; p = p.parent) if (p.name) names.push(p.name.replace(/[-_ ]?[0-9][0-9_.,:-]*/g, '#')); return names.length ? names.reverse().join('/') : g.name || `${g.type}${o.isInstancedMesh ? ' (instanced)' : ''}`; };
+  const tot = { sent: 0, drawn: 0, bands: BANDS.map(() => 0) };
+  for (const [o, g, m, count] of seen) {
+    const tris = count / 3;
+    if (!g.boundingSphere) g.computeBoundingSphere();
+    const bs = g.boundingSphere, w = o.matrixWorld.elements;
+    const key = `${(m && (m.name || m.type)) || '?'} | ${label(o, g)}${process.env.FR_CENSUS_SPLIT ? ` ${Math.round(tris)}` : ''}`;
+    let r = rows.get(key);
+    if (!r) rows.set(key, (r = { key, draws: 0, instances: 0, inView: 0, sent: 0, drawn: 0, trisPer: new Set(), bands: BANDS.map(() => 0), cullable: 0, items: [] }));
+    r.draws++; r.trisPer.add(Math.round(tris)); r.items.push([o, g, m, tris]);
+    if (o.isInstancedMesh) {
+      const hint = o.userData.frInstanceCull;
+      const cullable = hint !== undefined || (o.frustumCulled !== false && !Object.values(g.attributes).some((a) => a.isInstancedBufferAttribute));
+      const a = o.instanceMatrix.array, n = o.count;
+      r.instances += n; r.sent += tris * n; if (cullable) r.cullable += tris * n;
+      for (let i = 0, k = 0; i < n; i++, k += 16) {
+        // world = matrixWorld x instanceMatrix: the sphere's centre and the largest axis scale
+        const lx = a[k] * bs.center.x + a[k + 4] * bs.center.y + a[k + 8] * bs.center.z + a[k + 12], ly = a[k + 1] * bs.center.x + a[k + 5] * bs.center.y + a[k + 9] * bs.center.z + a[k + 13], lz = a[k + 2] * bs.center.x + a[k + 6] * bs.center.y + a[k + 10] * bs.center.z + a[k + 14];
+        const x = w[0] * lx + w[4] * ly + w[8] * lz + w[12], y = w[1] * lx + w[5] * ly + w[9] * lz + w[13], z = w[2] * lx + w[6] * ly + w[10] * lz + w[14];
+        const sc = Math.sqrt(Math.max(a[k] * a[k] + a[k + 1] * a[k + 1] + a[k + 2] * a[k + 2], a[k + 4] * a[k + 4] + a[k + 5] * a[k + 5] + a[k + 6] * a[k + 6], a[k + 8] * a[k + 8] + a[k + 9] * a[k + 9] + a[k + 10] * a[k + 10]));
+        const rad = (typeof hint === 'number' ? hint : bs.radius) * sc;
+        if (cullable && !inFrustum(x, y, z, rad)) continue;
+        r.inView++; r.drawn += tris; r.bands[band(Math.hypot(x - ex, y - ey, z - ez))] += tris;
+      }
+    } else {
+      const x = w[0] * bs.center.x + w[4] * bs.center.y + w[8] * bs.center.z + w[12], y = w[1] * bs.center.x + w[5] * bs.center.y + w[9] * bs.center.z + w[13], z = w[2] * bs.center.x + w[6] * bs.center.y + w[10] * bs.center.z + w[14];
+      const sc = Math.sqrt(Math.max(w[0] * w[0] + w[1] * w[1] + w[2] * w[2], w[4] * w[4] + w[5] * w[5] + w[6] * w[6], w[8] * w[8] + w[9] * w[9] + w[10] * w[10]));
+      r.instances++; r.sent += tris;
+      // (a shadow caster outside the camera frustum is sent for the shadow passes; the main pass does not draw it)
+      if (o.frustumCulled !== false && !o.isSkinnedMesh && !inFrustum(x, y, z, bs.radius * sc)) continue;
+      r.inView++; r.drawn += tris; r.bands[band(Math.hypot(x - ex, y - ey, z - ez))] += tris;
+    }
+  }
+  for (const r of rows.values()) { tot.sent += r.sent; tot.drawn += r.drawn; r.bands.forEach((v, i) => { tot.bands[i] += v; }); }
+  const k = (v) => String(Math.round(v / 1000)).padStart(6);
+  const out = [`mesh census (screen pass, ${seen.length} draws): ${(tot.sent / 1e6).toFixed(2)} M triangles sent, ${(tot.drawn / 1e6).toFixed(2)} M with only the instances in view; by distance <12 / <40 / <100 / <200 / beyond (k): ${tot.bands.map(k).join(' ')}`,
+    '  sent(k) drawn(k)  draws   inst  inView  tris/inst      <12    <40   <100   <200  beyond  material | mesh'];
+  for (const r of [...rows.values()].sort((a, b) => b.drawn - a.drawn).slice(0, top)) {
+    const tp = [...r.trisPer].sort((a, b) => a - b);
+    out.push(`  ${k(r.sent)}   ${k(r.drawn)}  ${String(r.draws).padStart(5)} ${String(r.instances).padStart(6)}  ${String(r.inView).padStart(6)}  ${(tp.length > 1 ? `${tp[0]}-${tp[tp.length - 1]}` : `${tp[0]}`).padStart(9)}   ${r.bands.map(k).join(' ')}  ${r.key}`);
+  }
+  // FR_CENSUS_DUMP=<text>: the largest draws of the rows whose label contains it (what they are: size, distance,
+  // attributes, userData keys up the tree)
+  const dump = process.env.FR_CENSUS_DUMP;
+  if (dump) for (const r of rows.values()) if (r.key.includes(dump)) for (const [o, g, m, tris] of r.items.sort((a, b) => b[3] * (b[0].count || 1) - a[3] * (a[0].count || 1)).slice(0, 25)) {
+    if (!g.boundingBox) g.computeBoundingBox();
+    const b = g.boundingBox, w = o.matrixWorld.elements, ud = [];
+    for (let p = o; p; p = p.parent) ud.push(`${p.type}${p.name ? `:${p.name}` : ''}{${Object.keys(p.userData).join(',')}}`);
+    out.push(`    ${Math.round(tris)} tris x ${o.count || 1}, box ${[b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z].map((v) => v.toFixed(1)).join('x')} m, ${Math.round(Math.hypot(w[12] + (b.min.x + b.max.x) / 2 - ex, w[14] + (b.min.z + b.max.z) / 2 - ez))} m away, [${Object.keys(g.attributes).join(',')}] ${m.map ? 'map ' : ''}${m.vertexColors ? 'vcol ' : ''}cast=${o.castShadow} culled=${o.frustumCulled} <- ${ud.slice(0, 6).join(' <- ')}`);
+  }
+  return out.join('\n');
+}
 const result = {
   three: pkg, search, frames, bootFrames: boot,
   perFrameMs: { gameFrameMedian: med(per.map((p) => p.total)), gameFrameP95: p95(per.map((p) => p.total)), renderMedian: med(per.map((p) => p.render)), renderP95: p95(per.map((p) => p.render)), updateMedian: med(per.map((p) => p.total - p.render)),
@@ -294,6 +377,7 @@ const result = {
 };
 console.log(JSON.stringify(result, null, 2));
 if (debugMaterial) console.log(JSON.stringify(renderer.debugMaterials(debugMaterial), null, 1));
+if (meshCensusN) console.log(await meshCensus(meshCensusN));
 if (censusOut) { const c = gpuCensus(renderer); console.log(gpuCensusText(c)); if (censusOut !== '-') writeFileSync(censusOut, JSON.stringify(c, null, 1)); }
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify(result, null, 2));
 // --dump-programs <dir>: every program the game compiled, as NAME.vert.glsl / NAME.frag.glsl for `fastrender xlat-dump`
