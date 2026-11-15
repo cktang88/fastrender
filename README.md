@@ -141,6 +141,44 @@ cargo run --release -- matrix --rounds 3 --seconds 10 --warmup-seconds 2   # A..
 Thermal throttling (fanless Air): `cargo run --release -- bench --frames 100000 --log-every 10`
 prints fps every 10 s.
 
+### Play the real game
+
+One command builds everything and opens the real game
+([cktang88/3d-world-objects](https://github.com/cktang88/3d-world-objects) + `patches/`) in a window, drawn by
+fastrender. It needs the Xcode command line tools, Rust and Node 20+. The first run takes a few minutes; later runs
+take seconds.
+
+```bash
+host/electron/scripts/play-world.sh --fps            # fastrender, with the fps / JS ms / GPU ms overlay
+host/electron/scripts/play-world.sh --fps --webgl    # the same game on stock three WebGLRenderer, same window
+```
+
+Click the view to capture the mouse; `Esc` releases it and pauses.
+
+| Keys | |
+|---|---|
+| `W` `A` `S` `D` / arrows, mouse | move, look |
+| `Shift`, `Space` | run, jump |
+| `E`, `Q` | enter a door or shrink into an object, back out |
+| hold `Z` | zoom (standing still) |
+| `T`, `Y` (`Shift` = back) | time of day, weather |
+| `M`, `C` | map, credits |
+| `F3` | fps overlay on / off |
+| `ctrl-cmd-F` or `F11`, `cmd-Q` | full screen, quit |
+
+Defaults: vsync on (capped at the display's rate), render scale 1, the game's `quality=low`, no network (as in the
+benchmark). Some options:
+
+```bash
+host/electron/scripts/play-world.sh --renderer '{"scale":0.5,"upscale":"metalfx"}'   # a quarter of the pixels + MetalFX
+host/electron/scripts/play-world.sh --renderer '{"vsync":0}' --fps                   # uncapped
+host/electron/scripts/play-world.sh --search '?mode=world&quality=low&seamless=0&nodyn&tod=night&weather=rain'
+host/electron/scripts/play-world.sh --help                                           # every option
+```
+
+`G` (the game's graphics tier) switches to post-processing paths that were never checked on fastrender. Details:
+[docs/HOST.md](docs/HOST.md#play-mode).
+
 ## What the scene is
 
 It is a procedural Manhattan-style grid seen from a car driving at street level.

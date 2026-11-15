@@ -585,6 +585,44 @@ jobs:
   # !!! (JS ms per frame, CPU ms per frame per process) are the informative part; run the script on real hardware.
   # It takes a runner for ~45 minutes, so it does NOT run on every push: only when the head commit's message mentions
   # "bench-3way", or on a manual run (workflow_dispatch).
+  # Play mode (docs/HOST.md "Play mode"): the one-command script users run, unattended for a few seconds per variant
+  # (host/electron/scripts/play-world.sh --play-seconds): the world starts on the real clock, the drawable follows a
+  # window resize, a click gets pointer lock, W moves the player. Only when the head commit's message mentions
+  # "play-smoke", or on a manual run. Never fails the workflow; the PASS / FAIL lines are annotations.
+  play-smoke:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'play-smoke') }}
+    runs-on: macos-26
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: play-smoke - fastrender (PARAVIRTUAL GPU - fps is not an Air's)
+        continue-on-error: true
+        timeout-minutes: 40
+        run: |
+          rc=0; bash host/electron/scripts/play-world.sh --fps --play-seconds 15 --out "$GITHUB_WORKSPACE/play-out" --timeout 900 > play-fastrender.log 2>&1 || rc=$?
+          echo "play-world.sh exit $rc"
+          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|DONE)|^\[fastrender\]|pointer lock|MISSING|^== " play-fastrender.log | cut -c1-900; } > play-fastrender-summary.txt
+          bash .github/annotate.sh notice "play-smoke fastrender (exit $rc)" play-fastrender-summary.txt 40
+          grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" play-fastrender.log | tail -80
+      - name: play-smoke - the same game copy on stock WebGLRenderer, second run of the script (nothing to rebuild)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          rc=0; bash host/electron/scripts/play-world.sh --webgl --fps --play-seconds 10 --out "$GITHUB_WORKSPACE/play-out" --timeout 600 > play-webgl.log 2>&1 || rc=$?
+          echo "play-world.sh exit $rc"
+          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|DONE)|pointer lock|MISSING|^== " play-webgl.log | cut -c1-900; } > play-webgl-summary.txt
+          bash .github/annotate.sh notice "play-smoke webgl (exit $rc)" play-webgl-summary.txt 40
+          grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" play-webgl.log | tail -60
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: play-smoke
+          path: |
+            play-out/
+            play-*.log
+
   bench-3way:
     if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'bench-3way') }}
     runs-on: macos-26

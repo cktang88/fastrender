@@ -145,7 +145,7 @@ renderer process (V8, real DOM / 2D canvas / workers)           main process
   golden's browser. CSP: `script-src 'self' 'wasm-unsafe-eval' blob:` (no eval). `preload.js` exposes
   `window.__frNative` (contextBridge by default). `boot.mjs` builds the host, installs it as `globalThis.__fr`, and
   drives: `world` = 3d-world-objects under the golden's deterministic driver; `city` = the three-city JSC bundle,
-  unchanged. `scripts/bundle-game.mjs` bundles both (same resolution rules as `js/examples/world-objects.build.mjs`,
+  unchanged; `--play` = the game on its own loop (see "Play mode"). `scripts/bundle-game.mjs` bundles both (same resolution rules as `js/examples/world-objects.build.mjs`,
   minus the DOM stubs: Electron has the real DOM).
 - **Renderer options** (`startHost(..., rendererJson)`): any fastrender CLI option, e.g.
   `{"scale": 0.75, "upscale": "temporal", "dynres": 14}`; the drawable follows the layer (bounds x contentsScale).
@@ -155,6 +155,56 @@ cd host/electron && npm ci && npm run build && node scripts/bundle-game.mjs --wo
 npx electron game/main.js --kind world --html ../../../3d-world-objects/index.html --assets ../../../3d-world-objects/public --out /tmp/x
 npx electron game/main.js --kind city --out /tmp/x            # three-city; golden = /tmp/x/electron-city-golden.png
 ```
+
+### Play mode
+
+`host/electron/scripts/play-world.sh` is the one command to play the real game on a Mac. It checks for the Xcode
+command line tools, Rust and Node 20+, runs `npm ci`, builds the addon, fetches and patches the game
+(`scripts/world-game.sh`, the copy `bench-3way.sh` uses), bundles it and starts `game/main.js --play`. Every step is
+skipped or incremental on the next run. The game copy needs no `npm ci`: its only runtime dependency is three, taken
+from `host/electron/node_modules`.
+
+```bash
+host/electron/scripts/play-world.sh --fps            # fastrender
+host/electron/scripts/play-world.sh --fps --webgl    # the same game copy on stock three WebGLRenderer
+host/electron/scripts/play-world.sh --help           # every option
+```
+
+What `--play` changes against the golden run:
+
+| | golden run | play |
+|---|---|---|
+| Clock, `Math.random`, `requestAnimationFrame` | virtual, seeded, stepped (`world-objects.drive.mjs`) | real (`game/dist/play-<variant>.js` has no driver) |
+| Window | frameless, fixed 1280x800, always on top | title bar, resizable, full screen (`ctrl-cmd-F`, `F11`); default size = the screen's work area |
+| Permissions | all denied | pointer lock and fullscreen granted; the window takes the focus |
+| Renderer options | `{"scale":1,"upscale":"bilinear"}` | the same plus `"vsync":1`; `--renderer '{...}'` is merged over them |
+| URL parameters | `?mode=world&quality=low&weather=clear&tod=noon&seamless=0` | `?mode=world&quality=low&seamless=0&nodyn` (the game's own time of day and weather); `--search` replaces them |
+| Capture, timeout, exit | golden PNG, JSON, exits | none; runs until the window closes |
+
+- **Frame pacing.** The game's loop runs on the real `requestAnimationFrame`; `host.flush()` sends one frame after
+  each callback. A display tick is skipped while the frame before the last one sent is not rendered yet
+  (`stats().lastFrameSeq`), so at most one frame waits in the queue. The wait is capped at 250 ms, so a render thread
+  that stopped cannot freeze the game's UI.
+- **Input.** The Metal layer is below the web contents, so DOM events arrive as in a browser. Two things were in the
+  way of pointer lock. The golden run denies every permission request, and Electron asks for `pointerLock`. And
+  `FastRenderer.setSize` never sizes its `<canvas>`, so the canvas the game listens on for the click was 300x150 in a
+  corner; play mode stretches it over the window with CSS. `?mode=world` starts without the game's start screen, so
+  the first pointer lock request has no user gesture and fails: click the view once.
+- **Resolution.** Native owns it: the drawable is the window times its scale factor times the render scale. The
+  game's pixel ratio only sizes its own render targets. Play mode pins it to the display's on both renderers
+  (`game/play/three.*.mjs`), so `--webgl` shades the pixels fastrender shades. `--dpr game` leaves the game's own
+  choice (1 at `quality=low`), and `--renderer '{"scale":0.5}'` gives fastrender the same pixel count as that.
+- **Overlay** (`--fps`, `F3` toggles): frames per second the game produced, JS ms per frame (the game's callback plus
+  the flush), and for fastrender GPU ms, draws, drawable size, frames shown, skipped and waited ticks.
+- **Network.** Remote requests are refused, as in the golden and the benchmark. `--online` lets the game stream its
+  objects from Hugging Face; that content has never been through fastrender.
+- **CI.** `--play-seconds N` runs unattended: waits for the world, resizes the window, clicks, holds `W`, runs N
+  seconds and prints PASS / FAIL lines. Job `play-smoke` in `.github/workflows/mac.yml` runs it for both variants when
+  the head commit's message mentions `play-smoke`. It never fails the workflow.
+
+Not covered: `contentsScale` is read once when the view is created, so a window dragged to a display with another
+scale factor keeps the old one until restart. The game's `G` key switches to its `high` / `ultra` tiers
+(EffectComposer, bloom, GTAO), which no golden or benchmark run has drawn on fastrender.
 
 ### Electron host: numbers
 
