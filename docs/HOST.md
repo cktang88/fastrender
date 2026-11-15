@@ -192,7 +192,9 @@ What a run is (`npx electron game/bench-main.js --variant webgl|webgpu|fastrende
   `onBeforeCompile` / `ShaderMaterial`), console errors, WebGPU validation errors, the missing renderer surface, and
   the screenshot's MAE against A's. Nothing is ported to TSL.
 
-CI: job `bench-3way` in `.github/workflows/mac.yml` (separate job, `continue-on-error`) runs `--ci` (quick timings, both sizes)
+CI: job `bench-3way` in `.github/workflows/mac.yml` (separate job, `continue-on-error`; it holds a runner for ~45
+minutes, so it runs only when the head commit's message mentions `bench-3way`, or on a manual `workflow_dispatch`)
+runs `--ci` (quick timings, both sizes)
 and prints the table to the job summary and as annotations. **The runner's GPU is paravirtual: its fps and GPU ms say
 nothing about an Air.** Its JS ms and CPU ms/frame columns are still informative.
 

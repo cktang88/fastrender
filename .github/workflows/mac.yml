@@ -519,7 +519,10 @@ jobs:
   # A separate job: it takes ~25 minutes and must not delay the pipeline above. Never fails the workflow.
   # !!! THE RUNNER'S GPU IS PARAVIRTUAL: fps and GPU ms here are NOT representative of an M2 Air. The CPU-side columns
   # !!! (JS ms per frame, CPU ms per frame per process) are the informative part; run the script on real hardware.
+  # It takes a runner for ~45 minutes, so it does NOT run on every push: only when the head commit's message mentions
+  # "bench-3way", or on a manual run (workflow_dispatch).
   bench-3way:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'bench-3way') }}
     runs-on: macos-26
     continue-on-error: true
     timeout-minutes: 80
