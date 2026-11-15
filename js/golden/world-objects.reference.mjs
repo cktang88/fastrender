@@ -1,5 +1,5 @@
 // Golden reference for the REAL game cktang88/3d-world-objects: its own src/main.ts with three's WebGLRenderer
-// (three r170, the version the game pins) in headless Chromium (SwiftShader), driven frame by frame by the same
+// (three r187 with patches/3d-world-objects-0002; r170 unpatched) in headless Chromium (SwiftShader), driven frame by frame by the same
 // deterministic driver the native run uses (js/examples/world-objects.drive.mjs).
 //
 //   node js/golden/world-objects.reference.mjs <game dir> <out.png> [WxH] [--settle 10] [--frames 3] [--json stats.json]
@@ -23,7 +23,7 @@ const frames = Number(opt('--frames', '3'));
 const settle = Number(opt('--settle', '10'));
 const jsonOut = opt('--json', '');
 const search = opt('--search', '?mode=world&quality=low&weather=clear&tod=noon&seamless=0');
-const pkg = opt('--three', 'three-r170');
+const pkg = opt('--three', 'three'); // r187: the game with patches/3d-world-objects-0002 (unpatched it pins r170: --three three-r170)
 const [gameDir0, out = 'golden/world-objects-ref.png', size = '1280x800'] = args;
 const gameDir = resolve(gameDir0 || process.env.WORLD_OBJECTS_DIR || '../3d-world-objects');
 const [w, h] = size.split('x').map(Number);

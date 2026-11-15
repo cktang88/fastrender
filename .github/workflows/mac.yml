@@ -260,8 +260,8 @@ jobs:
           set -o pipefail
           npx electron app/main.js --frames 120 --out "$GITHUB_WORKSPACE" --tag electron-direct --stack subview --isolation off --no-reload 2>&1 | tee "$GITHUB_WORKSPACE/electron-direct.log"
           echo "--- summary"; grep -E '^\[spike\] (PASS|FAIL)' "$GITHUB_WORKSPACE/electron-direct.log" || true
-      # A REAL game (cktang88/3d-world-objects, three r170, unchanged) natively vs its browser golden
-      # (docs/notes/real-game-3d-world-objects.md). Non-gating: prints MAE + the per-frame unsupported counts.
+      # A REAL game (cktang88/3d-world-objects + patches/3d-world-objects-000{1,2}: air mode, three r187) natively on our
+      # default three (r187) vs its browser golden (docs/notes/real-game-3d-world-objects.md): MAE + unsupported counts.
       - name: real game 3d-world-objects - native vs browser golden (non-gating)
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -271,7 +271,13 @@ jobs:
           if ! git clone --depth 1 https://github.com/cktang88/3d-world-objects ../3d-world-objects > wo-clone.txt 2>&1; then
             echo "game repo not readable from this job: skipped"; bash .github/annotate.sh warning "world-objects: skipped (clone failed)" wo-clone.txt 5; exit 0
           fi
-          node js/examples/world-objects.build.mjs ../3d-world-objects js/dist/world-objects.js --target jsc --three three-r170
+          # the game's patches (patches/README.md): 0001 may already be upstream (then it reverse-applies: skipped)
+          for p in patches/3d-world-objects-000*.patch; do
+            if git -C ../3d-world-objects apply --reverse --check "$PWD/$p" 2> /dev/null; then echo "already in the game: $p"; continue; fi
+            git -C ../3d-world-objects -c user.name=ci -c user.email=ci@localhost am -q "$PWD/$p" || { echo "::error title=world-objects::$p does not apply"; exit 1; }
+          done
+          git -C ../3d-world-objects log --oneline -3
+          node js/examples/world-objects.build.mjs ../3d-world-objects js/dist/world-objects.js --target jsc --three three
           rc=0; FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 --shot golden-native-world-objects.png > world-objects-bench.txt 2>&1 || rc=$?
           grep -E "world-objects:|three frame cost|three programs:|error|Error" world-objects-bench.txt | cut -c1-1500 | tee world-objects-summary.txt
           bash .github/annotate.sh notice "world-objects bench (exit $rc)" world-objects-summary.txt 20
@@ -298,7 +304,7 @@ jobs:
         run: |
           test -d ../3d-world-objects || { echo "no game checkout: skipped"; exit 0; }
           # every program the game compiles, dumped by the node run (mock host, glslang CLI) -> xlat-dump -> metal
-          (cd js && node test/world-objects.node.mjs "$GITHUB_WORKSPACE/../3d-world-objects" --frames 3 --dump-programs "$GITHUB_WORKSPACE/wo-programs" > "$GITHUB_WORKSPACE/wo-node.txt" 2>&1) || true
+          (cd js && node test/world-objects.node.mjs "$GITHUB_WORKSPACE/../3d-world-objects" --three three --frames 3 --dump-programs "$GITHUB_WORKSPACE/wo-programs" > "$GITHUB_WORKSPACE/wo-node.txt" 2>&1) || true
           ls wo-programs/*.glsl > /dev/null 2>&1 || { tail -40 wo-node.txt > wo-node-tail.txt; bash .github/annotate.sh error "world-objects node run dumped no programs" wo-node-tail.txt 40; exit 1; }
           ./target/release/fastrender xlat-dump wo-programs wo-xlat > wo-xlat.txt 2>&1 || true
           for f in wo-xlat/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /tmp/x.air >> wo-metal.txt 2>&1 || echo "METAL FAIL $f" >> wo-xlat.txt; done

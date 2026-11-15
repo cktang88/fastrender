@@ -23,7 +23,7 @@ const gameDir = resolve(args[0] || process.env.WORLD_OBJECTS_DIR || '../3d-world
 const outDir = join(process.env.FR_WORLD_OUT || tmpdir(), 'fastrender-world-objects');
 mkdirSync(outDir, { recursive: true });
 const bundle = join(outDir, 'world-objects.jsc.js');
-execFileSync(process.execPath, [join(here, '../examples/world-objects.build.mjs'), gameDir, bundle, '--target', 'jsc', '--three', 'three-r170'], { stdio: 'inherit' });
+execFileSync(process.execPath, [join(here, '../examples/world-objects.build.mjs'), gameDir, bundle, '--target', 'jsc', '--three', process.env.THREE_PKG || 'three'], { stdio: 'inherit' });
 
 let napi = null;
 if (decode === 'napi') for (const base of [process.env.FR_CANVAS, resolve(here, '..')].filter(Boolean)) { try { napi = createRequire(join(base, 'package.json'))('@napi-rs/canvas'); break; } catch {} }

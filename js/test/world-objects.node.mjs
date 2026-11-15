@@ -20,7 +20,7 @@ import { makeGlslHost } from './glsl-host.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args.splice(i, 2)[1] : d; };
-const pkg = opt('--three', 'three-r170'); // the version the game pins (r187 breaks it: see docs/notes/real-game-3d-world-objects.md)
+const pkg = opt('--three', 'three'); // r187: the game with patches/3d-world-objects-0002 applied (unpatched it pins r170: --three three-r170)
 const frames = Number(opt('--frames', '120'));
 const search = opt('--search', '?mode=world&quality=low&weather=clear&tod=noon&seamless=0');
 const jsonOut = opt('--json', '');

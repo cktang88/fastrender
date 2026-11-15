@@ -1,17 +1,17 @@
 {
-  "three": "three-r170",
+  "three": "three",
   "search": "?mode=world&quality=low&weather=clear&tod=noon&seamless=0",
   "size": "1280x800",
-  "bootFrames": 1,
+  "bootFrames": 0,
   "frames": 3,
-  "drawCallsMedian": 3189,
-  "drawCallsMax": 3190,
+  "drawCallsMedian": 3185,
+  "drawCallsMax": 3186,
   "last": {
-    "calls": 3190,
-    "triangles": 10444753,
-    "programs": 143,
-    "geometries": 989,
-    "textures": 196,
+    "calls": 3186,
+    "triangles": 10444113,
+    "programs": 145,
+    "geometries": 979,
+    "textures": 652,
     "started": true
   },
   "fetch": {
