@@ -37,6 +37,8 @@ export const TEX = {
   UNSUPPORTED: 0xfe0000ff,   // a texture we cannot provide (environment maps, ...): bind a neutral texture
 };
 export const SHADOW_KIND = { directionalShadowMap: 1, spotShadowMap: 2, pointShadowMap: 3, sunShadowMap: 4 };
+/** SHADOWS kind flag: not re-rendered this frame (shadow.autoUpdate and needsUpdate false): keep the last map */
+export const SHADOW_KEEP = 0x100;
 
 // ------------------------------------------------------------------ GLSL normalisation (shared contract with src/xlat.rs)
 export const OBJECT_BLOCK = 'layout(std140) uniform FrObject { mat4 modelMatrix; mat4 modelViewMatrix; mat3 normalMatrix; };';
@@ -545,13 +547,23 @@ export class ThreePrograms {
     this._frameNo++;
     this.stats.blocks = 0; this.stats.changed = 0; this.stats.lightPrograms = 0;
     this.scene = scene; this.camera = camera;
-    // shadow matrices: WebGLShadowMap would update these while rendering shadow maps (native renders them)
-    const shadows = this.shadows;
+    // shadow matrices: WebGLShadowMap would update these while rendering shadow maps (native renders them). As in
+    // WebGLShadowMap.render, a map is re-rendered only while renderer.shadowMap and the light's shadow have autoUpdate
+    // or needsUpdate (needsUpdate is then cleared); otherwise the native side keeps the last map and three keeps the
+    // matching shadow matrix (CSM games refresh far cascades every few frames; padding lights never)
+    const shadows = this.shadows, sm = r.shadowMap;
+    const all = sm.enabled && (sm.autoUpdate !== false || sm.needsUpdate === true);
     let ns = 0;
     for (let i = 0; i < lights.length; i++) {
       const l = lights[i];
-      if (l.castShadow && l.shadow) { shadows[ns++] = l; if (r.shadowMap.enabled) updateShadow(l, camera); }
+      if (l.castShadow && l.shadow) {
+        shadows[ns++] = l;
+        const s = l.shadow, update = all && (s.autoUpdate !== false || s.needsUpdate === true);
+        s._frKeep = !update;
+        if (update) { updateShadow(l, camera); s.needsUpdate = false; }
+      }
     }
+    if (all) sm.needsUpdate = false;
     if (shadows.length !== ns) shadows.length = ns; // (not cleared with length = 0: V8 would drop its backing store)
     if (!HAS_PCF_SOFT && r.shadowMap.enabled && r.shadowMap.type === 2 && shadows.length) r.shadowMap.type = 1;
     this.lightList = lights;
@@ -1084,7 +1096,7 @@ export function writeShadows(fr, w) {
   u[w++] = OP_SHADOWS; u[w++] = 1 + casters.length * SHADOW_WORDS; u[w++] = casters.length;
   for (const c of casters) {
     const l = c.light, s = l.shadow, cam = s.camera, m = l.matrixWorld.elements;
-    u[w++] = SHADOW_KIND[c.kind]; u[w++] = c.index;
+    u[w++] = SHADOW_KIND[c.kind] | (s._frKeep === true ? SHADOW_KEEP : 0); u[w++] = c.index;
     f[w++] = s.mapSize.x; f[w++] = s.mapSize.y; f[w++] = s.bias; f[w++] = s.normalBias; f[w++] = s.radius;
     f[w++] = cam.near; f[w++] = cam.far; f[w++] = m[12]; f[w++] = m[13]; f[w++] = m[14];
     vp.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);

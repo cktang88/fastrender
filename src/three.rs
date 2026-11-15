@@ -112,11 +112,14 @@ pub struct ThreeLight {
     pub extra: [f32; 3],
 }
 
+/// SHADOWS `kind` flag: three does not re-render this map this frame (shadow.autoUpdate and needsUpdate false).
+pub const SHADOW_KEEP: u32 = 0x100;
+
 /// One SHADOWS record (28 words): a shadow-casting light in three's lights-state order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShadowRec {
-    /// `tex::DIRECTIONAL`.. `tex::SUN`
+    /// `tex::DIRECTIONAL`.. `tex::SUN`, | [`SHADOW_KEEP`]
     pub kind: u32,
     /// three's lights-state index (the `[i]` of `directionalShadowMap[i]`)
     pub index: u32,

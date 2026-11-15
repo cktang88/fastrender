@@ -136,6 +136,8 @@ struct Pipes {
     shadow: RenderPipeline,
     /// v3: the native depth-only caster path of every shadow map
     depth3: RenderPipeline,
+    /// v3, older three (r170: RGBA-packed shadow maps): the same casters writing packDepthToRGBA(depth) to RGBA8
+    depth3_packed: RenderPipeline,
 }
 
 /// Per-frame-slot buffers: object records for every visible draw, and the lights.
@@ -216,6 +218,8 @@ pub struct ThreeScene {
     depth_le: u32,
     vis3: Vec<Draw3>,
     shadows: Vec<ShadowRec>,
+    /// per SHADOWS entry: not re-rendered this frame (three's shadow.autoUpdate / needsUpdate): keep the last map
+    shadow_keep: Vec<bool>,
     /// FASTRENDER_V3_DEBUG bits (bisecting on CI): 1 shadow slots bind the lit texture, 2 no v3 shadow pass,
     /// 4 no instanced draws, 8 no transparent draws, 16 neutral textures only, 32 Lambert only, 64 no textures bound
     dbg: u32,
@@ -255,6 +259,14 @@ fn pipes(dev: &Device, src: &str) -> Result<Pipes, String> {
         blend: make("vs_three", Some("fs_three"), true)?,
         shadow: make("vs_three_shadow", None, false)?,
         depth3: make("vs_three_depth", None, false)?,
+        depth3_packed: {
+            let d = MTLRenderPipelineDescriptor::new();
+            d.setVertexFunction(Some(&*func("vs_three_depth")?));
+            d.setFragmentFunction(Some(&*func("fs_three_pack_depth")?));
+            unsafe { d.colorAttachments().objectAtIndexedSubscript(0) }.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+            d.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
+            dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| format!("pipeline depth3_packed: {}", e.localizedDescription()))?
+        },
     })
 }
 
@@ -367,10 +379,14 @@ struct ShadowMap {
     depth: Texture,
     /// VSM: (map: RG16F mean / std-dev that three's programs sample, mapPass: the blur's intermediate)
     vsm: Option<(Texture, Texture)>,
+    /// older three (r170): the RGBA8 map three's programs sample (unpackRGBAToDepth); `depth` is its depth buffer
+    packed: Option<Texture>,
+    /// rendered at least once (a kept map that never was binds the lit map instead)
+    rendered: bool,
 }
 
 impl ShadowMap {
-    fn new(dev: &Device, kind: u32, index: u32, size: (usize, usize), cube: bool, vsm: bool) -> ShadowMap {
+    fn new(dev: &Device, kind: u32, index: u32, size: (usize, usize), cube: bool, vsm: bool, packed: bool) -> ShadowMap {
         let make = |fmt: MTLPixelFormat, ty: MTLTextureType| -> Texture {
             let d = MTLTextureDescriptor::new();
             d.setTextureType(ty);
@@ -385,7 +401,8 @@ impl ShadowMap {
         };
         let depth = make(MTLPixelFormat::Depth32Float, if cube { MTLTextureType::TypeCube } else { MTLTextureType::Type2D });
         let vsm = vsm.then(|| (make(MTLPixelFormat::RG16Float, MTLTextureType::Type2D), make(MTLPixelFormat::RG16Float, MTLTextureType::Type2D)));
-        ShadowMap { kind, index, size, cube, depth, vsm }
+        let packed = packed.then(|| make(MTLPixelFormat::RGBA8Unorm, MTLTextureType::Type2D));
+        ShadowMap { kind, index, size, cube, depth, vsm, packed, rendered: false }
     }
 }
 
@@ -573,6 +590,7 @@ impl ThreeScene {
             depth_le: 0,
             vis3: Vec::new(),
             shadows: Vec::new(),
+            shadow_keep: Vec::new(),
             dbg: std::env::var("FASTRENDER_V3_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             max_draws: std::env::var("FASTRENDER_V3_MAX_DRAWS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
             prepare_ms: 0.0,
@@ -596,7 +614,7 @@ impl ThreeScene {
         let dt = (t - self.last_t).max(0.0);
         self.last_t = t;
         self.progs.ensure_lit_depth(dev, queue);
-        let (slots, uni, uni_tex, shadows) = (&mut self.slots, &mut self.uni, &mut self.uni_tex, &mut self.shadows);
+        let (slots, uni, uni_tex, shadows, shadow_keep) = (&mut self.slots, &mut self.uni, &mut self.uni_tex, &mut self.shadows, &mut self.shadow_keep);
         let (layout, layout_slot) = (&mut self.layout, &mut self.layout_slot);
         let (shadow_ty, shadow_depth_textures, shadow_vsm, shadow_ids) = (&mut self.shadow_ty, &mut self.shadow_depth_textures, &mut self.shadow_vsm, &mut self.shadow_ids);
         let result = self.host.frame(t as f64, dt as f64).and_then(|words| {
@@ -606,7 +624,7 @@ impl ThreeScene {
                 // face, a FrPass and two blocks per VSM blur), then FrObjects: one per draw for the main pass, one per draw
                 // for the shadow passes (identity view)
                 let blocks: usize = f.uniforms.map(|u| align(u.block.len() * 4)).sum();
-                let faces: usize = f.shadows.iter().map(|s| if s.kind == three::tex::POINT { 6 } else { 1 }).sum();
+                let faces: usize = f.shadows.iter().map(|s| if s.kind & 0xFF == three::tex::POINT { 6 } else { 1 }).sum();
                 let l = RingLayout::new(blocks, faces, f.shadows.len(), VSM_BLOCK, f.draws.len(), std::mem::size_of::<FrObject>());
                 let s = &mut slots[slot_i];
                 if s.ring_cap < l.need {
@@ -628,7 +646,11 @@ impl ThreeScene {
                 *layout = l;
                 *layout_slot = slot_i;
                 shadows.clear();
-                shadows.extend_from_slice(f.shadows);
+                shadow_keep.clear();
+                for r in f.shadows {
+                    shadows.push(ShadowRec { kind: r.kind & 0xFF, ..*r });
+                    shadow_keep.push(r.kind & three::SHADOW_KEEP != 0);
+                }
                 let sp = f.shadow_pass.unwrap_or_default();
                 *shadow_ty = sp.ty;
                 *shadow_depth_textures = sp.depth_textures && f.shadow_pass.is_some();
@@ -1180,8 +1202,11 @@ impl ThreeScene {
         self.shadow_list.clear();
         self.vsm_jobs.clear();
         self.shadow_lookup.clear();
-        if !self.shadow_depth_textures || self.dbg & 2 != 0 {
-            return; // older three (RGBA-packed maps) or bisecting: every shadow slot samples a lit map
+        // older three (r170) packs depth into RGBA8 maps (MeshDepthMaterial, RGBADepthPacking): rendered natively for
+        // directional / spot lights (the CSM cascades); its point maps (4:2 packed distance) and VSM bind a lit map
+        let packed = !self.shadow_depth_textures;
+        if packed && self.shadow_ty == three::shadow_type::VSM || self.dbg & 2 != 0 {
+            return; // every shadow slot samples a lit map
         }
         let rw = self.ring_writer(slot_i);
         let vsm = self.shadow_ty == three::shadow_type::VSM;
@@ -1195,16 +1220,24 @@ impl ThreeScene {
         let shadows = self.shadows.clone();
         for (k, rec) in shadows.iter().enumerate() {
             let point = rec.kind == three::tex::POINT;
-            if point && vsm {
-                continue; // three: "VSM shadow maps are not supported for PointLights"
+            if point && (vsm || packed) {
+                continue; // three: "VSM shadow maps are not supported for PointLights"; r170 point maps: not rendered
             }
             let (w, h) = ((rec.map_size[0].max(1.0) as usize).min(8192), (rec.map_size[1].max(1.0) as usize).min(8192));
             let (w, h) = if point { (w, w) } else { (w, h) };
             let want_vsm = vsm && self.shadow_vsm.get(k).is_some_and(|p| p[0] != 0 && p[1] != 0);
-            let map = match self.shadow_maps.iter().position(|m| m.kind == rec.kind && m.index == rec.index) {
-                Some(m) if self.shadow_maps[m].size == (w, h) && self.shadow_maps[m].vsm.is_some() == want_vsm => m,
+            let found = self.shadow_maps.iter().position(|m| m.kind == rec.kind && m.index == rec.index);
+            if self.shadow_keep.get(k).copied().unwrap_or(false) {
+                // three skips this light's shadow pass: its last map (and the matching shadow matrix three kept) stand
+                if let Some(m) = found.filter(|&m| self.shadow_maps[m].rendered) {
+                    self.shadow_lookup.push((rec.kind, rec.index, m));
+                }
+                continue;
+            }
+            let map = match found {
+                Some(m) if self.shadow_maps[m].size == (w, h) && self.shadow_maps[m].vsm.is_some() == want_vsm && self.shadow_maps[m].packed.is_some() == packed => m,
                 found => {
-                    let m = ShadowMap::new(dev, rec.kind, rec.index, (w, h), point, want_vsm);
+                    let m = ShadowMap::new(dev, rec.kind, rec.index, (w, h), point, want_vsm, packed);
                     match found {
                         Some(i) => {
                             self.shadow_maps[i] = m;
@@ -1217,6 +1250,7 @@ impl ThreeScene {
                     }
                 }
             };
+            self.shadow_maps[map].rendered = true;
             self.shadow_lookup.push((rec.kind, rec.index, map));
             let pos = Vec3::from(rec.pos);
             for face in 0..if point { 6 } else { 1 } {
@@ -1241,7 +1275,8 @@ impl ThreeScene {
                         }
                     }
                     let main_meta = main.meta.clone();
-                    let id = self.shadow_ids.get(i).map_or(0, |p| if point { p[1] } else { p[0] });
+                    // packed maps: every caster on the native path (three's packing depth programs are not sent)
+                    let id = if packed { 0 } else { self.shadow_ids.get(i).map_or(0, |p| if point { p[1] } else { p[0] }) };
                     let prog = if id != 0 {
                         match (self.uni.get(&id).copied(), self.instance_pipeline(dev, id, &d, Target::Depth)) {
                             (Some((block, tex)), Some(pipe)) => {
@@ -1320,8 +1355,16 @@ impl ThreeScene {
                 da.setSlice(job.face);
             }
             da.setLoadAction(MTLLoadAction::Clear);
-            da.setStoreAction(MTLStoreAction::Store);
+            da.setStoreAction(if map.packed.is_some() { MTLStoreAction::DontCare } else { MTLStoreAction::Store });
             da.setClearDepth(1.0);
+            if let Some(c) = &map.packed {
+                // WebGLShadowMap (r170) clears to white: depth 1, nothing in shadow
+                let a = unsafe { rp.colorAttachments().objectAtIndexedSubscript(0) };
+                a.setTexture(Some(c));
+                a.setLoadAction(MTLLoadAction::Clear);
+                a.setStoreAction(MTLStoreAction::Store);
+                a.setClearColor(MTLClearColor { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 });
+            }
             let Some(enc) = cb.renderCommandEncoderWithDescriptor(&rp) else { continue };
             enc.setViewport(MTLViewport { originX: 0.0, originY: 0.0, width: map.size.0 as f64, height: map.size.1 as f64, znear: 0.0, zfar: 1.0 });
             unsafe {
@@ -1357,7 +1400,7 @@ impl ThreeScene {
                         self.bind_program_draw(&enc, prog, d, g, p.block, p.tex);
                     }
                     None => {
-                        enc.setRenderPipelineState(&self.pipes.depth3);
+                        enc.setRenderPipelineState(if map.packed.is_some() { &self.pipes.depth3_packed } else { &self.pipes.depth3 });
                         let inst = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances) } else { None };
                         let instanced: u32 = inst.is_some() as u32;
                         unsafe {
@@ -1510,6 +1553,9 @@ impl ThreeScene {
             let smp = if t.shadow { &p.compare } else if vsm { &p.linear_clamp } else { &p.nearest_clamp };
             let ours = self.shadow_lookup.iter().find(|m| m.0 == kind && m.1 == index).map(|m| &self.shadow_maps[m.2]).filter(|_| self.dbg & 1 == 0);
             if let Some(m) = ours.filter(|m| m.cube == (t.kind == "cube")) {
+                if let Some(pk) = &m.packed {
+                    return (pk, &p.nearest_clamp);
+                }
                 return (m.vsm.as_ref().map_or(&m.depth, |v| &v.0), smp);
             }
             let lit = if t.kind == "cube" { n.lit_cube.as_ref() } else { n.lit_2d.as_ref() };

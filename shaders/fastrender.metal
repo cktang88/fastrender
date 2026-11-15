@@ -463,6 +463,19 @@ vertex ShadowOut vs_three_depth(uint vid [[vertex_id]], uint iid [[instance_id]]
     return out;
 }
 
+// three r170 and older pack shadow depth into RGBA8 (MeshDepthMaterial, RGBADepthPacking): packDepthToRGBA of
+// gl_FragCoord.z (= 0.5 * z/w + 0.5 in GL; vs_three_depth's [[position]].z is exactly that), as packing.glsl.js r170
+fragment float4 fs_three_pack_depth(ShadowOut in [[stage_in]]) {
+    float v = in.pos.z;
+    if (v <= 0.0) return float4(0.0);
+    if (v >= 1.0) return float4(1.0);
+    float vuf;
+    float af = modf(v * 16777216.0, vuf);
+    float bf = modf(vuf * (1.0 / 256.0), vuf);
+    float gf = modf(vuf * (1.0 / 256.0), vuf);
+    return float4(vuf * (1.0 / 255.0), gf * (256.0 / 255.0), bf * (256.0 / 255.0), af);
+}
+
 static float pow2(float x) { return x * x; }
 
 // three.js r170 tone mapping (tonemapping_pars_fragment) and sRGB OETF, so native output matches

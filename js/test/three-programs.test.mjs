@@ -232,6 +232,26 @@ function decode(buf) {
   sun.shadow.updateMatrices(sun);
   const vp = new THREE.Matrix4().multiplyMatrices(sun.shadow.camera.projectionMatrix, sun.shadow.camera.matrixWorldInverse);
   assert.ok(near(fr.shadows[0].vp, vp.elements), 'SHADOWS carries the shadow camera view-projection');
+  // WebGLShadowMap's update rules: shadow.autoUpdate / needsUpdate (CSM far cascades, padding lights) -> SHADOW_KEEP
+  {
+    assert.equal(fr.shadows[0].kind, 1, 'auto-updated: re-rendered');
+    sun.shadow.autoUpdate = false;
+    r.render(scene, camera);
+    assert.equal(decode(h.cmd).shadows[0].kind, 1 | 0x100, 'autoUpdate false: keep the last map');
+    sun.shadow.needsUpdate = true;
+    r.render(scene, camera);
+    assert.equal(decode(h.cmd).shadows[0].kind, 1, 'needsUpdate: re-rendered once');
+    assert.equal(sun.shadow.needsUpdate, false, 'and needsUpdate cleared, as WebGLShadowMap does');
+    r.render(scene, camera);
+    assert.equal(decode(h.cmd).shadows[0].kind, 1 | 0x100);
+    sun.shadow.autoUpdate = true; r.shadowMap.autoUpdate = false;
+    r.render(scene, camera);
+    assert.equal(decode(h.cmd).shadows[0].kind, 1 | 0x100, 'renderer.shadowMap.autoUpdate false: every map kept');
+    r.shadowMap.autoUpdate = true;
+    r.render(scene, camera);
+    fr = decode(h.cmd);
+    assert.equal(fr.shadows[0].kind, 1);
+  }
   // a direct uniform edit (no needsUpdate) shows up next frame, as in WebGLRenderer
   shared.color.setRGB(1, 0, 0);
   const uploadsBefore = h.uploads.length;
