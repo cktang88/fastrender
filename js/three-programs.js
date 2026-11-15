@@ -980,6 +980,9 @@ export class ThreePrograms {
       } else ms.fogStamp = -1;
       this.materials.refreshMaterialUniforms(u, material, this.facade.getPixelRatio ? this.facade.getPixelRatio() : 1, this._height, this._transmissionRT);
       if (u.dfgLUT !== undefined) u.dfgLUT.value = this.dfgLUT;
+      // WebGLRenderer.setProgram: a lit material without its own envMap takes scene.environmentIntensity (r163+)
+      if ((material.isMeshStandardMaterial || material.isMeshLambertMaterial || material.isMeshPhongMaterial) && material.envMap === null &&
+        scene.environment && scene.environmentIntensity !== undefined && u.envMapIntensity !== undefined) u.envMapIntensity.value = scene.environmentIntensity;
     }
     // a later program compiled for this material replaced its uniforms object (as in WebGLRenderer)
     if (inst.gen !== ms.uniformsGen) this._bindValues(inst, ms);
