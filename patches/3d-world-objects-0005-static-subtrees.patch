@@ -1,0 +1,490 @@
+From 91bfee11a10a0546be7a2e5594c2cc892dc2dd04 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 17:49:43 +0000
+Subject: [PATCH] Static subtrees: a placed block's parts leave three's
+ per-frame matrix walk
+
+scene.updateMatrixWorld() composes and multiplies the matrices of every object every frame, moved or not: on
+the street that is ~24,000 objects, 14,400 of them inside the placed blocks (parked cars with their 15-25
+parts, sidewalk models, lamp posts, merged building meshes), and none of those moves. It was 4-5 ms of a
+frame's JS (46 % of render() under fastrender on an M2 Air).
+
+src/static.ts: freeze(o) computes a subtree's matrices once and takes it out of the walk; staticContainer(g)
+looks at g's frozen children only when g really moved. NycLevel.place() freezes every part of a block but the
+steam puffs. Kept exact without the callers' help: children added below a frozen object (models that stream
+in, a car's near LOD, far-LOD twins: Object3D.add is wrapped), the object's own position / quaternion / scale,
+any ancestor's move (windowview.ts shifts the level), three's explicit updateMatrixWorld(true) /
+updateWorldMatrix(). A transform written by hand below a frozen object needs touch(o); nothing in the game
+does that to a block today, and StaticAudit re-checks ~256 frozen objects per frame as a net (recomputes,
+warns once, thaws a subtree the third time).
+
+STATIC.on (globalThis.__staticFreeze, ?static=0) switches it off at once for comparisons.
+
+Node run of the game through fastrender (spawn view, interleaved): scene.updateMatrixWorld 4.1-4.6 -> 0.7-0.9
+ms, render() 12.9-13.9 -> 7.3-8.0 ms; every matrix equal to three's plain walk on every frame checked, also
+while walking 600 m through streaming blocks. tests/static.test.ts.
+---
+ scripts/qa.mjs       |   1 +
+ src/nyc.ts           |  13 +++
+ src/static.ts        | 200 +++++++++++++++++++++++++++++++++++++++++++
+ tests/static.test.ts | 170 ++++++++++++++++++++++++++++++++++++
+ 4 files changed, 384 insertions(+)
+ create mode 100644 src/static.ts
+ create mode 100644 tests/static.test.ts
+
+diff --git a/scripts/qa.mjs b/scripts/qa.mjs
+index ccba0e1..a0681fa 100644
+--- a/scripts/qa.mjs
++++ b/scripts/qa.mjs
+@@ -58,6 +58,7 @@ const SRC_MAP = [
+   [/^src\/rooms\/office/, ['offices']],
+   [/^src\/rooms\/vertical/, ['vertical', 'offices']],
+   [/^src\/nyc\/chunkLod/, ['chunk-lod', 'nyc', 'memory-city']],
++  [/^src\/static\.ts$/, ['static', 'nyc', 'memory-city', 'window-view']],
+   [/^src\/nyc\/vehicle/, ['vehicles', 'chunk-lod']],
+   [/^src\/zfix\.ts$/, ['zfight']],
+   [/^src\/(meshlod|meshlod-core)\.ts$|^src\/vendor\/meshopt|^scripts\/(build_vehicles\.mjs|lib\/simplify-doc\.mjs)$|^public\/assets\/vehicles\//, ['meshlod', 'vehicles']],
+diff --git a/src/nyc.ts b/src/nyc.ts
+index 4d25ee0..9487a26 100644
+--- a/src/nyc.ts
++++ b/src/nyc.ts
+@@ -8,6 +8,7 @@ import { busStop, noParking } from './nyc/vehicleBusStop';
+ import { Pedestrians } from './nyc/people';
+ import { CityVis } from './nyc/occlusion'; // [vis] chunk visibility / occlusion / HLOD (WP2)
+ import { chunkLodReady, chunkLodSteps, chunkLevel, setChunkLevel, type ChunkLod } from './nyc/chunkLod'; // far LODs of the merged meshes
++import { freeze, staticContainer, StaticAudit } from './static'; // a placed block's parts leave three's per-frame matrix walk
+ export { avenueName, streetName };
+ export { SHOPS } from './nyc/buildings';
+ export { setNight } from './nyc/buildings';
+@@ -60,6 +61,9 @@ export class NycLevel implements Level {
+   private traffic: Traffic;
+   private peds: Pedestrians;
+   private steam: THREE.Sprite[] = [];
++  /** the placed blocks' groups, whose children are frozen (static.ts), and the audit that goes round them */
++  private chunkGroups: THREE.Object3D[] = [];
++  private audit = new StaticAudit();
+   /** [vis] which chunks draw real geometry, an HLOD proxy, or only a shadow proxy */
+   readonly vis = new CityVis();
+   /** [nbhd] the rivers out to the far shores (New Jersey, Queens) */
+@@ -159,6 +163,7 @@ export class NycLevel implements Level {
+         if (this.lodJob?.ch === ch) this.lodJob = null;
+         this.group.remove(ch.group);
+         disposeTree(ch.group);
++        this.chunkGroups.splice(this.chunkGroups.indexOf(ch.group), 1);
+         this.chunks.delete(k);
+         this.steam = this.steam.filter((st) => !st.userData.disposed); // do not keep unloaded chunks' sprites alive
+         break; // [vis] one unload per frame
+@@ -179,6 +184,7 @@ export class NycLevel implements Level {
+       }
+     }
+     this.vis.update(new THREE.Vector3(p.x, p.y + 1.6, p.z), cx, cz, RX, RZ); // [vis]
++    this.audit.step(this.chunkGroups); // static.ts: the net under touch()
+     const key = `${cx},${cz},${this.chunks.size}`;
+     if (key !== this.lastKey) this.refresh(cx, cz);
+     this.lastKey = key;
+@@ -205,6 +211,7 @@ export class NycLevel implements Level {
+ 
+   dispose() {
+     disposeTree(this.group);
++    this.chunkGroups.length = 0;
+   }
+ 
+   private refresh(cx: number, cz: number) {
+@@ -258,6 +265,12 @@ export class NycLevel implements Level {
+     this.chunks.set(k, ch);
+     this.vis.add(cx, cz, ch.group, ch.hulls); // [vis]
+     nycMinimapSource.addChunk(cx, cz, ch.hulls); // [minimap] building footprints for the map tiles
++    // static.ts: nothing in a placed block moves but the steam puffs (update() above), so three need not compose
++    // and multiply its ~600 matrices every frame. Each part is frozen by itself: what is added to the block's
++    // group later is updated by three as ever, and a model that streams into a part recomputes that part alone
++    staticContainer(ch.group);
++    for (const c of ch.group.children) if (c.userData.ph === undefined) freeze(c);
++    this.chunkGroups.push(ch.group);
+   }
+ 
+   // ------------------------------------------------------------ one block
+diff --git a/src/static.ts b/src/static.ts
+new file mode 100644
+index 0000000..3f80330
+--- /dev/null
++++ b/src/static.ts
+@@ -0,0 +1,200 @@
++/**
++ * Static subtrees: parts of the world that do not move are left out of three's per-frame matrix walk.
++ *
++ * Every frame the renderer calls scene.updateMatrixWorld(): for each object it composes `matrix` from position /
++ * quaternion / scale and multiplies `matrixWorld`, moved or not. On the street that is ~24,000 objects, 90 % of them
++ * inside the city blocks (parked cars with their 15-25 parts, sidewalk models, lamp posts, merged building meshes),
++ * and about a third of the JS time of a frame. None of those moves once its block is placed.
++ *
++ *   freeze(o)            o's subtree is static: its matrices are computed once, then three no longer descends into it
++ *   staticContainer(g)   g's frozen children are looked at only when g itself really moved (a block's group)
++ *   touch(o)             something at or below o was moved by hand (position / rotation / scale written): the frozen
++ *                        subtree it is in is recomputed on the next frame
++ *   thaw(o)              o moves again: back to three's per-frame update
++ *
++ * What needs no call:
++ *   - children added anywhere below a frozen object (a model that streams in, a car's near LOD, a far-LOD twin):
++ *     Object3D.add is wrapped, the frozen subtree above is recomputed on the next frame;
++ *   - the frozen object's own position / quaternion / scale, and every ancestor's: compared each frame;
++ *   - visibility, materials, geometry, instance matrices: not matrices of the scene graph;
++ *   - three's own explicit calls: o.updateMatrixWorld(true) on a frozen object recomputes it, updateWorldMatrix()
++ *     and getWorldPosition() work as ever (matrixAutoUpdate is left as it was, so they still compose).
++ * What does: writing position / rotation / scale of an object *below* a frozen one -> touch(it). As a net under
++ * that rule, StaticAudit re-checks a few hundred frozen objects per frame (each one about once a second): a subtree
++ * found stale is recomputed, counted in STATIC.healed and named once on the console; the third time it is thawed for
++ * good (it evidently moves).
++ */
++import * as THREE from 'three';
++
++export const STATIC = {
++  /** switch for comparisons (benchmarks, tests): off = three's own walk everywhere, at once */
++  on: typeof location === 'undefined' || new URLSearchParams(location.search).get('static') !== '0',
++  /** frozen subtrees made so far */
++  frozen: 0,
++  /** recomputed: first use, touch(), a child added, the object or an ancestor moved */
++  rebakes: 0,
++  /** found stale by the audit (a transform written below a frozen object without touch()) */
++  healed: 0,
++  /** thawed by the audit after three such finds */
++  thawed: 0,
++  /** what the audit found last (path of names / types) */
++  last: '',
++};
++// for tools that drive the game from outside (benchmarks: on = false is the frame before this file)
++(globalThis as unknown as { __staticFreeze: typeof STATIC }).__staticFreeze = STATIC;
++
++interface Rec {
++  /** recompute on the next visit */
++  dirty: boolean;
++  /** the object's own position, quaternion and scale when it was last computed */
++  t: Float64Array;
++  heals: number;
++}
++/** a frozen object carries its record (an own property: three's clone() does not copy it, nor the method below) */
++const recOf = (o: THREE.Object3D) => (o as unknown as { __static?: Rec }).__static;
++
++const base = THREE.Object3D.prototype.updateMatrixWorld;
++
++function moved(o: THREE.Object3D, t: Float64Array) {
++  const p = o.position, q = o.quaternion, s = o.scale;
++  return t[0] !== p.x || t[1] !== p.y || t[2] !== p.z || t[3] !== q.x || t[4] !== q.y || t[5] !== q.z || t[6] !== q.w || t[7] !== s.x || t[8] !== s.y || t[9] !== s.z;
++}
++function rebake(o: THREE.Object3D, st: Rec) {
++  base.call(o, true);
++  const p = o.position, q = o.quaternion, s = o.scale, t = st.t;
++  t[0] = p.x; t[1] = p.y; t[2] = p.z; t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w; t[7] = s.x; t[8] = s.y; t[9] = s.z;
++  st.dirty = false;
++  STATIC.rebakes++;
++}
++
++let hooked = false;
++/** Object3D.add also tells the frozen subtree the new child lands in (or brings along) */
++function hook() {
++  if (hooked) return;
++  hooked = true;
++  const proto = THREE.Object3D.prototype;
++  const add = proto.add;
++  proto.add = function (this: THREE.Object3D, ...objects: THREE.Object3D[]) {
++    add.apply(this, objects);
++    touch(this);
++    for (const o of objects) {
++      const st = o && recOf(o);
++      if (st) st.dirty = true; // a frozen object moved to another parent
++    }
++    return this;
++  };
++}
++
++/** o and everything below it stand still from now on (see the file comment for what may still change) */
++export function freeze(o: THREE.Object3D) {
++  if (recOf(o)) return;
++  hook();
++  (o as unknown as { __static: Rec }).__static = { dirty: true, t: new Float64Array(10), heals: 0 };
++  o.updateMatrixWorld = frozenUpdate;
++  STATIC.frozen++;
++}
++/** a frozen object's updateMatrixWorld (one function for all of them) */
++function frozenUpdate(this: THREE.Object3D, force?: boolean) {
++  const st = recOf(this)!;
++  // asked for by force (three under a moving parent, or the game's own updateMatrixWorld(true)): three's update
++  if (!STATIC.on) base.call(this, force);
++  else if (force || st.dirty || this.matrixWorldNeedsUpdate || moved(this, st.t)) rebake(this, st);
++}
++
++/** o moves again */
++export function thaw(o: THREE.Object3D) {
++  if (!recOf(o)) return;
++  delete (o as { updateMatrixWorld?: unknown }).updateMatrixWorld;
++  delete (o as unknown as { __static?: Rec }).__static;
++}
++
++/** a transform at or below o was written by hand: the frozen subtrees it is in are recomputed on the next frame */
++export function touch(o: THREE.Object3D) {
++  for (let p: THREE.Object3D | null = o; p; p = p.parent) {
++    const st = recOf(p);
++    if (st) st.dirty = true;
++  }
++}
++
++const was = new Float64Array(16);
++/**
++ * A group of frozen things (a block). three tells every child of a group with matrixAutoUpdate to recompute, every
++ * frame; this one says so to its frozen children only when its own world matrix came out different. Its other
++ * children are updated as three does.
++ */
++export function staticContainer(g: THREE.Object3D) {
++  g.updateMatrixWorld = containerUpdate;
++}
++function containerUpdate(this: THREE.Object3D, force?: boolean) {
++  if (!STATIC.on) return base.call(this, force);
++  if (this.matrixAutoUpdate) this.updateMatrix();
++  const pass = this.matrixWorldNeedsUpdate || !!force;
++  let changed = false;
++  if (pass) {
++    if (this.matrixWorldAutoUpdate === true) {
++      const e = this.matrixWorld.elements;
++      for (let i = 0; i < 16; i++) was[i] = e[i];
++      if (this.parent === null) this.matrixWorld.copy(this.matrix);
++      else this.matrixWorld.multiplyMatrices(this.parent.matrixWorld, this.matrix);
++      for (let i = 0; i < 16; i++) if (was[i] !== e[i]) { changed = true; break; }
++    }
++    this.matrixWorldNeedsUpdate = false;
++  }
++  const ch = this.children;
++  for (let i = 0, l = ch.length; i < l; i++) {
++    const c = ch[i], st = recOf(c);
++    if (!st) c.updateMatrixWorld(pass);
++    else if (changed || st.dirty || c.matrixWorldNeedsUpdate || moved(c, st.t)) rebake(c, st);
++  }
++}
++
++const tmpM = new THREE.Matrix4();
++function path(o: THREE.Object3D) {
++  const names: string[] = [];
++  for (let p: THREE.Object3D | null = o; p && names.length < 5; p = p.parent) names.unshift(p.name || p.type);
++  return names.join('/');
++}
++/** the first object below (or at) o whose matrix is not what its position / quaternion / scale give; counts into n */
++function stale(o: THREE.Object3D, n: { n: number }): THREE.Object3D | null {
++  n.n++;
++  if (o.matrixAutoUpdate) {
++    const a = tmpM.compose(o.position, o.quaternion, o.scale).elements, b = o.matrix.elements;
++    for (let i = 0; i < 16; i++) if (a[i] !== b[i]) return o;
++  }
++  const ch = o.children;
++  for (let i = 0, l = ch.length; i < l; i++) {
++    const s = stale(ch[i], n);
++    if (s) return s;
++  }
++  return null;
++}
++
++/**
++ * The net under touch(): step() looks at about `budget` frozen objects of the given containers per call, going
++ * round, and compares what three would compose for them with what they have.
++ */
++export class StaticAudit {
++  private g = 0;
++  private c = 0;
++  step(groups: THREE.Object3D[], budget = 256) {
++    if (!STATIC.on || !groups.length) return;
++    const n = { n: 0 };
++    // at most one round per call
++    let left = 0;
++    for (const g of groups) left += g.children.length + 1;
++    while (n.n < budget && left-- > 0) {
++      if (this.g >= groups.length) this.g = 0;
++      const ch = groups[this.g].children;
++      if (this.c >= ch.length) { this.g++; this.c = 0; continue; }
++      const o = ch[this.c++], st = recOf(o);
++      if (!st || st.dirty) continue;
++      const s = stale(o, n);
++      if (!s) continue;
++      STATIC.healed++;
++      STATIC.last = path(s);
++      if (st.heals++ === 0) console.warn(`[static] moved inside a frozen subtree without touch(): ${STATIC.last}`);
++      if (st.heals >= 3) { thaw(o); STATIC.thawed++; }
++      else st.dirty = true;
++    }
++  }
++}
+diff --git a/tests/static.test.ts b/tests/static.test.ts
+new file mode 100644
+index 0000000..966ddbf
+--- /dev/null
++++ b/tests/static.test.ts
+@@ -0,0 +1,170 @@
++/**
++ * Static subtrees (src/static.ts): a frozen subtree holds exactly the matrices three's own walk would give, after
++ * every kind of change the game makes to a placed block (a child added, the object or an ancestor moved, touch()),
++ * and the audit finds a transform written below a frozen object without touch().
++ */
++import * as THREE from 'three';
++import { test, expect } from './qa';
++import { nycChunk } from './world';
++import { NycLevel } from '../src/nyc';
++import { CityVis } from '../src/nyc/occlusion';
++import { STATIC, StaticAudit, freeze, staticContainer, thaw, touch } from '../src/static';
++
++/** objects whose matrixWorld is not parent x compose(position, quaternion, scale): what three's plain walk gives */
++function staleUnder(root: THREE.Object3D): string[] {
++  const out: string[] = [];
++  const local = new THREE.Matrix4(), w = new THREE.Matrix4();
++  root.traverse((o) => {
++    const l = o.matrixAutoUpdate ? local.compose(o.position, o.quaternion, o.scale) : o.matrix;
++    if (o.parent) w.multiplyMatrices(o.parent.matrixWorld, l);
++    else w.copy(l);
++    if (!w.equals(o.matrixWorld)) out.push(o.name || o.type);
++  });
++  return out;
++}
++const fresh = (scene: THREE.Object3D, what: string) => {
++  scene.updateMatrixWorld(); // what the renderer calls every frame
++  const s = staleUnder(scene);
++  expect(s.length === 0, `${what}: ${s.length} stale matrices (${s.slice(0, 4).join(', ')})`);
++};
++
++function rig() {
++  const scene = new THREE.Scene(), block = new THREE.Group(), car = new THREE.Group(), body = new THREE.Group(), wheel = new THREE.Mesh();
++  car.name = 'car'; body.name = 'body'; wheel.name = 'wheel';
++  car.position.set(3, 0, 4); body.position.y = 0.5; wheel.position.set(1, 0, 1);
++  body.add(wheel); car.add(body); block.add(car); scene.add(block);
++  const loose = new THREE.Mesh();
++  loose.name = 'loose';
++  block.add(loose);
++  staticContainer(block);
++  freeze(car);
++  return { scene, block, car, body, wheel, loose };
++}
++
++test('a frozen subtree is exact after: first frame, a child added, the object moved, an ancestor moved, touch()', () => {
++  const { scene, block, car, body, wheel, loose } = rig();
++  fresh(scene, 'first frame');
++  const n = STATIC.rebakes;
++  for (let i = 0; i < 5; i++) scene.updateMatrixWorld();
++  expect(STATIC.rebakes === n, `${STATIC.rebakes - n} recomputations in 5 frames in which nothing changed`);
++  // a model streams in two levels down
++  const model = new THREE.Group(), part = new THREE.Mesh();
++  part.position.set(0, 2, 0); model.add(part); model.scale.setScalar(3);
++  body.add(model);
++  fresh(scene, 'child added below a frozen object');
++  expect(part.matrixWorld.elements[13] === 6.5, `the added part is at y ${part.matrixWorld.elements[13]}, not 6.5`);
++  car.position.x = 10; car.rotation.y = 1;
++  fresh(scene, 'the frozen object itself moved');
++  block.position.set(120, 0, 64);
++  fresh(scene, 'its block moved');
++  scene.position.y = 1e4;
++  fresh(scene, 'the scene moved');
++  scene.position.y = 0;
++  fresh(scene, 'the scene moved back');
++  loose.position.x = 7;
++  fresh(scene, 'an unfrozen sibling moved');
++  wheel.rotation.x = 1;
++  touch(wheel);
++  fresh(scene, 'a part moved, with touch()');
++  expect(STATIC.rebakes - n === 6, `${STATIC.rebakes - n} recomputations for 6 changes`);
++  // three's explicit call still recomputes
++  wheel.position.z = 9;
++  car.updateMatrixWorld(true);
++  expect(staleUnder(scene).length === 0, 'car.updateMatrixWorld(true) recomputes a frozen car');
++  // and a copy is an ordinary object
++  const copy = car.clone();
++  copy.position.x = -5;
++  scene.add(copy);
++  copy.children[0].position.y = 2;
++  fresh(scene, 'a clone of a frozen object is not frozen');
++  copy.children[0].position.y = 3;
++  fresh(scene, 'a clone of a frozen object is not frozen (second frame)');
++  thaw(car);
++  wheel.position.z = 1;
++  fresh(scene, 'thawed');
++});
++
++test('STATIC.on = false is three\'s own walk at once, and back', () => {
++  const { scene, wheel } = rig();
++  fresh(scene, 'first frame');
++  STATIC.on = false;
++  try {
++    wheel.position.y = 3;
++    fresh(scene, 'off: a part moved without touch()');
++  } finally {
++    STATIC.on = true;
++  }
++  fresh(scene, 'on again');
++});
++
++test('the audit finds a part moved without touch(), recomputes it, and thaws the subtree the third time', () => {
++  const { scene, block, wheel } = rig();
++  const warn = console.warn;
++  const said: string[] = [];
++  console.warn = (...a: unknown[]) => void said.push(a.join(' '));
++  try {
++    fresh(scene, 'first frame');
++    const audit = new StaticAudit();
++    const h = STATIC.healed, t = STATIC.thawed;
++    audit.step([block]);
++    expect(STATIC.healed === h, 'the audit finds nothing in an untouched block');
++    for (let k = 1; k <= 3; k++) {
++      wheel.position.x = 10 * k; // no touch()
++      scene.updateMatrixWorld();
++      expect(staleUnder(scene).length === 1, `round ${k}: the wheel is stale until the audit comes by`);
++      audit.step([block]);
++      expect(STATIC.healed === h + k, `round ${k}: healed ${STATIC.healed - h}`);
++      fresh(scene, `round ${k}, after the audit`);
++    }
++    expect(STATIC.thawed === t + 1, 'thawed after the third find');
++    expect(said.length === 1 && /car\/body\/wheel/.test(said[0]), `named once on the console: ${said.join(' | ')}`);
++    wheel.position.x = 1;
++    fresh(scene, 'thawed: updated by three every frame');
++  } finally {
++    console.warn = warn;
++  }
++});
++
++test('a placed block: every part frozen, every matrix what three\'s walk gives, also after it is placed elsewhere and after a model streams in', () => {
++  const ch = nycChunk(1, 0, 0, true);
++  // a bare level (as tests/world.ts), enough of it for place()
++  const lv = Object.create(NycLevel.prototype) as any;
++  lv.group = new THREE.Group();
++  lv.chunks = new Map();
++  lv.chunkGroups = [];
++  lv.vis = new CityVis();
++  lv.vis.attach(lv.group);
++  const scene = new THREE.Scene();
++  scene.add(lv.group);
++  const f0 = STATIC.frozen;
++  lv.place(2, -3, ch);
++  let objects = 0;
++  ch.group.traverse(() => objects++);
++  const steam = ch.group.children.filter((c) => c.userData.ph !== undefined).length;
++  expect(STATIC.frozen - f0 === ch.group.children.length - steam, `${STATIC.frozen - f0} of ${ch.group.children.length} parts frozen (${steam} steam puffs move)`);
++  fresh(scene, 'placed');
++  const n = STATIC.rebakes;
++  for (let i = 0; i < 3; i++) scene.updateMatrixWorld();
++  expect(STATIC.rebakes === n, `${STATIC.rebakes - n} recomputations in 3 still frames`);
++  console.log(`one block: ${objects} objects in ${ch.group.children.length} parts, ${STATIC.frozen - f0} frozen`);
++  ch.group.position.x += 120;
++  fresh(scene, 'the block moved');
++  lv.group.position.y -= 1e4; // windowview.ts hides the city this way for a capture
++  lv.group.updateMatrixWorld(true);
++  expect(staleUnder(lv.group).length === 0, 'the level moved, level.group.updateMatrixWorld(true)');
++  lv.group.position.y += 1e4;
++  fresh(scene, 'the level moved back');
++  // a model streams into a sidewalk object / a car gets its near LOD: some part with children, a few levels down
++  const holder = ch.group.children.find((c) => c.children.length > 0 && c.userData.ph === undefined)!;
++  let deep: THREE.Object3D = holder;
++  while (deep.children.length) deep = deep.children[0];
++  const model = new THREE.Group();
++  model.position.set(1, 2, 3);
++  model.add(new THREE.Mesh());
++  deep.add(model);
++  fresh(scene, 'a model added deep in a frozen part');
++  const audit = new StaticAudit();
++  const h = STATIC.healed;
++  for (let i = 0; i < 400; i++) audit.step([ch.group]);
++  expect(STATIC.healed === h, `the audit found ${STATIC.healed - h} stale parts in a block nobody touched (${STATIC.last})`);
++});
+-- 
+2.43.0
+

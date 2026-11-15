@@ -10,10 +10,20 @@
 //                  self time and the inclusive time of the renderer's stages, in ms per frame
 // --ab <property>  A/B inside one run (a busy machine slows both alike): renderer.<property> is switched every 10
 //                  measured frames (frustumCulling, staticSubtrees, _rawInstances); reports render() median / p95
+//                  `--ab game:<global>.<key>` switches a switch the game exports instead, e.g. game:__staticFreeze.on
+//                  (patches/3d-world-objects-0005: the blocks' parts out of three's matrix walk) or game:__chunkLod.on
 //                  with it on and off, without the first 3 frames after each switch
 // --matrix-stats   which objects' matrixWorld changes over the measured frames (static / sometimes / every frame), and
 //                  what scene.updateMatrixWorld() costs as it is vs with matrixAutoUpdate = false on the static ones
 //                  (three's own optimisation for static objects; docs/notes/three-programs.md "Static transforms")
+//
+// --matrix-check N every N measured frames, after the frame: every drawn object's matrixWorld against what three's
+//                  plain walk gives (parent x compose(position, quaternion, scale)), for games / renderer options that
+//                  leave static subtrees out of the walk (patches/3d-world-objects-0005, staticSubtrees). Reports the
+//                  objects that differ (0 = exact), those in hidden subtrees apart (the game's own frozen people
+//                  are among them), and those inside a subtree frozen by the game's src/static.ts, hidden or not
+// --walk vx,vz     the player moves by (vx, vz) m/s over the measured frames, in jumps of a quarter second (blocks
+//                  stream in and out, LODs switch)
 //
 // --mesh-census N  the N largest triangle consumers of the screen pass by material | mesh name: triangles sent, drawn
 //                  with only the instances in view, by distance band. FR_CENSUS_PATH=n names from n ancestors,
@@ -82,6 +92,8 @@ const abProp = opt('--ab', '');
 // (staticSubtrees needs ~50 frames to settle after it is switched on: blocks of 200 frames, the first 80 dropped)
 const abOn = abProp === 'staticSubtrees' ? Number(opt('--check', '8')) : true, abBlock = abProp === 'staticSubtrees' ? 200 : 10, abSkip = abProp === 'staticSubtrees' ? 80 : 3;
 const staticSubtrees = Number(opt('--static-subtrees', '0'));
+const matrixCheckN = Number(opt('--matrix-check', '0'));
+const walk = opt('--walk', '').split(',').map(Number);
 const wantProfile = args.includes('--profile'), wantMatrixStats = args.includes('--matrix-stats');
 const program0 = fixName ? (k, vs, fs, id) => program0x(k, vs.replace(/^#define SHADER_NAME .*$/m, ''), fs.replace(/^#define SHADER_NAME .*$/m, ''), id) : program0x;
 const allPrograms = new Map(); // every program asked for (also the ones that fail): --dump-programs
@@ -187,21 +199,57 @@ if (wantProfile) {
   await post('Profiler.enable'); await post('Profiler.setSamplingInterval', { interval: 100 }); await post('Profiler.start');
   profiler = { post };
 }
+// --matrix-check: three's plain walk, recomputed on the side (nothing is written), compared with what the objects hold
+let walk0 = null;
+const mcheck = { checks: 0, objects: 0, stale: 0, staleFrames: 0, hiddenObjects: 0, staleHidden: 0, frozenObjects: 0, staleFrozen: 0, first: [], firstHidden: [] };
+const matrixCheck = () => {
+  const scene = W().scene, M4 = scene.matrix.constructor;
+  const stack = [new M4()], local = new M4();
+  let bad = 0;
+  const visit = (o, depth, hidden, frozen) => {
+    hidden ||= !o.visible;
+    frozen ||= o.__static !== undefined; // (the game's src/static.ts: a frozen subtree's root)
+    if (frozen) mcheck.frozenObjects++;
+    const pw = stack[depth], w = stack[depth + 1] || (stack[depth + 1] = new M4());
+    const l = o.matrixAutoUpdate ? local.compose(o.position, o.quaternion, o.scale) : o.matrix;
+    if (o.matrixWorldAutoUpdate === false) w.copy(o.matrixWorld); else if (depth === 0) w.copy(l); else w.multiplyMatrices(pw, l);
+    if (hidden) mcheck.hiddenObjects++; else mcheck.objects++;
+    const a = w.elements, b = o.matrixWorld.elements;
+    for (let i = 0; i < 16; i++) if (a[i] !== b[i] && !(a[i] !== a[i] && b[i] !== b[i])) {
+      if (hidden) mcheck.staleHidden++; else bad++;
+      if (frozen) mcheck.staleFrozen++;
+      const first = hidden ? mcheck.firstHidden : mcheck.first;
+      if (first.length < 12) { const path = []; for (let p = o; p && path.length < 6; p = p.parent) path.unshift(p.name || p.type); first.push(`${path.join('/')} [${i}] ${b[i]} != ${a[i]}`); }
+      w.copy(o.matrixWorld); // its children are judged against what it has
+      break;
+    }
+    for (const c of o.children) visit(c, depth + 1, hidden, frozen);
+  };
+  visit(scene, 0, false, false);
+  mcheck.checks++; mcheck.stale += bad; if (bad) mcheck.staleFrames++;
+};
 const up0 = { ...hstats.uploads }, upB0 = hstats.uploadBytes;
 const per = [];
 let instances = 0, maxDraws = 0;
-const ab = { on: [], off: [], cpuOn: [], cpuOff: [] };
+const ab = { on: [], off: [], cpuOn: [], cpuOff: [], frameOn: [], frameOff: [] };
+// what --ab switches: a property of the renderer, or (game:<global>.<key>) of an object the game exports
+const abGame = /^game:(\w+)\.(\w+)$/.exec(abProp);
+const abKey = abGame ? abGame[2] : abProp, abOff = abGame ? false : 0;
+const abTarget = () => (abGame ? globalThis[abGame[1]] || {} : renderer);
 for (let i = 0; i < frames; i++) {
-  if (abProp) renderer[abProp] = Math.floor(i / abBlock) % 2 === 0 ? abOn : 0;
+  if (abProp) abTarget()[abKey] = Math.floor(i / abBlock) % 2 === 0 ? abOn : abOff;
   renderMs = 0; renderCalls = 0; renderCpu = 0;
+  // (in jumps of a quarter second from where the walk started: the game's collisions push a walker back out of cars and walls)
+  if (walk.length === 2 && W().player && i % 15 === 0) { const pl = W().player; walk0 ||= pl.pos.clone(); pl.place(walk0.clone().set(walk0.x + walk[0] * i / 60, walk0.y, walk0.z + walk[1] * i / 60), pl.yaw); }
   const t = hrNow(), tc = cpuNow();
   globalThis.__worldStep(1 / 60);
   const total = hrNow() - t, totalCpu = cpuNow() - tc;
-  if (abProp && i % abBlock >= abSkip) { (renderer[abProp] ? ab.on : ab.off).push(renderMs); (renderer[abProp] ? ab.cpuOn : ab.cpuOff).push(renderCpu); }
+  if (abProp && i % abBlock >= abSkip) { const on = !!abTarget()[abKey]; (on ? ab.on : ab.off).push(renderMs); (on ? ab.cpuOn : ab.cpuOff).push(renderCpu); (on ? ab.frameOn : ab.frameOff).push(total); }
   per.push({ total, totalCpu, renderCpu, render: renderMs, calls: renderer.info.render.calls, inst: renderer._used ? renderer._used.length : 0, renders: renderCalls });
   instances = Math.max(instances, renderer._used ? renderer._used.length : 0);
   maxDraws = Math.max(maxDraws, renderer.info.render.calls);
   if (mstat) matrixFrame();
+  if (matrixCheckN && i % matrixCheckN === 0) matrixCheck();
   await tick();
 }
 let profileTop = null;
@@ -284,6 +332,18 @@ if (mstat) {
   c.updateMatrixWorldMsStaticSubtreesSkipped = +timeUMW().toFixed(2);
   roots.forEach((r, i) => { if (own[i]) r.updateMatrixWorld = own[i]; else delete r.updateMatrixWorld; });
   c.staticShare = +(c.static / c.objects).toFixed(3);
+  // FR_TREE_DUMP=depth: the scene tree to that depth: type:name {userData keys} objects below / of them moved, flags
+  if (process.env.FR_TREE_DUMP) {
+    const idx = new Map(objs.map((o, i) => [o, i]));
+    const lines = [];
+    const dump = (o, d) => {
+      let n = 0, mv = 0, auto = 0; o.traverse((x) => { n++; const i = idx.get(x); if (i !== undefined && changes[i]) mv++; if (x.matrixAutoUpdate) auto++; });
+      lines.push(`${'  '.repeat(d)}${o.type}:${o.name} {${Object.keys(o.userData).join(',')}} ${n} objects, ${mv} moved, ${auto} auto${o.visible ? '' : ' hidden'}${Object.prototype.hasOwnProperty.call(o, 'updateMatrixWorld') ? ' frozen' : ''}`);
+      if (d < Number(process.env.FR_TREE_DUMP)) for (const ch of o.children) dump(ch, d + 1);
+    };
+    dump(scene, 0);
+    writeFileSync(process.env.FR_TREE_DUMP_OUT || 'tree-dump.txt', lines.join('\n') + '\n');
+  }
   matrixStats = c;
 }
 // --mesh-census: who the screen pass's triangles belong to. One more frame with FastRenderer._draw recorded; per
@@ -368,7 +428,8 @@ const result = {
   programPicksPerFrame: +(picks / frames).toFixed(1),
   draws: maxDraws, drawsMedian: med(per.map((p) => p.calls)), materialInstances: instances, programsTranslated: hstats.programs, programTranslateMs: Math.round(hstats.programMs),
   triangles: renderer.info.render.triangles, screenRendersPerFrame: med(per.map((p) => p.renders)),
-  sceneObjects: objects, updateMatrixWorldMs: +matrixWorldMs.toFixed(2), matrixStats, transforms: renderer.info.transforms, ab: abProp ? { property: abProp, renderOn: [med(ab.on), p95(ab.on)], renderOff: [med(ab.off), p95(ab.off)], renderCpuOn: [med(ab.cpuOn), p95(ab.cpuOn)], renderCpuOff: [med(ab.cpuOff), p95(ab.cpuOff)] } : null, culledPerFrame: renderer.info.render.culled, profile: profileTop,
+  sceneObjects: objects, updateMatrixWorldMs: +matrixWorldMs.toFixed(2), matrixStats, transforms: renderer.info.transforms, ab: abProp ? { property: abProp, renderOn: [med(ab.on), p95(ab.on)], renderOff: [med(ab.off), p95(ab.off)], renderCpuOn: [med(ab.cpuOn), p95(ab.cpuOn)], renderCpuOff: [med(ab.cpuOff), p95(ab.cpuOff)], gameFrameOn: [med(ab.frameOn), p95(ab.frameOn)], gameFrameOff: [med(ab.frameOff), p95(ab.frameOff)] } : null, culledPerFrame: renderer.info.render.culled, profile: profileTop,
+  matrixCheck: matrixCheckN ? mcheck : null, staticFreeze: globalThis.__staticFreeze || null,
   scene: { perInstanceAttrMeshes, perInstanceAttrs: [...perInstanceAttrs], meshes, instancedMeshes: instanced, instances: instancesTotal, skinned, sprites, points, lines, lights, materials: mats.size, shaderMaterials: [...shaderMats], onBeforeCompile: [...obc] },
   unsupportedPerFrame: Object.fromEntries(unsupported.map(([k, v]) => [k, +(v / frames).toFixed(2)])),
   uploadsPerFrame, uploadMBPerFrame, texturesWithoutPixelsPerFrame: Object.fromEntries(Object.entries(texKinds).map(([k, v]) => [k, +(v / frames).toFixed(1)])),

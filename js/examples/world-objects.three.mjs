@@ -73,6 +73,8 @@ export class WebGLRenderer extends FastRenderer {
 //   nomaps        drop normal/roughness/metalness/ao/emissive/bump maps (keeps map)
 //   nofarlod      the game's far LODs off (patches/3d-world-objects-0004: the blocks' merged meshes beyond 70 m and
 //                 the cars beyond 90 m are drawn with their full versions again): the frame before that patch
+//   nostatic      the game's static subtrees off (patches/3d-world-objects-0005: the placed blocks' parts are back in
+//                 three's per-frame matrix walk): the JS frame before that patch; the picture is the same
 const P = (globalThis.__fr && globalThis.__fr.params) || (globalThis.__frHost && globalThis.__frHost.params) || {};
 const ablate = new Set(String(P.ablate || '').split(',').filter(Boolean));
 let ablateFrame = 0;
@@ -96,6 +98,7 @@ function applyAblate(scene) {
     if (globalThis.__chunkLod) globalThis.__chunkLod.on = false;
     if (globalThis.__fleetLod) globalThis.__fleetLod.FAR = Infinity;
   }
+  if (ablate.has('nostatic') && globalThis.__staticFreeze) globalThis.__staticFreeze.on = false; // (src/static.ts STATIC)
   scene.traverse((o) => {
     if (o.isLight) {
       if (stats) { stats.lights[o.type] = (stats.lights[o.type] || 0) + (o.visible ? 1 : 0); if (o.visible && o.intensity === 0) stats.zero++; }
