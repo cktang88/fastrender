@@ -113,7 +113,29 @@ npx electron game/main.js --kind city --out /tmp/x            # three-city; gold
 
 ### Electron host: numbers
 
-ELECTRON_NUMBERS
+macOS 26 CI runner (paravirtual Apple GPU: GPU ms are not an Air's), runs 43712475017 and 43714278732. Same commit, same
+job: the JavaScriptCore host (`fastrender bench --three`) and Electron (V8) on the same game, frames and view.
+
+| | JavaScriptCore host | Electron host |
+|---|---:|---:|
+| three-city golden MAE vs `ref-t1.png` | 0.97 | **0.97** (identical) |
+| 3d-world-objects golden MAE vs the browser | 6.58 | **2.96 / 3.01** |
+| world-objects JS per frame after streaming (game + three + FastRenderer + present) | 63.9 / 73.8 ms (frames 61-90) | **14.3 / 25.2 ms** median, contextBridge; **18.1 ms** with contextIsolation off (frames 45-105) |
+| world-objects GPU per frame (no API validation) | 68.0 / 75.8 ms | 69.1 ms |
+| canvas-painted textures | none (no 2D canvas: 142 texture bindings/frame without pixels) | all: 91 `imagePixels` readbacks, 354 MB, 1.7-2.4 s total at load (mean 19-26 ms, max 0.5-0.9 s), cached by `texture.version` |
+| three-city JS per frame | 1.98 ms | 0.4-0.5 ms |
+| programs translated in the renderer process (`host.program`, sync) | n/a | 93 (world), mean 4-4.7 ms each; 5 (city) |
+
+- World run: boot 7-8.5 s to the first started frame; 7665 resource messages / 973 MB through the ring (textures,
+  canvases, geometry), no decode or order errors, no GPU errors. With Metal API validation the render thread needs
+  seconds per frame at load (every pipeline and texture of the level) and renders 3-5 of the 30 cost frames
+  (the rest are skipped as superseded: the game's JS is never blocked); without validation it renders ~1 in 3
+  (GPU-bound at ~69 ms on the paravirtual GPU).
+- The golden frame is the one `shot()` was requested for, read back from the drawable after it rendered: exact
+  pixels, independent of the screen and of the frames skipped around it.
+- Metal API validation: no problems in the world run (`MTL_DEBUG_LAYER_ERROR_MODE=nslog`). The very first run
+  (43710494452, before flush mode) aborted on `setVertexBuffer offset(65536) must be < [buffer length](65536)`;
+  it has not recurred since (flush mode sends whole frames, not each partial render).
 
 ## Spike (Nov 2026)
 

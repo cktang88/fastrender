@@ -2,6 +2,35 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: Electron host runs the real renderer: three-city 0.97, 3d-world-objects 2.96, JS 14-25 ms/frame (JSC 64-74)
+
+The `fastrender` crate is now a library (`src/lib.rs`); `fastrender::host::FrameSource` is the host boundary (frame
+words + resources + programs in, Metal out), implemented by JavaScriptCore's `ScriptHost` and by the Electron addon's
+`FeedSource`. The addon (`host/electron/native`) links the library: in the renderer process `host.program` translates
+GLSL -> MSL synchronously (the layout goes back to three-programs.js, the MSL to the main process), uploads carry
+element types, and every frame goes through the ordered shared-memory ring; in the main process a reader thread drains
+the ring and the render thread runs `mac::Renderer::with_source` on the CAMetalLayer below the transparent web contents
+(docs/HOST.md "Electron host with the real renderer"). The game app (`host/electron/game/`) serves a game from
+`app://game/`, drives it like the browser golden, and reads the golden frame back from the drawable (`shot`).
+
+macOS CI (runs 43712475017, 43714278732; paravirtual GPU), same job, same frames:
+
+| | JavaScriptCore host | Electron host |
+|---|---:|---:|
+| three-city MAE vs `ref-t1.png` | 0.97 | 0.97 |
+| 3d-world-objects MAE vs browser golden | 6.58 | 2.96, 3.01 |
+| world JS ms/frame after streaming | 63.9, 73.8 | 14.3, 25.2 (contextBridge), 18.1 (isolation off) |
+| world GPU ms/frame (no validation) | 68.0, 75.8 | 69.1 |
+| canvas textures | none (142 bindings/frame without pixels) | all (91 readbacks, 354 MB, ~2 s at load) |
+
+What made the difference: V8 instead of JavaScriptCore for the game's JS (3-4x on this frame), and a real 2D canvas
+(the game's signage / facade / glyph canvases now have pixels). CI gates: Electron three-city MAE < 1.0,
+3d-world-objects MAE < 10. Two findings on the way: (1) frames must not be dropped blindly: a frame that renders into
+a target (PMREM at load) has to run, so frames moved from the mailbox into the ordered ring and the render thread skips
+only screen-only frames already superseded; (2) one frame per display frame (`host.flush()` after each rAF callback,
+word 0 zeroed), as JavaScriptCore does, instead of one per `render()` call: partial frames re-ran offscreen passes, and
+the first run (before it) aborted under API validation on a vertex buffer bound at offset == length.
+
 ## 2026-11-15: real game MAE 46.9 -> 6.58: zero-initialised locals, environmentIntensity, synchronous WebAssembly in JSC
 
 `cktang88/3d-world-objects` (r187 + patches), native (JavaScriptCore + Metal, macOS CI) vs its browser golden, 1280x800
