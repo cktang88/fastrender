@@ -172,8 +172,13 @@ Everything else (`WebGLProgram`, `WebGLLights.setup/setupView`, `WebGLMaterials`
 
 ## Notes for the native side
 
-- Environment maps / PMREM are not supported: programs are built as if there were none (`renderer.info.unsupported`
-  counts them); likewise the transmission pass.
+- Environment maps: `scene.environment` / `material.envMap` go through three's own `PMREMGenerator` and
+  `WebGLCubeRenderTarget` driven by the FastRenderer (`createEnvironments` mirrors r187's `WebGLEnvironments` and
+  r170's `WebGLCubeMaps` + `WebGLCubeUVMaps`); the PMREM passes are ordinary render-target passes
+  (`docs/PROTOCOL.md` "Render targets and passes"), and programs are built with the env map (r187: a PMREM cube,
+  `ENVMAP_TYPE_PMREM`; r170: the CubeUV atlas). The transmission pass is still unsupported (counted).
+- `RawShaderMaterial` programs written in GLSL ES 1.00 (three's `OutputPass`, many `ShaderPass`es) are lifted to 3.00
+  with three's own compatibility defines (`liftGlsl1`) before they reach the host.
 - glslang 15.1 (`glslangValidator` here) refuses to link a program whose fragment stage declares an input the vertex
   stage never writes (three does this: e.g. `vNormal` in programs whose vertex stage does not output it; WebGL accepts
   it). The mock host adds the missing `out` declarations to the vertex stage and relinks. If `src/xlat.rs` links both

@@ -38,3 +38,19 @@ cargo run --release -- bench --three js/dist/parity.js --time 1 --scale 1 --upsc
 ```
 
 CI gates all three at MAE < 1.5 (Nov 2026: PCF 0.96, VSM 0.84, Basic 0.83).
+
+## IBL scene (render targets)
+
+`../examples/ibl-scene.mjs`: `scene.environment` = three's `PMREMGenerator.fromScene(RoomEnvironment)`, two rows of
+PBR spheres (dielectric / metal × roughness 0..1), a clearcoat torus knot and an emissive bar. The `bloom` variant
+renders the same scene through three's `EffectComposer` (`RenderPass` + `UnrealBloomPass` + `OutputPass`): 28 passes
+per frame into 15 render targets. Everything multi-pass is three's own code; natively these are render-target passes
+(`docs/PROTOCOL.md` "Render targets and passes").
+
+```bash
+node js/golden/reference.mjs 1 js/golden/ref-ibl-t1.png 960x600 ibl
+node js/golden/reference.mjs 1 js/golden/ref-ibl-bloom-t1.png 960x600 ibl bloom
+node js/build.mjs js/examples/ibl-scene.entry.mjs js/dist/ibl.js        # ibl-bloom.entry.mjs likewise
+cargo run --release -- bench --three js/dist/ibl.js --time 1 --scale 1 --upscale bilinear --size 960x600 \
+  --frames 3 --warmup 2 --shot golden-ibl-t1.png
+```

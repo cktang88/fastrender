@@ -178,6 +178,10 @@ pub(super) struct Targets {
     reported: HashSet<String>,
     /// last frame: (passes, render-target passes, encoders, clears drawn, mip generations, copies)
     pub stats: [usize; 6],
+    /// `FASTRENDER_RT_PROBE=1`: the first frame with render-target passes prints its passes and reads back every
+    /// target (mean colour per face / level, reported with the stats): 0 off, 1 armed, 2 taken
+    probe: u8,
+    probes: Vec<(String, Buffer, MTLPixelFormat, usize)>,
 }
 
 impl Targets {
@@ -198,6 +202,8 @@ impl Targets {
             memoryless_ok: dev.supportsFamily(MTLGPUFamily::Apple7),
             reported: HashSet::new(),
             stats: [0; 6],
+            probe: if std::env::var("FASTRENDER_RT_PROBE").is_ok_and(|v| v == "1") { 1 } else { 0 },
+            probes: Vec::new(),
         }
     }
 
@@ -684,7 +690,84 @@ impl ThreeScene {
             self.encode_group(dev, cb, slot_i, k..end);
             k = end;
         }
+        if self.targets.probe == 1 && self.targets.stats[1] > 0 {
+            self.targets.probe = 2;
+            self.probe(dev, cb);
+        }
         self.enter(main);
+    }
+
+    /// FASTRENDER_RT_PROBE: print this frame's passes, read every target back (face 0..5 level 0, face 0 every level)
+    fn probe(&mut self, dev: &Device, cb: &ProtocolObject<dyn MTLCommandBuffer>) {
+        for (k, p) in self.targets.passes.iter().enumerate().take(120) {
+            if let Some(c) = p.copy {
+                eprintln!("rt probe: pass {k}: copy -> texture {} from target {}", c.texture, c.src_target);
+                continue;
+            }
+            let h = p.header;
+            let (draws, vis) = if self.targets.cur == Some(k) { (self.draws.len(), self.vis3.len()) } else { (p.draws.len(), p.vis3.len()) };
+            let blocks = if self.targets.cur == Some(k) { self.uni.len() } else { p.uni.len() };
+            eprintln!(
+                "rt probe: pass {k}: target {} face {} level {} flags {:#x} viewport {:?} clear {:?} draws {draws} drawn {vis} blocks {blocks} prepared {}",
+                h.target, h.face, h.level, h.flags, h.viewport, h.clear_color, p.prepared
+            );
+        }
+        let Some(b) = cb.blitCommandEncoder() else { return };
+        let mut ids: Vec<u32> = self.targets.rts.keys().copied().collect();
+        ids.sort();
+        for id in ids {
+            let rt = &self.targets.rts[&id];
+            let Some(t) = rt.colors.first() else { continue };
+            let fmt = t.pixelFormat();
+            let bpp = match fmt {
+                MTLPixelFormat::RGBA8Unorm | MTLPixelFormat::RGBA8Unorm_sRGB => 4,
+                MTLPixelFormat::RGBA16Float => 8,
+                MTLPixelFormat::RGBA32Float => 16,
+                _ => continue,
+            };
+            let faces = if rt.meta.cube { 6 } else { 1 };
+            let mut picks: Vec<(u32, u32)> = (0..faces).map(|f| (f, 0)).collect();
+            picks.extend((1..t.mipmapLevelCount() as u32).map(|l| (0, l)));
+            for (face, level) in picks {
+                let (w, h) = rt.size_at(level);
+                let Some(buf) = dev.newBufferWithLength_options(w * h * bpp, MTLResourceOptions::StorageModeShared) else { continue };
+                unsafe {
+                    b.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
+                        t, face as usize, level as usize, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: w, height: h, depth: 1 }, &buf, 0, w * bpp, w * h * bpp,
+                    );
+                }
+                self.targets.probes.push((format!("rt {id} {w}x{h} face {face} level {level}"), buf, fmt, w * h));
+            }
+        }
+        b.endEncoding();
+    }
+
+    /// the probe's readbacks (FASTRENDER_RT_PROBE), once the frame completed: mean RGBA per face / level
+    pub fn probe_report(&self) -> String {
+        fn half(h: u16) -> f32 {
+            let (s, e, m) = ((h >> 15) as u32, ((h >> 10) & 31) as i32, (h & 1023) as f32);
+            let v = if e == 0 { m / 1024.0 * 2f32.powi(-14) } else if e == 31 { f32::INFINITY } else { (1.0 + m / 1024.0) * 2f32.powi(e - 15) };
+            if s == 1 { -v } else { v }
+        }
+        let mut out = String::new();
+        for (label, buf, fmt, n) in &self.targets.probes {
+            let mut sum = [0f64; 4];
+            let p = buf.contents().as_ptr();
+            for i in 0..*n {
+                for c in 0..4 {
+                    sum[c] += unsafe {
+                        match *fmt {
+                            MTLPixelFormat::RGBA16Float => half(*(p as *const u16).add(i * 4 + c)) as f64,
+                            MTLPixelFormat::RGBA32Float => *(p as *const f32).add(i * 4 + c) as f64,
+                            _ => *(p as *const u8).add(i * 4 + c) as f64 / 255.0,
+                        }
+                    };
+                }
+            }
+            let m = sum.map(|v| v / (*n).max(1) as f64);
+            out += &format!("rt probe: {label}: mean {:.4} {:.4} {:.4} {:.4}\n", m[0], m[1], m[2], m[3]);
+        }
+        out
     }
 
     /// One render encoder for passes `group` (same target, face, level).
@@ -914,6 +997,8 @@ impl ThreeScene {
     /// passes / render-target passes / encoders / clear triangles / mip generations / copies of the last frame
     pub fn pass_stats(&self) -> Option<String> {
         let s = self.targets.stats;
-        (s[0] > 1).then(|| format!("passes: {} ({} into {} render targets), {} encoders, {} clear draws, {} mip generations, {} copies", s[0], s[1], self.targets.rts.len(), s[2], s[3], s[4], s[5]))
+        let probe = if self.targets.probes.is_empty() { String::new() } else { format!("\n{}", self.probe_report()) };
+        (s[0] > 1 || !probe.is_empty())
+            .then(|| format!("passes: {} ({} into {} render targets), {} encoders, {} clear draws, {} mip generations, {} copies{probe}", s[0], s[1], self.targets.rts.len(), s[2], s[3], s[4], s[5]))
     }
 }

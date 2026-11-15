@@ -193,6 +193,10 @@ jobs:
           bash .github/annotate.sh notice "IBL selftest (exit $rc)" ibl-selftest.txt 25
           rc2=0; ./target/release/fastrender selftest --three js/dist/ibl-bloom.js --upscale bilinear --scale 1 --size 640x400 > ibl-bloom-selftest.txt 2>&1 || rc2=$?
           bash .github/annotate.sh notice "IBL bloom selftest (exit $rc2)" ibl-bloom-selftest.txt 25
+          # render-target probe (src/mac_targets.rs): the boot frame's passes and every target's mean colour
+          FASTRENDER_RT_PROBE=1 ./target/release/fastrender selftest --three js/dist/ibl.js --upscale bilinear --scale 1 --size 640x400 > ibl-probe.txt 2>&1 || true
+          grep "rt probe" ibl-probe.txt > ibl-probe-rt.txt || true
+          bash .github/annotate.sh notice "IBL render-target probe" ibl-probe-rt.txt 180
           grep -q "three-programs selftest: PASS" ibl-selftest.txt
           grep -q "three-programs selftest: PASS" ibl-bloom-selftest.txt
       - name: golden IBL + bloom (render targets; MAE printed, not gating yet)

@@ -135,6 +135,96 @@ edit `material.color` / `uniforms.x.value` without `needsUpdate`, so values are 
 (`docs/notes/three-programs.md`).
 The draw list's material id is the instance id; draw flags are unchanged.
 
+## Render targets and passes (v3)
+
+three's multi-pass features are three's own JS driving the renderer: `PMREMGenerator` (scene.environment), `CubeCamera`,
+`EffectComposer` passes (`FullScreenQuad` = a Mesh + OrthographicCamera), reflections, minimaps. FastRenderer supports
+the surface they use (`setRenderTarget(rt, face, level)`, `render`, `clear` / `clearColor` / `clearDepth`, `autoClear*`,
+`setClearColor` / `setClearAlpha`, `setViewport` / `setScissor` / `setScissorTest`, `getRenderTarget` /
+`getActiveCubeFace` / `getActiveMipmapLevel`, `initRenderTarget`, `copyFramebufferToTexture`, `readRenderTargetPixels`,
+`coordinateSystem`, `xr.enabled`); the passes' programs are three's, through the translator like any other. Nothing is
+re-implemented natively (no native PMREM, bloom, ...).
+
+### RENDER_TARGET (kind 5): `host.upload(5, id, meta)`, no arrays; `host.release(5, id)` on `rt.dispose()`
+
+```js
+{ width, height, depth,            // depth: layers (WebGLArrayRenderTarget) / slices (WebGL3DRenderTarget), else 1
+  cube, dim,                       // WebGLCubeRenderTarget; dim 2 array, 3 3D, 0 2D / cube
+  samples, depthBuffer, stencilBuffer,
+  colors: [ { id, format, type, srgb, levels, magFilter, minFilter, wrap: [s, t], anisotropy, compare } ],  // rt.textures (MRT)
+  depthTexture: { id, format, type, ... } | null }                                                          // rt.depthTexture
+```
+
+Each texture of the target keeps its own **texture id** (the id any other texture would have): a MATERIAL_UNIFORMS
+texture id that is a render target's colour or depth texture binds the native attachment (`rt.texture`, a PMREM cube,
+`rt.depthTexture`). `levels` = `texture.mipmaps.length` (PMREM's prefiltered levels) or the full chain when
+`generateMipmaps` with a mipmap min filter, else 1. Re-uploaded when the size, the attachments or their formats change
+(field-wise check per pass, no allocation). Colour formats natively: RGBA / RG / Red × UnsignedByte (sRGB colour space:
+an sRGB format, as WebGL2's `SRGB8_ALPHA8`) / HalfFloat / Float; depth: Depth32Float (+ Stencil8). A
+`FramebufferTexture` (the `copyFramebufferToTexture` destination) is a TEXTURE upload with `framebuffer: true` and no
+pixel data. MSAA (`samples`) renders single-sampled (counted).
+
+### PASS (op 12) and COPY (op 13)
+
+Every `render()` and every `clear()` writes a PASS; the ops after it (CAMERA, LIGHTS, DRAWS, MATERIAL_UNIFORMS,
+SHADOWS, ...: the v3 ops, unchanged) belong to that pass, up to the next PASS / COPY. A stream without PASS ops (older
+bundles, v2) is one implicit screen pass cleared to its BACKGROUND colour, as before.
+
+| op | payload |
+|---|---|
+| 12 PASS | 24 words: target id (0 = the screen), active cube face / layer, active mipmap level, flags, viewport x y w h (f32), scissor x y w h (f32), clear colour r g b a (f32), drawing-buffer width, height (f32), 6 reserved |
+| 13 COPY | 12 words: texture id, level, destination x y, source target id (0 = the screen), face, level, source x y w h, 1 reserved |
+
+PASS flags: 1 clear colour, 2 clear depth, 4 clear stencil, 8 scissor test, 16 regenerate the mip chain after the pass
+(three's `updateRenderTargetMipmap`: level 0, `generateMipmaps`, a mipmap min filter, `mipmapsAutoUpdate`), 32 a
+`render()` (absent: a `clear()` only).
+
+- **viewport / scissor**: a render target's own (`rt.viewport`, `rt.scissor`, `rt.scissorTest`: PMREM writes mips and
+  r170's CubeUV atlas regions through them), in target pixels with GL's origin (bottom-left); the screen's
+  (`setViewport` etc. × pixel ratio) in drawing-buffer pixels, which the native side scales to its own content size.
+- **clears** are what `WebGLBackground.render` + `clear()` would do: `autoClear` (with `autoClearColor/Depth/Stencil`),
+  forced by a colour `scene.background`; the colour is three's `gl.clearColor` value (`getRGB` in the target's colour
+  space: the output colour space for the screen, the working (linear) one for a render target; premultiplied).
+- **program variants**: three builds a program for a render target without tone mapping and in the working colour
+  space. The material instance's object signature has a render-target bit, so one material drawn into a target and to
+  the screen in the same frame is two instances (two programs, two blocks), never one id switching programs mid-frame.
+
+**Frames.** Passes accumulate over a frame. The JavaScriptCore host zeroes word 0 before every `frame()` call: the next
+pass then starts a fresh stream. Passes written before the first frame (PMREM / `compile()` at load) are kept and run in
+the first frame. A host that never zeroes word 0 (the node test hosts) gets the old behaviour: a `render()` to the
+screen ends the frame, the next pass starts a fresh stream (offscreen passes written before a screen render are part of
+its frame). A `render()` inside a `render()` (three converting an equirect `scene.environment` to PMREM while picking a
+program) writes its passes where the outer pass began; the outer pass stops writing at once and is rendered again
+after them (its programs are cached by then).
+
+**readRenderTargetPixels** is asynchronous in nature here: the GPU work of a frame runs after the frame's JS. A host
+with `readRenderTarget(id, x, y, w, h, buffer, face, textureIndex)` fills the buffer from the last completed frame (one
+frame late); without it (the JavaScriptCore host today) the buffer is left unchanged and the call is counted.
+`readRenderTargetPixelsAsync` resolves with the same buffer.
+
+### Native execution (`src/mac_targets.rs`)
+
+- Every pass gets its own region of the frame slot's ring (`src/ring.rs` layouts back to back) and its own copy of the
+  per-pass state, swapped through `mac_three.rs`'s prepare / encode functions (culling with the pass's camera,
+  FrFrame, FrObjects, shadow maps of that pass, pipelines for the target's formats).
+- Offscreen passes run first, in stream order; then the screen passes, all into the main pass at the content size.
+  Only that main pass goes through the render scale and MetalFX / the upscaler; render targets render at their own size.
+  With MetalFX temporal, the jitter is applied to every screen pass (offscreen scene passes are not jittered, so with
+  EffectComposer the temporal upscaler sees an unjittered image: use spatial / bilinear there).
+- Consecutive passes into the same (target, face, level) share one render encoder (on a TBDR GPU the tile stays on
+  chip). The group's first clear is the load action (Clear; else Load, or Clear to zero the first time an attachment is
+  used, as WebGL zero-initialises targets); later clears, and scissored clears, are a full-screen triangle limited by the
+  scissor rectangle. Colour is always stored. Depth is stored only when read later (a depth texture, or a later pass of
+  the frame that does not clear it), else `DontCare`; a 2D target whose depth nothing samples gets memoryless depth.
+- A render target renders with a y-flipped projection (FrPass flip 0, mirrored winding), as the shadow maps: its rows
+  are stored as WebGL stores them, so three's shaders sample 2D targets and cube faces with their own UVs / directions.
+- Mip chains are regenerated (blit) after a pass that asks for it; COPY is a blit from the source attachment.
+
+Not covered: `copyFramebufferToTexture` from the screen; MSAA targets (single-sampled); feedback within one pass
+(sampling the attachment being rendered); a screen pass that samples a target rendered by a later offscreen pass of
+the same frame (offscreen passes all run before the screen); two shadowed passes in one encoder group (the group is
+split); integer render-target formats; native `readRenderTargetPixels`.
+
 ## Memory ownership
 
 - **Electron host:** JS allocates the buffer and calls `host.attach(buffer)` once (the V8 memory cage forbids native-backed
@@ -147,7 +237,7 @@ See `docs/HOST.md`.
 
 - v2 only: ShaderMaterial and `onBeforeCompile`, SkinnedMesh (bind pose), morph targets (v3 covers all three)
 - Sprites, Points, Lines
-- v3: environment maps / PMREM (`scene.environment`, `material.envMap`: programs are built without them) and the
-  transmission pass
-- render targets / EffectComposer (planned: map known passes to native equivalents)
-- non-colour backgrounds
+- v3: the transmission pass (MeshPhysicalMaterial.transmission); see "Render targets and passes" for what of the
+  render-target surface is not covered
+- v2: render targets and environment maps (v3 only)
+- non-colour backgrounds (texture / cube / equirect `scene.background`)
