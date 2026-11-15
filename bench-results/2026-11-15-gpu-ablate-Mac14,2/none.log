@@ -1,0 +1,30 @@
+fastrender: signed ~/github/fastrender/target/release/fastrender with the allow-jit entitlement (JavaScriptCore's JIT needs it), restarting
+[js] [boot] modules loaded 0s
+[js] [boot] quality applied 0s
+[js] [boot] manifest 0s
+[js] [boot] museum data 0s
+[js] [boot] pbr 0s
+[js] [boot] rebuilt index 0s
+[js] [boot] ready 0s
+[js] [boot] level build start 0s
+[js] [boot] level built 0s
+[js] [boot] programs compiled (0) 0s
+[js] [warn] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: fetch blocked (remote, offline run): https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_48d_partly_cloudy_puresky_1k.hdr
+[js] [boot] first frame (0 programs, 1118 calls, 0 ms) 0.02s
+[js] world-objects: 1539 draws, 249 material instances; unsupported per frame: {"texture source without pixels":108.3,"transmission":0.1}; assets: {"local":118,"missing":0,"remote":33,"bytes":15401598} images {"decoded":101,"failed":0} canvases {"real":0,"stub":106}
+[js] [ablate] none scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11623,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+backend: metal3 (auto: Metal4 family true, MTL4CommandQueue true)
+frame loop: frames in flight 1.04 avg, 2 max (limit 3); slot wait 0.000 ms avg, 0.00 max, 0 of 180 frames > 1 ms; drawable wait 0.000 ms avg, 0.00 max; fence: completion handler; render thread QoS Some(UserInteractive)
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.28, main 12.46, upscale 0.00; frame 13.74
+three frame cost: render() CPU 15.30 ms avg (JS 13.34, native apply 0.477, prepare 0.166, encode 0.617), GPU 13.74 ms avg, 1355 draws, programs: three
+three programs: 86 compiled (Metal 17966 ms total), 74 pipelines (2302 ms), 411 material instances; shadows: 2 maps, 2 passes, 86 casters with three's depth programs, 1529 native depth-only, 0 VSM blurs; ring 1166 KB/frame, 0 refused writes; 229 bind lists (1614 built); graveyard 376 waiting (45138 buried, 44950 freed)
+three compile: blocking (4 workers, built-in shaders: source), 237 libraries in 17966 ms of worker time (82 shared), 122 pipelines in 2302 ms (63 from the binary archive); manifest at launch 85 programs / 73 pipelines, prewarmed 85 / 73; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 135 (16901 ms); first frame +22713 ms, first complete frame +22713 ms, last incomplete frame -, all pipelines ready +25874 ms; frames over 50 ms: 15, longest 1307 ms; archive: 6 pipelines added in 544 ms, 17129 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+
+### fastrender bench: Apple M2
+
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+|---|---:|---:|---:|
+| three forward memoryless scale=1.00 up=bilinear shadow=cached lights=64 cull=gpu props=150000 | 65.0 | 13.74 | 14.97 | JS 13.34 ms/frame |
+
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+(wrote bench-results.json)

@@ -1,0 +1,30 @@
+[js] [boot] modules loaded 0s
+[js] [boot] quality applied 0s
+[js] [boot] manifest 0s
+[js] [boot] museum data 0s
+[js] [boot] pbr 0s
+[js] [boot] rebuilt index 0s
+[js] [boot] ready 0s
+[js] [boot] level build start 0s
+[js] [boot] level built 0s
+[js] [boot] programs compiled (0) 0s
+[js] [warn] HDRI failed kloofendal_48d_partly_cloudy_puresky TypeError: fetch blocked (remote, offline run): https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_48d_partly_cloudy_puresky_1k.hdr
+[js] [boot] first frame (0 programs, 1118 calls, 0 ms) 0.02s
+[js] world-objects: 1539 draws, 249 material instances; unsupported per frame: {"texture source without pixels":108.3,"transmission":0.1}; assets: {"local":118,"missing":0,"remote":33,"bytes":15401598} images {"decoded":101,"failed":0} canvases {"real":0,"stub":106}
+[js] [ablate] nopoint scene: {"lights":{"HemisphereLight":1,"AmbientLight":1,"DirectionalLight":2,"SpotLight":10,"PointLight":17},"zero":28,"transparent":1921,"meshes":14410,"materials":{"ShaderMaterial":23,"MeshStandardMaterial":11623,"MeshBasicMaterial":799,"MeshPhysicalMaterial":2548}}
+backend: metal3 (auto: Metal4 family true, MTL4CommandQueue true)
+frame loop: frames in flight 1.33 avg, 2 max (limit 3); slot wait 0.000 ms avg, 0.00 max, 0 of 180 frames > 1 ms; drawable wait 0.000 ms avg, 0.00 max; fence: completion handler; render thread QoS Some(UserInteractive)
+gpu passes (ms avg over 180 frames, one command buffer per group): targets 0.00, shadow 1.17, main 12.33, upscale 0.00; frame 13.50
+three frame cost: render() CPU 14.50 ms avg (JS 12.65, native apply 0.480, prepare 0.165, encode 0.565), GPU 13.50 ms avg, 1355 draws, programs: three
+three programs: 86 compiled (Metal 213 ms total), 74 pipelines (1813 ms), 411 material instances; shadows: 2 maps, 2 passes, 86 casters with three's depth programs, 1529 native depth-only, 0 VSM blurs; ring 1166 KB/frame, 0 refused writes; 229 bind lists (1614 built); graveyard 564 waiting (45138 buried, 44762 freed)
+three compile: blocking (4 workers, built-in shaders: source), 237 libraries in 213 ms of worker time (172 shared), 122 pipelines in 1813 ms (83 from the binary archive); manifest at launch 139 programs / 122 pipelines, prewarmed 139 / 122; pending_programs 0, pending pipelines 0; skipped draws 0 in 0 of 239 frames; render-thread waits 86 (0 ms); first frame +5610 ms, first complete frame +5610 ms, last incomplete frame -, all pipelines ready +7356 ms; frames over 50 ms: 15, longest 485 ms; archive: 10 pipelines added (24 left out: Failed to generate machO:error: cannot pack '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/C//dev.fastrender.fastrender/com.apple.gpuarchiver/gpuarchiver-ff64e7/applegpu_g14g': cannot write '/var/folders/xm/s1y_v71d6j78dnt_v363520r0000gn/T/com.apple.MTLCompilerService//default-45c517.metallib': expecting 'fragment' stage in pipeline no. '127'
+) in 20691 ms, 68890 KB at ~/Library/Caches/fastrender/pipelines/game-d745e3680dce7432/metal3-apple-m2.binarchive
+
+### fastrender bench: Apple M2
+
+| config | fps (wall clock, offscreen, no vsync) | GPU ms avg* | GPU ms p99* |
+|---|---:|---:|---:|
+| three forward memoryless scale=1.00 up=bilinear shadow=cached lights=64 cull=gpu props=150000 | 68.6 | 13.50 | 15.03 | JS 12.65 ms/frame |
+
+*command-buffer start..end; consecutive frames overlap on Apple GPUs, so compare rows by fps.
+(wrote bench-results.json)
