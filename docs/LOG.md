@@ -37,6 +37,46 @@ For the real game on an Air (which pass dominates):
 `FASTRENDER_ASSETS=../3d-world-objects/public fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 2940x1912 --frames 300 --warmup 60 --gpu-passes 1`
 and the same with `--upscale metalfx --scale 0.5`: if `main` falls by about the pixel ratio the frame is fill-bound
 and the scale is the lever; if `shadow` or `targets` stay put, they are the next thing to cut.
+## 2026-11-15: WP3, compile pipeline: nothing compiles on the render thread, manifest + prewarm, binary archive, metallib
+
+Before: `newLibraryWithSource` twice per program inside `update()` and `newRenderPipelineState` lazily in `prepare`,
+all on the render thread, nothing persisted (perf audit T1/T2, C3-C6). Now:
+
+- **Queue** (`src/pipeline_manifest.rs`, portable, 7 unit tests with a fake backend): `Compiler<B: PipelineBackend>`,
+  a worker pool (cores / 2, 2..4; `QOS_CLASS_USER_INITIATED` via `pthread_set_qos_class_self_np`). Stage libraries
+  are keyed by a hash of the MSL: identical stages across programs compile once, a program's two stages on two
+  workers. `Programs::add` queues, `Programs::pipeline` hands out a slot at once, `pipeline_at` is None until the
+  slot is filled: the encoder skips that draw for the frame (counted). Workers call the synchronous Metal APIs, not
+  the `completionHandler:` ones: the thread's QoS then travels with the request into the compiler service and the
+  parallelism is ours to bound.
+- **Where the render thread still waits** (counted as "render-thread waits"): a pipeline that renders into a render
+  target or a shadow map. Their content may be drawn once (PMREM at load, a shadow map with `autoUpdate` off):
+  a skipped draw there would stay wrong forever. The main pass never waits. Blocking mode waits everywhere: bench,
+  selftest and the Electron golden step use it (`mac_programs::set_blocking_default`, `FASTRENDER_COMPILE=
+  async|blocking`), so every captured frame is complete and the frame sequence is the synchronous one. `settle()`
+  (ThreeScene / Programs) waits for everything demanded and persists; bench calls it before the shot.
+- **Manifest + prewarm**: every (program hash, blend, colour write, stream signature, target) used is recorded in
+  `<cache>/game-<hash of the bundle path>/manifest.json` with the stage MSL next to it (`stages/<hash>.metal`); the
+  Electron host uses `<cache>/default`. The next launch compiles all of it on the workers before the bundle is even
+  read (`mac_programs::prewarm`, from the stored MSL: no JS, no translation). Entries unused for 8 launches age out.
+  `FASTRENDER_PIPELINE_CACHE=<dir>|off`.
+- **Archive behind a trait**: `PipelineBackend { library(msl), pipeline(job) -> (state, from_archive), persist() }`.
+  `mac_programs::Metal3` implements it with `MTLBinaryArchive`: last launch's file is attached to the descriptor
+  (`binaryArchives`) and tried with `MTLPipelineOptionFailOnBinaryArchiveMiss` (a hit is counted); a miss compiles
+  and the descriptor is added to a second archive object at the next persist, serialised over the file
+  (`FASTRENDER_ARCHIVE=0` turns it off). WP M-E implements the same three methods with `MTL4Compiler`,
+  `lookupArchives` and `MTL4PipelineDataSetSerializer` -> `MTL4Archive`; the queue, manifest and `Programs` do not
+  change (`PipelineJob` is plain data: stage libraries, entry points, attributes, key).
+- **Built-in shaders**: `build.rs` runs `xcrun metal -std=metal3.0` + `metallib` on shaders/fastrender.metal and the
+  binary embeds the metallib (`mac_programs::builtin_library`, one library per process instead of two source
+  compiles); without Xcode, on other targets, or when the shader file on disk differs (hot reload), the source is
+  compiled as before.
+- Stats: `three compile:` line after `three programs:` (`pending_programs`, skipped draws, waits, first frame,
+  first complete frame, all pipelines ready, frames over 50 ms); `ThreeScene::pending_programs()`.
+
+Measured on macOS CI (`.github/compile-launch.sh`, seven launches per scene, ms since renderer init):
+
+(pending: the macOS runner queue was hours long when this was pushed; the numbers follow in this entry)
 
 ## 2026-11-15: WP2, encoder hot path: id tables, per-material bind lists, last-bound filter, sort by pipeline
 
