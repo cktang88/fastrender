@@ -62,7 +62,7 @@ export function compileProgram(vertexGlsl, fragmentGlsl) {
         execFileSync('glslangValidator', ['-V', '-R', '--auto-map-locations', '--auto-map-bindings', '-l', 'p.vert', 'p.frag'], { stdio: 'pipe', cwd: dir });
         break;
       } catch (e) {
-        const log = String(e.stdout || '') + String(e.stderr || '');
+        const log = String(e.stdout || '') + String(e.stderr || '') || String(e.message); // ENOENT etc. when the CLI is missing
         // glslang 15's linker rejects a fragment input the vertex stage never writes (three declares e.g. vNormal
         // in the fragment of programs whose vertex does not output it; WebGL accepts that). Declare the missing
         // outputs in the vertex stage (after #version), with the fragment's type, and link again.

@@ -12,6 +12,7 @@ jobs:
       - run: sw_vers; sysctl -n machdep.cpu.brand_string
       - name: unit tests (portable core) + JS tests (real three.js)
         run: |
+          brew install glslang spirv-cross   # CLIs for the JS tests' reference layouts (the app embeds both as libraries)
           cargo test --release
           (cd js && npm ci --silent && npm test)
           node js/build.mjs js/examples/three-city.entry.mjs js/dist/three-city.js
