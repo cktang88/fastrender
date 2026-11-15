@@ -6,8 +6,9 @@ The game's JS and its real three.js scene graph stay as they are; only `WebGLRen
 for the stages and their status, [docs/PROTOCOL.md](docs/PROTOCOL.md) for the JS↔native protocol, and
 [docs/HOST.md](docs/HOST.md) for where the JS runs.
 
-> **Planned last step: move hot game logic to GPU compute.** The frame is CPU-bound: 14–25 ms of JS per frame in the
-> real game (Electron), against about 1–2 ms of native encode. Once everything else is done, profile each game's
+> **Planned last step: move hot game logic to GPU compute.** After the GPU fixes the real game's frame is mostly CPU:
+> about 5 ms of JS per frame in Electron on an M2 Air (10 ms in the JavaScriptCore CLI), against about 1–2 ms of native
+> encode. Once everything else is done, profile each game's
 > per-frame JS and move the loops that profiling shows dominate onto the GPU as compute: crowd and traffic movement,
 > instance-matrix updates, particles, animation. The plan:
 > - Write them as three.js **TSL compute nodes**, so they also run on three's own WebGPURenderer.
@@ -24,6 +25,76 @@ for the stages and their status, [docs/PROTOCOL.md](docs/PROTOCOL.md) for the JS
 > M2-applicable items from the same inspection (PC1–PC7), including **MetalFX frame interpolation**, are queued
 > normally.
 
+## Results: the real game on a MacBook Air M2
+
+[cktang88/3d-world-objects](https://github.com/cktang88/3d-world-objects) (a Manhattan city, ~24k objects, 469
+materials) in the Electron app, vsync off, at code `9fb9e86`
+([bench-results/2026-11-15-m2-air-world-native-at-9fb9e86](bench-results/2026-11-15-m2-air-world-native-at-9fb9e86/README.md)):
+
+| | WebGL (three's WebGLRenderer) | fastrender | fastrender, same morning (`e0fc63d`) |
+|---|--:|--:|--:|
+| 1280x800 | 7.6 fps (GPU 158 ms) | **110 fps** (frame 7.5 ms, JS 5.0, GPU 8.3) | 17.6 fps |
+| 2560x1600 (about native) | 3.0 fps (GPU 443 ms) | **109 fps** (frame 8.4 ms, JS 5.2, GPU 9.1) | – |
+
+Same picture: screenshot MAE vs WebGL 11.7, the same before and after the fixes (mostly people and cars in motion and
+a slight even brightness offset); CI's golden for this game is 3.01 in Electron and 6.58 in the CLI, gate < 10.
+The day's fixes and their measured effect on the Air are in
+[docs/notes/gpu-cost.md](docs/notes/gpu-cost.md) and the playbook in
+[.claude/skills/three-game-perf](.claude/skills/three-game-perf/SKILL.md).
+
+### What fastrender is, and isn't
+It is a Metal-native runtime for existing **WebGL-era three.js games**: the game keeps its code and its GLSL
+(`onBeforeCompile` hooks, `ShaderMaterial`), and three's own GLSL is translated to MSL. That is the difference from
+three's WebGPURenderer, which builds shaders from TSL nodes and so cannot run GLSL: in this game it drops the 10
+ShaderMaterials and draws the 385 `onBeforeCompile` materials unpatched (screenshot MAE ~107 vs WebGL: grey sky,
+shirtless people, different glass). An equivalent WebGPU picture needs those shaders ported to TSL (est. 3-5
+engineer-weeks), which would also be a different game. Where WebGPU is comparable (the synthetic city, built-in
+materials only) fastrender's GPU time is about half of WebGPU's on the Air (1.9 vs 4.8 ms) with ~0.1 ms of JS.
+
+What you give up against WebGPU: Mac / Apple Silicon only (WebGPU runs in browsers everywhere); a native host
+(Electron + addon, or the lean JavaScriptCore app) instead of a web page; only the three features implemented here
+(missing today: transmission, `copyTextureToTexture`); and tracking three's WebGL path as three moves to WebGPU/TSL.
+
+### Where the speed comes from
+Game patches ([patches/](patches/README.md)) are applied to the one game copy every bench variant runs, so they are not
+what separates fastrender from WebGL: 0004 (far LODs) and 0005 (static subtrees frozen) run under WebGL too (its JS
+went ~18 -> 15.8 ms, its GPU stayed ~158 ms); 0003 / 0006 are hints only fastrender reads. The big levers are
+renderer-side:
+- **Dark lights dropped from three's light state (`trimLights`)**: the game pads its light list with 27 intensity-0
+  point/spot lights; three evaluates every one for every lit pixel. Exact (same picture). Main pass 41 -> 7.7 ms at
+  1280x800, 114 -> 9.9 ms at 2560x1600. *Generic*: any three renderer can get it by hiding those lights.
+- **Per-instance culling of instanced draws** (runs of instances in view, base instance): ~2 ms. Needs the native
+  side (three's WebGL2 path has no base-instance draw).
+- **Discard draws last, nearest first**; **async shader compile + binary archive** (launch compile 6.8 s -> 360 ms on
+  the Air); a slimmer per-frame JS path and native encode on a render thread.
+- The Metal backend itself: the city scene, which has none of the above problems, is ~2x WebGL / WebGPU on the GPU.
+
+A bench ladder that measures this split in one run (WebGL, WebGL + dark lights hidden, fastrender with those
+renderer tricks off, fastrender) is being added to `host/electron/scripts/bench-3way.sh`.
+
+### Apple GPU features: used, and whether they help
+| Feature | Status | Helps this game? |
+|---|---|---|
+| Unified memory: per-frame data written straight into GPU-visible buffers | used | yes (native frame work ~1-2 ms); not measured alone |
+| Memoryless (on-chip) depth | used | saves bandwidth; not measured alone |
+| Binary pipeline archive + manifest prewarm | used | yes for launch / hitches (6.8 s -> 360 ms compile), not for fps |
+| Async compile on worker threads | used | yes for hitches |
+| MetalFX spatial / temporal upscaling | used (`--scale 0.5 --upscale metalfx`, key `7`) | not now: 8.4 -> 7.6 ms at 2560x1600, the frame is no longer fill-bound; for heavier scenes |
+| GPU timestamps per pass | used | measurement only (found the dark-light cost) |
+| Game Mode keys, render-thread QoS | used | small (jitter) |
+| Metal 4 command path | written, unexecuted, paused | little (~0.3 ms CPU) |
+| MetalFX frame interpolation | not wired | not at 110 fps; for games under their target fps |
+| Cluster LOD + GPU culling (static meshes) | in progress, off by default | small: ~0.8 ms main at 2560x1600 |
+| Compressed textures (ASTC) | not used | memory/loading (the app uses ~3.4 GB), not fps |
+| Half-precision shading | `--half`, off | probably little now; never measured on hardware |
+| Rasterization-rate maps, mesh/tile shaders | not used | little: per-pixel cost is no longer the limit |
+| Hardware ray tracing, denoised upscaler | M3+ only | on hold (optional M3+ tier) |
+
+Where the remaining ~8 ms goes: ~5 ms of game JS, the render thread and Electron, and per-draw / per-vertex work
+(~2,000 draws). The next levers are fewer draws (batching), less JS per frame (the GPU-compute step above, or the
+lean JavaScriptCore host), not more Apple features. At 110 fps the remaining win on an Air is power: capped at 60 fps
+it idles most of the frame (`bench-3way.sh --power` measures it).
+
 ```bash
 (cd js && npm ci) && node js/build.mjs js/examples/three-city.entry.mjs js/dist/three-city.js
 cargo run --release -- run --three js/dist/three-city.js      # a real three.js city, rendered natively
@@ -35,7 +106,8 @@ the estimates and the review that challenged them are in [docs/FPS_ESTIMATES.md]
 
 Rust + `objc2-metal` (no wgpu: wgpu hides tile memory and MetalFX), MSL shaders compiled at
 runtime (edit `shaders/fastrender.metal` while it runs and it hot-reloads). It uses the Metal 3 API
-today; Metal 4 command buffers and MetalFX temporal and frame interpolation are next.
+by default; a Metal 4 backend sits behind the same seam (`--backend metal4`, unexecuted, paused because it saves only
+~0.3 ms of CPU). MetalFX spatial and temporal upscaling are in; frame interpolation is not wired yet.
 
 Three scenes (`--scene`):
 - `city` (default): procedural Manhattan grid of instanced boxes, GPU-culled into one indirect draw.
