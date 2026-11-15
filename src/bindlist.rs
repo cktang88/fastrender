@@ -721,6 +721,72 @@ pub fn discard_key(render_order: i32, dist2: f32) -> (i32, u64, u32) {
     (render_order, 1 << 63 | (dist2.max(0.0).to_bits() as u64) << 31, 0)
 }
 
+/// Bounding sphere of every instance of an InstancedMesh in the object's space: `mats` holds three's
+/// `instanceMatrix` (column-major 4x4 per instance), `sphere` the geometry's bounding sphere (centre, radius). The
+/// radius is scaled by the longest column of the instance's 3x3 (exact for rotation + uniform scale, an upper bound
+/// otherwise): the bound three's own `InstancedMesh.computeBoundingSphere` unions.
+pub fn instance_spheres(mats: &[f32], sphere: [f32; 4]) -> Vec<[f32; 4]> {
+    mats.chunks_exact(16)
+        .map(|m| {
+            let c = [
+                m[0] * sphere[0] + m[4] * sphere[1] + m[8] * sphere[2] + m[12],
+                m[1] * sphere[0] + m[5] * sphere[1] + m[9] * sphere[2] + m[13],
+                m[2] * sphere[0] + m[6] * sphere[1] + m[10] * sphere[2] + m[14],
+            ];
+            let len = |k: usize| (m[k] * m[k] + m[k + 1] * m[k + 1] + m[k + 2] * m[k + 2]).sqrt();
+            [c[0], c[1], c[2], sphere[3] * len(0).max(len(4)).max(len(8))]
+        })
+        .collect()
+}
+
+/// World-space frustum planes (`dot(n, p) + d >= 0` inside) taken into the space of an object whose matrixWorld has
+/// the 3x4 `rows`, and the factor an object-space radius grows by in world space (the longest column of the 3x3).
+pub fn planes_to_object(planes: &[glam::Vec4; 6], rows: &[[f32; 4]; 3]) -> ([glam::Vec4; 6], f32) {
+    let col = |k: usize| glam::Vec3::new(rows[0][k], rows[1][k], rows[2][k]);
+    let (c0, c1, c2, t) = (col(0), col(1), col(2), col(3));
+    let out = planes.map(|p| {
+        let n = p.truncate();
+        glam::Vec4::new(n.dot(c0), n.dot(c1), n.dot(c2), n.dot(t) + p.w)
+    });
+    (out, c0.length().max(c1.length()).max(c2.length()))
+}
+
+/// The instances of one instanced draw that can be on screen, as runs `(first instance, count)` in instance order:
+/// an instance is in when its sphere touches the frustum (`planes`: object space, their normals unit length in WORLD
+/// space; `scale`: both from `planes_to_object`). Runs separated by at most `gap` culled instances are merged (a draw
+/// call costs more than a few off-screen instances); `max_runs` halves the list by doubling the gap until it fits.
+/// Games lay instances out block by block, so the visible ones come in few runs (3d-world-objects, street view: 268
+/// instanced draws, 180k instances, 43k in view, 791 runs at gap 8).
+pub fn instance_runs(spheres: &[[f32; 4]], planes: &[glam::Vec4; 6], scale: f32, gap: usize, max_runs: usize, out: &mut Vec<(u32, u32)>) {
+    out.clear();
+    let mut gap = gap;
+    loop {
+        let mut run: Option<(usize, usize)> = None; // (first, one past the last visible)
+        for (k, s) in spheres.iter().enumerate() {
+            let r = -s[3] * scale;
+            if !planes.iter().all(|p| p.x * s[0] + p.y * s[1] + p.z * s[2] + p.w >= r) {
+                continue;
+            }
+            run = match run {
+                Some((first, end)) if k - end <= gap => Some((first, k + 1)),
+                Some((first, end)) => {
+                    out.push((first as u32, (end - first) as u32));
+                    Some((k, k + 1))
+                }
+                None => Some((k, k + 1)),
+            };
+        }
+        if let Some((first, end)) = run {
+            out.push((first as u32, (end - first) as u32));
+        }
+        if out.len() <= max_runs.max(1) {
+            return;
+        }
+        out.clear();
+        gap = (gap * 2).max(1);
+    }
+}
+
 /// What one prepared v3 pass draws (the last pass prepared: the screen pass of a frame).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PassCounts {
@@ -732,17 +798,72 @@ pub struct PassCounts {
     /// shadow passes (a 2D map, or one face of a cube) rendered this frame, and the caster draws in them
     pub shadow_passes: u32,
     pub shadow_draws: u32,
+    /// instanced draws whose instances were tested against the frustum: their instances, the ones drawn, the runs
+    /// they are drawn in, and the draws with no instance in view
+    pub instances: u32,
+    pub instances_drawn: u32,
+    pub instance_runs: u32,
+    pub instanced_culled: u32,
 }
 impl PassCounts {
     /// "main 1338 opaque + 89 discard + 44 transparent; shadow 1 passes, 232 draws"
     pub fn line(&self) -> String {
-        format!("main {} opaque + {} discard + {} transparent; shadow {} passes, {} draws", self.opaque, self.discard, self.transparent, self.shadow_passes, self.shadow_draws)
+        format!(
+            "main {} opaque + {} discard + {} transparent; shadow {} passes, {} draws; instances {} of {} drawn in {} runs ({} instanced draws out of view)",
+            self.opaque, self.discard, self.transparent, self.shadow_passes, self.shadow_draws, self.instances_drawn, self.instances, self.instance_runs, self.instanced_culled
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instance_runs_keep_every_instance_that_touches_the_frustum() {
+        use glam::{Mat4, Vec3, Vec4};
+        // a box frustum: |x| <= 10, |y| <= 10, 0 <= z <= 100 (world), unit normals pointing in
+        let planes = [Vec4::new(1.0, 0.0, 0.0, 10.0), Vec4::new(-1.0, 0.0, 0.0, 10.0), Vec4::new(0.0, 1.0, 0.0, 10.0), Vec4::new(0.0, -1.0, 0.0, 10.0), Vec4::new(0.0, 0.0, 1.0, 0.0), Vec4::new(0.0, 0.0, -1.0, 100.0)];
+        // instances along x every 2 units from -40 to 40, geometry sphere radius 0.5 off-centre, instance scale 2
+        let mut mats = Vec::new();
+        for k in 0..41 {
+            mats.extend_from_slice(&(Mat4::from_translation(Vec3::new(-40.0 + 2.0 * k as f32, 0.0, 50.0)) * Mat4::from_scale(Vec3::splat(2.0))).to_cols_array());
+        }
+        let spheres = instance_spheres(&mats, [0.25, 0.0, 0.0, 0.5]);
+        assert_eq!(spheres[0], [-39.5, 0.0, 50.0, 1.0]);
+        // the object itself is moved by +4 in x and scaled by 1 (rows = 3x4 of its matrixWorld)
+        let rows = [[1.0, 0.0, 0.0, 4.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+        let (pl, scale) = planes_to_object(&planes, &rows);
+        assert_eq!(scale, 1.0);
+        let mut runs = Vec::new();
+        instance_runs(&spheres, &pl, scale, 0, 64, &mut runs);
+        // world centre x = -39.5 + 2k + 4, radius 1: in when |x| <= 11 -> k = 13 ..= 23
+        assert_eq!(runs, [(13, 11)]);
+        // brute force agrees on every instance
+        for (k, s) in spheres.iter().enumerate() {
+            let x = s[0] + 4.0;
+            assert_eq!(x.abs() <= 10.0 + s[3], runs.iter().any(|r| (r.0 as usize..(r.0 + r.1) as usize).contains(&k)), "instance {k}");
+        }
+        // two islands: gap merging joins them when the hole is small enough, never drops an instance
+        let mut holes = spheres.clone();
+        for s in &mut holes[16..19] {
+            s[1] = 500.0;
+        }
+        instance_runs(&holes, &pl, scale, 0, 64, &mut runs);
+        assert_eq!(runs, [(13, 3), (19, 5)]);
+        instance_runs(&holes, &pl, scale, 3, 64, &mut runs);
+        assert_eq!(runs, [(13, 11)]);
+        instance_runs(&holes, &pl, scale, 0, 1, &mut runs);
+        assert_eq!(runs, [(13, 11)], "max_runs widens the gap");
+        // an object scaled by 3: the radius grows with it
+        let rows3 = [[3.0, 0.0, 0.0, 0.0], [0.0, 3.0, 0.0, 0.0], [0.0, 0.0, 3.0, 0.0]];
+        let (pl3, s3) = planes_to_object(&planes, &rows3);
+        instance_runs(&spheres, &pl3, s3, 0, 64, &mut runs);
+        let brute: Vec<usize> = spheres.iter().enumerate().filter(|(_, s)| (3.0 * s[0]).abs() <= 10.0 + 3.0 * s[3] && 3.0 * s[2] <= 100.0 + 3.0 * s[3]).map(|(k, _)| k).collect();
+        assert_eq!(runs.iter().flat_map(|r| r.0 as usize..(r.0 + r.1) as usize).collect::<Vec<_>>(), brute);
+        instance_runs(&[], &pl, scale, 8, 64, &mut runs);
+        assert!(runs.is_empty());
+    }
 
     #[test]
     fn discarding_draws_sort_after_the_others_nearest_first() {

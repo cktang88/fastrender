@@ -79,6 +79,10 @@ pub struct Prog {
     /// such draws defeat hidden-surface removal for what is under them, so the main pass draws them after the
     /// opaque draws that cannot (docs/notes/gpu-cost.md)
     pub discard: bool,
+    /// the vertex stage reads the instance index (gl_InstanceID: instanced morph targets, a game's own lookups).
+    /// SPIRV-Cross gives it GL's meaning (counted from the draw's first instance), so such a draw is never split
+    /// into instance runs
+    pub instance_id: bool,
 }
 
 /// How each program attribute is fed for a draw, 4 bits per attribute (in `Prog::attrs` order):
@@ -601,9 +605,10 @@ impl Programs {
             attrs.iter().map(|a| Attr { location: a.location, comps: a.comps, cols: a.cols }).collect(),
         );
         let discard = p.fragment_msl.contains("discard_fragment");
+        let instance_id = p.vertex_msl.contains("gl_InstanceI") || p.fragment_msl.contains("gl_InstanceI");
         let hash = self.compiler.add_program(info, Arc::from(p.vertex_msl), Arc::from(p.fragment_msl));
         self.waiting_progs.entry(hash).or_default().push(name);
-        self.progs.insert(id, Prog { key, layout: p.layout, attrs, hash, discard });
+        self.progs.insert(id, Prog { key, layout: p.layout, attrs, hash, discard, instance_id });
         if self.blocking {
             let t = Instant::now();
             self.compiler.wait_program(hash);

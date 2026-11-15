@@ -395,7 +395,7 @@ impl ThreeScene {
                 return Err("short instance matrices".into());
             }
             let cols = if m.count == 0 { buffer_with(dev, &[0.0f32; 16]) } else { buffer_with(dev, &data[..m.count * 16]) };
-            if let Some(old) = self.insts.insert(id, Inst { rows: cols.clone(), cols, colors }) {
+            if let Some(old) = self.insts.insert(id, Inst { rows: cols.clone(), cols, colors, count: m.count, cull: None }) {
                 old.bury(&mut self.dead);
             }
             return Ok(());
@@ -413,7 +413,7 @@ impl ThreeScene {
         if cols.is_empty() {
             cols.extend_from_slice(&[0.0; 16]);
         }
-        if let Some(old) = self.insts.insert(id, Inst { rows: buffer_with(dev, &rows[..m.count * 12]), cols: buffer_with(dev, &cols), colors }) {
+        if let Some(old) = self.insts.insert(id, Inst { rows: buffer_with(dev, &rows[..m.count * 12]), cols: buffer_with(dev, &cols), colors, count: m.count, cull: None }) {
             old.bury(&mut self.dead);
         }
         Ok(())

@@ -127,6 +127,8 @@ struct Draw3 {
     /// RASTER_*: WebGLState.setMaterial's cull mode / front face (with the mirrored-transform and render-target
     /// flips applied) and wireframe
     raster: u8,
+    /// an instanced draw split by the frustum: (first instance, count); count 0: the draw's own instance range
+    run: (u32, u32),
 }
 
 /// matches `ThreeObj` in the shader
@@ -189,6 +191,11 @@ struct Inst {
     /// v3: the same matrices as 4 float4 columns per instance (three's `instanceMatrix` attribute)
     cols: Buffer,
     colors: Option<Buffer>,
+    /// instances in `cols`
+    count: usize,
+    /// per-instance bounding spheres in the object's space for the geometry (id, sphere) they were last drawn with
+    /// (`bindlist::instance_spheres`; built on first use, gone with the upload that replaces these matrices)
+    cull: Option<(u32, [f32; 4], Vec<[f32; 4]>)>,
 }
 
 impl Inst {
@@ -278,6 +285,7 @@ pub struct ThreeScene {
     /// distance², record)
     scratch_opaque: Vec<((i32, u64, u32), u32, Draw3)>,
     scratch_transparent: Vec<(i32, f32, Draw3)>,
+    scratch_runs: Vec<(u32, u32)>,
     /// ring regions this frame (src/ring.rs): uniform blocks, main-pass FrFrame and FrPass, the shadow passes' area
     /// (FrFrame/FrPass per pass, VSM blocks), the main pass's FrObjects, the shadow passes' FrObjects (one per draw,
     /// identity view); `layout_slot`: the slot whose ring holds this layout's uniform blocks
@@ -305,7 +313,8 @@ pub struct ThreeScene {
     /// FASTRENDER_V3_DEBUG bits (bisecting on CI): 1 shadow slots bind the lit texture, 2 no v3 shadow pass,
     /// 4 no instanced draws, 8 no transparent draws, 16 neutral textures only, 32 Lambert only, 64 no textures bound,
     /// 512 discarding opaque draws stay in state order (not after the others, front to back), 1024 no discarding
-    /// opaque draws (512 / 1024 / 8: GPU cost attribution, host/electron/scripts/gpu-ablate.sh)
+    /// opaque draws, 2048 instanced draws are not split by the frustum (512 / 1024 / 2048 / 8 / 4: GPU cost
+    /// attribution, scripts/gpu-ablate.sh)
     dbg: u32,
     /// FASTRENDER_V3_MAX_DRAWS: draw only the first n v3 draws of the main pass (bisecting)
     max_draws: usize,
@@ -329,6 +338,13 @@ pub struct ThreeScene {
     /// textures uploaded this frame whose mip chains the frame must generate before it samples them
     mip_queue: Vec<Texture>,
 }
+
+/// Instanced draws with fewer instances are drawn whole (the per-instance test would cost more than it saves).
+const INSTANCE_CULL_MIN: u32 = 8;
+/// Runs of visible instances separated by at most this many culled ones are one draw.
+const INSTANCE_RUN_GAP: usize = 8;
+/// At most this many draws per instanced draw (the gap doubles until the runs fit).
+const INSTANCE_MAX_RUNS: usize = 64;
 
 fn pipes(dev: &Device, src: &str) -> Result<Pipes, String> {
     // the precompiled metallib, or the library the renderer compiled from this source a moment ago
@@ -466,6 +482,7 @@ impl ThreeScene {
             shadow_sig: 1,
             scratch_opaque: Vec::new(),
             scratch_transparent: Vec::new(),
+            scratch_runs: Vec::new(),
             layout: RingLayout::default(),
             layout_slot: 0,
             shadow_ty: three::shadow_type::PCF,
@@ -758,6 +775,7 @@ impl ThreeScene {
         opaque.clear();
         transparent.clear();
         let mut counts = bindlist::PassCounts::default();
+        let mut runs = std::mem::take(&mut self.scratch_runs);
         for i in 0..self.draws.len() {
             let d = self.draws[i];
             if d.count == 0 {
@@ -778,6 +796,34 @@ impl ThreeScene {
                     continue;
                 }
             }
+            // An InstancedMesh three would frustum-cull as a whole (frustumCulled, so its vertex stage stays inside
+            // instanceMatrix x the geometry's bounds: the assumption three's own test makes): only the instances that
+            // can be on screen are drawn, as runs of consecutive instances (base instance + count; the buffers stay
+            // as they are). Off-screen instances cost vertex shading and tiling of every triangle otherwise.
+            runs.clear();
+            let mut split = false;
+            let reads_instance_id = self.mats3.get(&d.material).and_then(|m| self.progs.progs.get(&m.meta.program)).is_some_and(|p| p.instance_id);
+            if d.flags & (flag::INSTANCED | flag::NO_CULL | flag::BATCH) == flag::INSTANCED && d.instance_count >= INSTANCE_CULL_MIN && !reads_instance_id && self.dbg & 2048 == 0 {
+                if let Some(inst) = self.insts.get_mut(&d.instances) {
+                    let n = (d.instance_count as usize).min(inst.count).min(g.inst_cap.unwrap_or(usize::MAX));
+                    if !matches!(&inst.cull, Some((geo, sphere, _)) if *geo == d.geometry && *sphere == s) {
+                        // SAFETY: `cols` is a shared-storage buffer of `count` column-major 4x4 float matrices (upload_instances)
+                        let mats = unsafe { std::slice::from_raw_parts(inst.cols.contents().as_ptr() as *const f32, inst.count * 16) };
+                        inst.cull = Some((d.geometry, s, bindlist::instance_spheres(mats, s)));
+                    }
+                    let spheres = &inst.cull.as_ref().expect("built above").2;
+                    let (object_planes, scale) = bindlist::planes_to_object(planes, r);
+                    bindlist::instance_runs(&spheres[..n.min(spheres.len())], &object_planes, scale, INSTANCE_RUN_GAP, INSTANCE_MAX_RUNS, &mut runs);
+                    counts.instances += n as u32;
+                    if runs.is_empty() {
+                        counts.instanced_culled += 1;
+                        continue;
+                    }
+                    counts.instances_drawn += runs.iter().map(|r| r.1).sum::<u32>();
+                    counts.instance_runs += runs.len() as u32;
+                    split = true;
+                }
+            }
             let Some(m) = self.mats3.get(&d.material) else { continue };
             // three: the transparent list is material.transparent
             let is_transparent = m.meta.transparent;
@@ -792,14 +838,20 @@ impl ThreeScene {
             let prog_id = m.meta.program;
             let Some((pipe, plan)) = self.instance_pipeline(dev, d.material, &d, target) else { continue };
             let discards = self.progs.progs.get(&prog_id).is_some_and(|p| p.discard);
-            let rec = Draw3 { i: i as u32, obj: 0, block: block as u32, tex: tex as u32, bind: u32::MAX, pipe, depth, bias, plan, raster };
+            let rec = Draw3 { i: i as u32, obj: 0, block: block as u32, tex: tex as u32, bind: u32::MAX, pipe, depth, bias, plan, raster, run: (0, 0) };
             // three's painterSortStable / reversePainterSortStable: renderOrder first, then state for opaque draws
             // (pipeline, material instance, geometry: consecutive draws share what is bound), back to front for
             // transparent ones; renderer.sortObjects = false keeps the draw order
             let unsorted = d.flags & flag::UNSORTED != 0;
+            if !split {
+                runs.push((0, 0));
+            }
             if is_transparent {
                 counts.transparent += 1;
-                transparent.push(if unsorted { (0, 0.0, rec) } else { (d.render_order, c.distance_squared(cam), rec) });
+                for &run in &runs {
+                    let rec = Draw3 { run, ..rec };
+                    transparent.push(if unsorted { (0, 0.0, rec) } else { (d.render_order, c.distance_squared(cam), rec) });
+                }
             } else {
                 if discards {
                     if self.dbg & 1024 != 0 {
@@ -819,9 +871,12 @@ impl ThreeScene {
                 } else {
                     bindlist::opaque_key(d.render_order, pipe, d.material, d.geometry)
                 };
-                opaque.push((key, i as u32, rec));
+                for &run in &runs {
+                    opaque.push((key, i as u32, Draw3 { run, ..rec }));
+                }
             }
         }
+        self.scratch_runs = runs;
         // equal keys keep the draw order, as three's sort ends with the object id
         opaque.sort_unstable_by_key(|o| (o.0, o.1));
         transparent.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)));
@@ -831,13 +886,18 @@ impl ThreeScene {
         let cp = self.view.cam_pos;
         w.put(self.layout.frame, FrFrame { projection: projection.to_cols_array(), view: view.to_cols_array(), camera_position: [cp.x, cp.y, cp.z, 0.0] });
         let mut objs = Bump::new(self.layout.objects, self.layout.shadow_objects);
+        // (draw index, its FrObject): the runs of one instanced draw are consecutive and share the record
+        let mut last = (u32::MAX, 0);
         for rec in opaque.iter().map(|o| &o.2).chain(transparent.iter().map(|t| &t.2)) {
-            // one FrObject per draw: the region holds them all (RingLayout), so neither check fails unless the sizing is wrong
-            let Some(obj) = objs.take(std::mem::size_of::<FrObject>()) else { break };
-            if !w.put(obj, fr_object(&view, &self.draws[rec.i as usize].rows)) {
-                break;
+            if rec.i != last.0 {
+                // one FrObject per draw: the region holds them all (RingLayout), so neither check fails unless the sizing is wrong
+                let Some(obj) = objs.take(std::mem::size_of::<FrObject>()) else { break };
+                if !w.put(obj, fr_object(&view, &self.draws[rec.i as usize].rows)) {
+                    break;
+                }
+                last = (rec.i, obj as u32);
             }
-            self.vis3.push(Draw3 { obj: obj as u32, ..*rec });
+            self.vis3.push(Draw3 { obj: last.1, ..*rec });
         }
         self.scratch_opaque = opaque;
         self.scratch_transparent = transparent;
@@ -981,7 +1041,7 @@ impl ThreeScene {
             enc.vertex_buffer_offset(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
             enc.fragment_buffer_offset(v.obj as usize, xlat::OBJECT_BLOCK_BUFFER as usize);
             self.bind_program_draw(enc, &mut st, d, g, v.plan, v.block as usize, v.bind);
-            self.draw(enc, d, g);
+            self.draw_run(enc, d, g, v.run);
             drawn += 1;
         }
         if last_bias != (0.0, 0.0) {

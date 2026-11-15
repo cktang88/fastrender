@@ -240,7 +240,12 @@ impl ThreeScene {
         enc.vertex_buffer(inst.and_then(|i| i.colors.as_ref()).unwrap_or(&self.dummy), 0, 7);
     }
 
-    pub(super) fn draw<P: RenderPass>(&self, enc: &mut P, d: &Draw, g: &Geo) {
+    pub(super) fn draw<P: RenderPass>(&self, enc: &mut P, d: &Draw, g: &Geo) { self.draw_run(enc, d, g, (0, 0)) }
+
+    /// `run`: (first instance, count) of an instanced draw split by the frustum (prepare_one_v3); count 0: all of it.
+    /// The first instance is the draw's base instance: per-instance streams step from it and `gl_InstanceID` keeps
+    /// the instance's index (Metal's instance id includes the base instance).
+    pub(super) fn draw_run<P: RenderPass>(&self, enc: &mut P, d: &Draw, g: &Geo, run: (u32, u32)) {
         let n = if d.flags & flag::INSTANCED != 0 { self.insts.get(&d.instances).map(|_| d.instance_count as usize).unwrap_or(0) } else { 1 };
         // per-instance attribute streams hold this many instances: never step past them (a short stream would read
         // past its buffer)
@@ -250,7 +255,17 @@ impl ThreeScene {
         }
         let prim = Self::primitive(d.flags);
         // a BatchedMesh entry: three's gl_DrawID is the base instance (no per-instance streams are bound)
-        let (n, base) = if d.flags & flag::BATCH != 0 { (1, d.instances as usize) } else { (n, 0) };
+        let (n, base) = if d.flags & flag::BATCH != 0 {
+            (1, d.instances as usize)
+        } else if run.1 != 0 {
+            let first = (run.0 as usize).min(n);
+            ((run.1 as usize).min(n - first), first)
+        } else {
+            (n, 0)
+        };
+        if n == 0 {
+            return;
+        }
         match &g.index {
             Some((ib, ty)) => {
                 let stride = if *ty == MTLIndexType::UInt16 { 2 } else { 4 };
