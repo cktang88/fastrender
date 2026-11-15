@@ -2,6 +2,41 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: Electron 45 host spike on macOS 26 CI: the Metal view under the web contents works
+
+`host/electron`: an Electron 45.3.2 app with a napi-rs 3 addon. CI run 43685791852.
+
+- **Subview stacking passes every check** (default mode: a `CAMetalLayer` view inserted below Chromium's views):
+  - Metal clear colour visible through the transparent page
+  - HTML panel composited on top
+  - draw markers visible
+  - a synthetic click reaches the DOM button
+  - the drawable follows a window resize
+- **Process split.** `getNativeWindowHandle()` only works in the main process, so the main process owns the view and
+  a Metal render thread. The game (real three r187 + `FastRenderer`) runs in the renderer process and publishes each
+  frame into a shared-memory mailbox.
+- **Per-call cost**, renderer to native, means:
+
+  | Call | µs |
+  |---|---:|
+  | no-op napi call | 0.65–1.24 |
+  | `present()` 1 KB | ~1 |
+  | `present()` 100 KB | **~4** |
+  | `ipcRenderer.send` 100 KB (comparison) | 65–76 |
+
+- **Render thread:** 0.65 ms per frame.
+- **Child-window fallback:** fails on resize (expected). Not needed, because subview stacking works.
+- **Next:** a real resource channel for geometry and texture uploads, and the full fastrender renderer behind the
+  addon.
+
+## 2026-11-15: MetalFX temporal merged; CI exercises the fallback only
+
+- **Fallback:** the paravirtual GPU has no temporal scaler. Matrix rows M/N log "falling back to MetalFX spatial" and
+  run spatial.
+- **Motion-vector check:** the depth-reprojection compute pass runs in the selftest and matches the Rust copy of the
+  formula.
+- **Still needs a real Air:** quality, jitter sign (`FASTRENDER_MFX_JITTER_SIGN=-1` flips it) and the M/N numbers.
+
 ## 2026-11-15: golden image, native vs browser three.js (r187): MAE 30.0 → 6.5 → 2.2
 
 Same scene, time and size; MAE is on a 0–255 scale, "off" means more than 24/255.
