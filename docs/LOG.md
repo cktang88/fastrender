@@ -2,6 +2,34 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-15: review 3 (independent reviewer) of the translator, three-programs, MetalFX temporal and Electron work
+
+Nothing crashes as merged. The findings that matter are interface problems that the native binding of three's
+programs would hit:
+
+| Severity | Finding | Fix (owner) |
+|---|---|---|
+| Critical | **Jitter.** The projection matrix is packed in JS before this frame's jitter exists, and no host supplies it. | Move the camera uniforms into a native `FrFrame` block at buffer(3), jittered per pass (integration) |
+| Critical | **Layout too thin.** It lacks texture dimension, depth-compare and attribute types, so the binder can't choose dummy textures, compare samplers or vertex formats. | Add them from SPIR-V reflection (integration) |
+| Critical | **Y-down.** Metal's `dFdy` sign flips three's flat-shading and tangent-less normal maps; GL-convention shadow lookups come out flipped. | Render GL-oriented and flip once at present (integration) |
+| High | **Missed textual matches.** Object uniforms with a trailing comment, or declared with commas, become silent zeros. | Strip comments and split declarations in both normalizers (integration) |
+| High | **Electron: resources vs frames.** Frames can be dropped but resource messages can't. | Ordered resource queue plus a per-frame resource sequence (Electron fixes) |
+| High | **Electron: render thread.** No autorelease pool on it. | Wrap each loop iteration in a pool (Electron fixes) |
+| High | **Electron: seqlock spin.** The reader can spin forever if the renderer dies. | Bound the spin and recover (Electron fixes) |
+| Medium | Jitter sign unsettled (Godot flips y) | Real-Mac check |
+| Medium | Camera-cut threshold is absolute | Make it relative |
+| Medium | Per-frame JS garbage | Remove |
+| Medium | Raw pointer into the JS buffer | Hold a napi reference |
+| Medium | Renderer security (`nodeIntegration`) | Load the addon from a preload |
+| Medium | Hand-maintained translator version | Check it against `Cargo.lock` in a test |
+| Medium | `onBeforeRender` never called | Call three's hooks |
+| Medium | Samplers numbered program-wide (16-per-stage limit) | Number per stage |
+| Medium | Long program keys | Send a short id |
+| Medium | Synchronous first compile hitches | Precompile at load |
+
+Checked and sound: std140/MSL offsets (recomputed from the emitted MSL for every fixture), the uniform packer paths,
+the cache key and its atomic write, and the depth-store bandwidth accounting.
+
 ## 2026-11-15: Electron 45 host spike on macOS 26 CI: the Metal view under the web contents works
 
 `host/electron`: an Electron 45.3.2 app with a napi-rs 3 addon. CI run 43685791852.
