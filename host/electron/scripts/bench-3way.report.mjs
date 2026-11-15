@@ -76,16 +76,16 @@ if (!runs.length) md += '_no runs found_\n';
 
 for (const k of keys) {
   const [scene, px, cap] = k.split('|');
-  const rows = groups.get(k).sort((a, b) => ORDER[a.variant] - ORDER[b.variant] || Number(a.aa) - Number(b.aa));
+  const rows = groups.get(k).sort((a, b) => ORDER[a.variant] - ORDER[b.variant] || Number(a.aa) - Number(b.aa) || String(a.label || '').localeCompare(String(b.label || '')));
   md += `## ${SCENES[scene] || scene}, ${px} px, ${cap === 'vsync' ? 'vsync on (display rate)' : 'vsync off (uncapped)'}\n\n`;
   md += '| variant | fps | frame ms p50 / p95 / p99 | JS ms p50: total = update + render | GPU ms mean | draws | CPU %: main / GPU proc / page = total | CPU ms/frame | mem MB: main / GPU proc / page | vs A (MAE) |\n';
   md += '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
   const ref = rows.find((r) => r.variant === 'webgl' && !r.aa && r.ok);
   for (const r of rows) {
-    const name = `${LABEL[r.variant]}${r.aa ? ', aa (MSAA 4x)' : ''}`;
+    const name = `${LABEL[r.variant]}${r.aa ? ', aa (MSAA 4x)' : ''}${r.label ? `, ${r.label}` : ''}`;
     if (!r.ok || !r.frame_ms) {
       md += `| ${name} | **failed** | ${String(r.error || 'no result').replace(/\|/g, '/').replace(/\s+/g, ' ').slice(0, 160)} | | | | | | | |\n`;
-      summary.push({ scene, px, cap, variant: r.variant, aa: r.aa, ok: false, error: r.error });
+      summary.push({ scene, px, cap, variant: r.variant, aa: r.aa, label: r.label, ok: false, error: r.error });
       continue;
     }
     const p = r.processes || {};
@@ -99,7 +99,7 @@ for (const k of keys) {
     const be = r.backend && /fell back/.test(r.backend.api) ? ' **(WebGL2 fallback: no WebGPU adapter)**' : '';
     md += `| ${name}${be} | ${f(r.fps, 1)} | ${f(r.frame_ms.p50)} / ${f(r.frame_ms.p95)} / ${f(r.frame_ms.p99)} | ${f(r.js_ms.p50)} = ${f(r.update_ms.p50)} + ${f(r.render_ms.p50)} | ${gpu} | ${draws} | ${f(cpu('main'), 0)} / ${f(cpu('gpu'), 0)} / ${f(cpu('page'), 0)} = ${f(total, 0)} | ${f(cpuFrame)} | ${mem('main')} / ${mem('gpu')} / ${mem('page')} | ${d === null ? '' : f(d)} |\n`;
     summary.push({
-      scene, px, cap, variant: r.variant, aa: r.aa, ok: true, backend: r.backend && r.backend.api, fps: r.fps, frame_ms: r.frame_ms, js_ms_p50: r.js_ms.p50, update_ms_p50: r.update_ms.p50, render_ms_p50: r.render_ms.p50,
+      scene, px, cap, variant: r.variant, aa: r.aa, label: r.label, ok: true, backend: r.backend && r.backend.api, fps: r.fps, frame_ms: r.frame_ms, js_ms_p50: r.js_ms.p50, update_ms_p50: r.update_ms.p50, render_ms_p50: r.render_ms.p50,
       gpu_ms_mean: r.gpu_ms ? r.gpu_ms.mean : null, gpu_source: r.gpu_source, draws_p50: r.draws.p50, native: r.native, cpu_percent: { main: cpu('main'), gpu: cpu('gpu'), page: cpu('page'), total }, cpu_ms_per_frame: cpuFrame === null ? null : +cpuFrame.toFixed(3),
       mem_mb: { main: p.main && p.main.working_set_mb, gpu: p.gpu && p.gpu.working_set_mb, page: p.page && p.page.working_set_mb }, mae_vs_webgl: d,
     });
@@ -110,9 +110,10 @@ for (const k of keys) {
     const bits = [];
     if (r.backend) bits.push(`backend: ${r.backend.api}, ${r.backend.renderer}`);
     if (r.gpu_source) bits.push(`GPU ms: ${r.gpu_source}${r.gpu_ms ? '' : ' (no samples)'}`);
-    if (r.native) bits.push(`render thread: ${r.native.rendered_fps} fps rendered, ${r.native.skipped} skipped, ${f(r.native.render_thread_cpu_ms)} ms CPU/frame; JS ticks waiting for it: ${r.waited_ticks}/${r.raf_ticks}`);
+    if (r.native) bits.push(`render thread: ${r.native.rendered_fps} fps rendered, ${r.native.skipped} skipped, ${f(r.native.render_thread_cpu_ms)} ms CPU/frame; ${r.native.draws} native draws`);
+    if (r.gpu_wait_ms_per_frame !== undefined) bits.push(`waited for the GPU ${f(r.gpu_wait_ms_per_frame)} ms/frame`);
     if (r.boot_s) bits.push(`boot ${r.boot_s} s`);
-    extra.push(`- ${r.variant}${r.aa ? ' aa' : ''}: ${bits.join('; ')}`);
+    extra.push(`- ${r.variant}${r.aa ? ' aa' : ''}${r.label ? ` (${r.label})` : ''}: ${bits.join('; ')}`);
   }
   md += `\n${extra.join('\n')}\n\n`;
 }
@@ -148,7 +149,7 @@ if (args.includes('--annotate')) {
   const esc = (t) => t.replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, '%0A');
   const line = (r) => {
     const c = r.cpu_percent || {};
-    const head = `${r.px} ${r.cap} ${r.variant}${r.aa ? '+aa' : ''}`;
+    const head = `${r.px} ${r.cap} ${r.variant}${r.aa ? '+aa' : ''}${r.label ? ` (${r.label})` : ''}`;
     if (!r.ok) return `${head}: FAILED ${String(r.error).replace(/\s+/g, ' ').slice(0, 150)}`;
     const nat = r.native ? ` rt ${r.native.rendered_fps}fps/${f(r.native.render_thread_cpu_ms)}ms` : '';
     return `${head}: ${f(r.fps, 1)} fps, frame ${f(r.frame_ms.p50)}/${f(r.frame_ms.p95)}/${f(r.frame_ms.p99)} ms, JS ${f(r.js_ms_p50)}=${f(r.update_ms_p50)}+${f(r.render_ms_p50)}, GPU ${f(r.gpu_ms_mean)}, draws ${f(r.draws_p50, 0)}, CPU% ${f(c.main, 0)}/${f(c.gpu, 0)}/${f(c.page, 0)}=${f(c.total, 0)} (${f(r.cpu_ms_per_frame)} ms/frame), mem ${f(r.mem_mb.main, 0)}/${f(r.mem_mb.gpu, 0)}/${f(r.mem_mb.page, 0)} MB${r.mae_vs_webgl === null ? '' : `, MAE vs A ${r.mae_vs_webgl}`}${nat} [${r.backend}]`;

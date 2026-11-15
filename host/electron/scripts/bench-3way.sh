@@ -81,10 +81,11 @@ fi
 
 rm -f "$out"/bench-*.json "$out"/bench-*-shot.png "$out"/bench-*.log "$out"/bench-*-power.txt
 n=0
-one() { # one <scene> <variant> <px> <aa> <vsync>
-  local scene="$1" variant="$2" px="$3" aa="$4" vs="$5" tag args pm=""
-  tag="bench-$scene-$variant-$px"; [ "$aa" = 1 ] && tag="$tag-aa"; [ "$vs" = 1 ] && tag="$tag-vsync"
+one() { # one <scene> <variant> <px> <aa> <vsync> [fx]   (fx: fastrender renders at half size, MetalFX upscales)
+  local scene="$1" variant="$2" px="$3" aa="$4" vs="$5" fx="${6:-}" tag args pm=""
+  tag="bench-$scene-$variant-$px"; [ "$aa" = 1 ] && tag="$tag-aa"; [ "$vs" = 1 ] && tag="$tag-vsync"; [ -n "$fx" ] && tag="$tag-fx"
   args="--variant $variant --scene $scene --px $px --aa $aa --vsync $vs --warmup $warmup --measure $measure --out $out --tag $tag --timeout $((warmup + measure + 600))"
+  [ -n "$fx" ] && args="$args --renderer {\"scale\":0.5,\"upscale\":\"metalfx\"} --label MetalFX-spatial-from-0.5x-per-axis"
   n=$((n + 1)); printf '%2d  %-44s ' "$n" "$tag"
   if [ "$power" = 1 ]; then sudo -n powermetrics --samplers gpu_power,cpu_power -i 1000 > "$out/$tag-power.txt" 2>/dev/null & pm=$!; fi
   if [ "$scene" = world ]; then
@@ -107,6 +108,9 @@ for scene in $scenes; do
     for v in $variants; do one "$scene" "$v" "$px" 0 0; done
     # the game as shipped asks for MSAA 4x; fastrender has none, so the rows above turn it off everywhere
     if [ "$scene" = world ]; then for v in $variants; do [ "$v" = fastrender ] || one world "$v" "$px" 1 0; done; fi
+    # what only the native renderer has: a quarter of the pixels shaded, MetalFX spatial upscaling to the same output
+    # (NOT like-for-like with the rows above: a different image; the browser's equivalent is FSR1 in a shader)
+    if [ "$scene" != empty ]; then case " $variants " in *" fastrender "*) one "$scene" fastrender "$px" 0 0 fx;; esac; fi
   done
 done
 if [ "$vsync_pass" = 1 ]; then

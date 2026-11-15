@@ -8,8 +8,9 @@
 //                         CAMetalLayer below the transparent web contents (exactly game/main.js)
 //
 //   electron game/bench-main.js --variant webgl|webgpu|fastrender --scene city|empty|world [--px 1280x800]
-//     [--aa 0|1] [--vsync 0|1] [--warmup 10] [--measure 20] [--out DIR] [--tag NAME] [--isolation on|off]
-//     [--html <game>/index.html --assets <game>/public] [--renderer '{"upscale":"bilinear"}'] [--timeout S]
+//     [--aa 0|1] [--vsync 0|1] [--pace gpu|free] [--warmup 10] [--measure 20] [--out DIR] [--tag NAME] [--isolation on|off]
+//     [--html <game>/index.html --assets <game>/public] [--timeout S]
+//     [--renderer '{"scale":0.5,"upscale":"metalfx"}' --label 'MetalFX spatial from 0.5x']   fastrender's own options
 //
 // --px is the size in DEVICE pixels of every variant's colour buffer: the window is px / the display's scale factor
 // points, WebGL / WebGPU run at pixel ratio = scale factor, fastrender at render scale 1 (drawable = layer bounds x
@@ -56,7 +57,7 @@ if (variant === 'webgpu') {
 for (const f of (process.env.BENCH_CHROMIUM_FLAGS || '').split(/\s+/).filter(Boolean)) { const i = f.indexOf('='); if (i < 0) sw(f); else sw(f.slice(0, i), f.slice(i + 1)); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
-const results = { tag, variant, scene, px: `${PW}x${PH}`, aa, vsync, electron: process.versions.electron, chrome: process.versions.chrome, platform: `${process.platform} ${process.arch}`, isolated, requests: { local: 0, missing: 0, remote: 0 } };
+const results = { tag, label: opt('label', ''), variant, scene, px: `${PW}x${PH}`, aa, vsync, electron: process.versions.electron, chrome: process.versions.chrome, platform: `${process.platform} ${process.arch}`, isolated, requests: { local: 0, missing: 0, remote: 0 } };
 let win = null, native = null, finished = false;
 const consoleTop = new Map();
 const log = (...a) => console.log('[bench-main]', ...a);
@@ -199,7 +200,7 @@ app.whenReady().then(() => {
   protocol.handle('app', serve);
   session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }, (d, cb) => { results.requests.remote++; cb({ cancel: true }); });
   session.defaultSession.setPermissionRequestHandler((wc, perm, cb) => cb(false));
-  const cfg = { variant, scene, px: `${PW}x${PH}`, dpr: dsf, aa, vsync, warmup, measure, bootTimeout: Math.max(60, timeoutS - warmup - measure - 60), pace: opt('pace', 'backpressure'), params: JSON.parse(opt('params', '{}')) };
+  const cfg = { variant, scene, px: `${PW}x${PH}`, dpr: dsf, aa, vsync, warmup, measure, bootTimeout: Math.max(60, timeoutS - warmup - measure - 60), pace: opt('pace', 'gpu'), params: JSON.parse(opt('params', '{}')) };
   win = new BrowserWindow({
     // the window keeps its size on a smaller screen (CI: 1024x768)
     x: 0, y: 0, width: W, height: H, useContentSize: true, enableLargerThanScreen: true,

@@ -2,7 +2,8 @@
 //
 // One display frame = one call of `frame()` from the real requestAnimationFrame (Chromium runs it unthrottled with
 // --disable-gpu-vsync --disable-frame-rate-limit; `--vsync 1` runs keep the display's rate). Per frame:
-//   frame_ms   rAF-to-rAF delta between frames that were produced (throughput: 1000 / mean = fps)
+//   frame_ms   rAF-to-rAF delta between frames that were produced
+//   fps        frames / (window + the time the GPU needed to finish what was still queued at its end)
 //   js_ms      wall time of frame(): game update + renderer.render (+ FastRenderer's flush = the copy to shared memory)
 //   render_ms  inside renderer.render(...) (every call of the frame, offscreen passes included) + flush
 //   update_ms  js_ms - render_ms: the game's own work
@@ -11,9 +12,8 @@
 //              C: fastrender's command-buffer GPU time (GPUEndTime - GPUStartTime), mean only
 //   draws      A: renderer.info.render.calls summed over the frame's render() calls (shadow passes included)
 //              B: renderer.info.render.drawCalls of the frame;  C: FastRenderer's screen draws + the native count
-// fastrender is paced by back-pressure, like a swap chain: a new frame is produced only when the render thread has
-// taken the previous one (otherwise an unthrottled rAF would queue frames the render thread then skips). Ticks spent
-// waiting are counted (`waited_ticks`).
+// Every variant is paced by back-pressure (pacer() below); the time a frame waited for the GPU is
+// `gpu_wait_ms_per_frame` (0 = the CPU side is the limit, large = GPU-bound).
 import { cfg, ipc, realNow, realRaf, native, host, issues, top, count, log, net } from './host.mjs';
 
 const G = globalThis;
@@ -89,18 +89,70 @@ function gpuTimer(renderer) {
   return { source: 'Metal command buffer GPUEndTime - GPUStartTime (mean)', begin() {}, end() {}, samples, flush: async () => {} };
 }
 
-function run(seconds, frame, renderer, acc, timer) {
+/**
+ * Back-pressure, the same rule for every variant: at most 2 frames whose GPU work has not finished (`--pace free`
+ * turns it off). Chromium does not reliably hold requestAnimationFrame back when the GPU is the slower side (measured:
+ * WebGPU on a software adapter queued 300 frames in a second and needed 90 s to draw them), and an unthrottled rAF
+ * would bury fastrender's render thread in frames it then skips. busy() = wait for the GPU; mark() = a frame went out.
+ */
+function pacer(renderer) {
+  const max = cfg.pace === 'free' ? Infinity : 2;
+  if (native) return { busy: () => max !== Infinity && native.stats().lastFrameSeq < host.lastSeq, mark() {} };
+  if (cfg.variant === 'webgpu') {
+    const dev = renderer.backend && renderer.backend.device;
+    if (!dev) return { busy: () => false, mark() {} };
+    let n = 0;
+    const done = () => { n--; };
+    return { busy: () => n >= max, mark() { n++; dev.queue.onSubmittedWorkDone().then(done, done); } };
+  }
+  const gl = renderer.getContext();
+  const q = [];
+  return {
+    busy() {
+      while (q.length && gl.clientWaitSync(q[0], 0, 0) !== gl.TIMEOUT_EXPIRED) gl.deleteSync(q.shift());
+      return q.length >= max;
+    },
+    mark() { q.push(gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)); gl.flush(); },
+  };
+}
+
+// the next task of this page, without waiting for a display frame (a requestAnimationFrame with nothing to draw
+// falls back to the display's rate even with --disable-frame-rate-limit: measured, 16-18 ms per skipped tick)
+const hop = new MessageChannel();
+let hopFn = null;
+hop.port1.onmessage = () => { const f = hopFn; hopFn = null; if (f) f(); };
+const soon = (f) => { hopFn = f; hop.port2.postMessage(0); };
+
+/**
+ * Frame scheduling. vsync on: requestAnimationFrame only (a tick the GPU is not ready for is a dropped frame).
+ * Uncapped: A/B get their next frame from requestAnimationFrame (the compositor has a canvas to present, so it comes
+ * straight back); fastrender's page has nothing for Chromium to present, so its next frame is the next task. While
+ * the GPU is busy every variant polls from the task queue (the page's CPU % includes that polling: `waited_ticks`).
+ */
+function run(seconds, frame, renderer, acc, timer, pace) {
   const cap = 1 << 18;
-  const F = { dt: new Float32Array(cap), js: new Float32Array(cap), render: new Float32Array(cap), flush: new Float32Array(cap), draws: new Float32Array(cap), n: 0, ticks: 0, waited: 0, tris: 0, renders: 0 };
+  const F = { dt: new Float32Array(cap), js: new Float32Array(cap), render: new Float32Array(cap), flush: new Float32Array(cap), draws: new Float32Array(cap), n: 0, ticks: 0, waited: 0, wait: 0, tris: 0, renders: 0 };
   return new Promise((resolve) => {
     const t0 = realNow();
-    let last = 0;
+    let last = 0, waitStart = 0, lastWait = 0;
     const tick = () => {
       const t = realNow();
       if (t - t0 >= seconds * 1000) { F.seconds = (t - t0) / 1000; return resolve(F); }
-      realRaf(tick);
       F.ticks++;
-      if (native && cfg.pace !== 'free' && native.stats().lastFrameSeq < host.lastSeq) { F.waited++; return; }
+      if (pace.busy()) {
+        F.waited++;
+        if (!waitStart) waitStart = t;
+        // sleep (1 ms timers) through most of the wait the previous frame needed, poll task by task for the rest:
+        // exact to the task, without a page that spins at 100 % CPU while the GPU works
+        if (cfg.vsync) realRaf(tick);
+        else if (t - waitStart < lastWait * 0.8 - 1.5) soon(() => setTimeout(tick, 1));
+        else soon(tick);
+        return;
+      }
+      lastWait = waitStart ? t - waitStart : 0;
+      F.wait += lastWait;
+      waitStart = 0;
+      if (cfg.vsync || !native) realRaf(tick); else soon(tick);
       acc.render = 0; acc.renders = 0; acc.draws = 0; acc.tris = 0;
       if (cfg.variant === 'webgpu') renderer.info.reset();
       timer.begin();
@@ -109,6 +161,7 @@ function run(seconds, frame, renderer, acc, timer) {
       if (host) { const tf = realNow(); host.flush(); fl = realNow() - tf; }
       const te = realNow();
       timer.end();
+      pace.mark();
       const i = F.n;
       if (i < cap) {
         F.dt[i] = last ? t - last : 0;
@@ -122,6 +175,31 @@ function run(seconds, frame, renderer, acc, timer) {
     };
     realRaf(tick);
   });
+}
+
+/**
+ * Wait until the GPU has finished everything submitted so far (ms waited). A window ends with this, so frames the
+ * page queued faster than the GPU drew them are paid for inside the window (fps = frames / (window + drain)).
+ */
+async function drain(renderer) {
+  const t = realNow();
+  if (native) {
+    while (native.stats().lastFrameSeq < host.lastSeq && realNow() - t < 120000) await sleep(2);
+  } else if (cfg.variant === 'webgpu') {
+    const dev = renderer.backend && renderer.backend.device;
+    if (dev) await Promise.race([dev.queue.onSubmittedWorkDone(), sleep(120000)]);
+  } else {
+    const gl = renderer.getContext();
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    while (realNow() - t < 120000) {
+      const st = gl.clientWaitSync(sync, 0, 0);
+      if (st === gl.ALREADY_SIGNALED || st === gl.CONDITION_SATISFIED || st === gl.WAIT_FAILED) break;
+      await sleep(2);
+    }
+    gl.deleteSync(sync);
+  }
+  return realNow() - t;
 }
 
 const ack = (ch, payload) => new Promise((res) => { ipc.once(`${ch}-ack`, res); ipc.send(ch, payload); });
@@ -146,11 +224,15 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
   if (hide) document.documentElement.classList.remove('fr-hide-ui');
 
   log(`warmup ${cfg.warmup} s`);
-  await run(cfg.warmup, frame, renderer, acc, timer);
+  const pace = pacer(renderer);
+  await run(cfg.warmup, frame, renderer, acc, timer, pace);
+  log(`warmup drained in ${(await drain(renderer)).toFixed(0)} ms`);
   timer.samples.length = 0;
   const s0 = native ? native.stats() : null;
   await ack('measure-start', {});
-  const F = await run(cfg.measure, frame, renderer, acc, timer);
+  const F = await run(cfg.measure, frame, renderer, acc, timer, pace);
+  const drainMs = await drain(renderer);
+  F.seconds += drainMs / 1000;
   await ack('measure-end', {});
   await timer.flush();
   if (native) await sleep(300);
@@ -162,13 +244,13 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
   const dt = F.dt.subarray(1, n); // the first frame has no predecessor
   const frameMs = dist(dt, n - 1);
   const r = {
-    variant: cfg.variant, scene: cfg.scene, px: cfg.px, aa: !!cfg.aa, vsync: !!cfg.vsync, warmup_s: cfg.warmup, measure_s: q2(F.seconds),
+    variant: cfg.variant, scene: cfg.scene, px: cfg.px, aa: !!cfg.aa, vsync: !!cfg.vsync, pace: cfg.pace, warmup_s: cfg.warmup, measure_s: q2(F.seconds),
     backend: backend(renderer),
-    frames: n, fps: q2(n / F.seconds), frame_ms: frameMs,
+    frames: n, fps: q2(n / F.seconds), drain_ms: q2(drainMs), frame_ms: frameMs,
     js_ms: dist(F.js, n), render_ms: dist(F.render, n), update_ms: dist(update, n), flush_ms: host ? dist(F.flush, n) : null,
     gpu_ms: timer.samples.length ? dist(Float32Array.from(timer.samples), timer.samples.length) : null, gpu_source: timer.source,
     draws: dist(F.draws, n), triangles: Math.round(F.tris), render_calls_per_frame: F.renders,
-    raf_ticks: F.ticks, waited_ticks: F.waited,
+    raf_ticks: F.ticks, waited_ticks: F.waited, gpu_wait_ms_per_frame: q2(F.wait / Math.max(1, n)),
     issues: { errors: top(issues.errors), warnings: top(issues.warnings), gpu: top(issues.gpu) },
     net,
   };
