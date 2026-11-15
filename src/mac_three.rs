@@ -860,6 +860,16 @@ impl ThreeScene {
             let bias = m.meta.polygon_offset.map_or((0.0, 0.0), |p| (p[0], p[1]));
             let prog_id = m.meta.program;
             let Some((pipe, plan)) = self.instance_pipeline(dev, d.material, &d, target) else { continue };
+            if target == Target::Main && self.progs.pending(pipe) {
+                // still compiling: skipped this frame, unless the screen would show nothing instead (a post-processing
+                // output pass: the draw samples a render target, or is the pass's only one)
+                let n = self.progs.progs.get(&prog_id).map_or(0, |p| p.layout.textures.len());
+                let at = tex.min(self.uni_tex.len());
+                let samples_target = self.uni_tex[at..(at + n).min(self.uni_tex.len())].iter().any(|&id| self.targets.texture(id).is_some());
+                if bindlist::main_draw_waits(false, samples_target, self.draws.len()) {
+                    self.progs.require(pipe);
+                }
+            }
             let discards = self.progs.progs.get(&prog_id).is_some_and(|p| p.discard);
             let rec = Draw3 { i: i as u32, obj: 0, block: block as u32, tex: tex as u32, bind: u32::MAX, pipe, depth, bias, plan, raster, run: (0, 0) };
             // three's painterSortStable / reversePainterSortStable: renderOrder first, then state for opaque draws
