@@ -330,6 +330,22 @@ jobs:
           rc4=0; env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 60 > world-objects-cost.txt 2>&1 || rc4=$?
           grep -E "world-objects:|three frame cost|three programs:|fps" world-objects-cost.txt | cut -c1-1500 > world-objects-cost-summary.txt
           bash .github/annotate.sh notice "world-objects per-frame cost, frames 61-90 (exit $rc4)" world-objects-cost-summary.txt 20
+      # WP3 (docs/research/perf-audit-2026-11.md): async compile on workers, persisted pipeline manifest + prewarm,
+      # MTLBinaryArchive. Seven launches per scene (.github/compile-launch.sh): the old behaviour (blocking, one
+      # worker, nothing persisted), blocking and async cold, async warm with / without the archive and with / without
+      # the OS's own Metal shader cache. Paravirtual GPU: compile times are a real compiler's, GPU times are not.
+      - name: compile pipeline - cold vs warm launch (three-city, 3d-world-objects)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 25
+        run: |
+          bash .github/compile-launch.sh city --three js/dist/three-city.js --scale 1 --upscale bilinear --size 1280x800 --frames 120 --warmup 0
+          bash .github/annotate.sh notice "compile launch: three-city (ms since renderer init)" compile-launch-city.txt 30
+          if [ -f wo-skipped ] || [ ! -f js/dist/world-objects.js ]; then echo "game not fetched: skipped"; exit 0; fi
+          export FASTRENDER_ASSETS="$PWD/../3d-world-objects/public"
+          bash .github/compile-launch.sh world --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 60
+          bash .github/annotate.sh notice "compile launch: 3d-world-objects (ms since renderer init)" compile-launch-world.txt 30
+          { echo '### compile launch (WP3)'; echo '```'; cat compile-launch-city.txt compile-launch-world.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       # gate (15 Nov, r187 + patches): MAE 50.5 (run 43706682669) -> 6.58 (run 43711350656: zero-initialised locals,
       # scene.environmentIntensity, synchronous WebAssembly in JSC). The rest: canvas-painted textures in JSC (tree
       # leaves, signs, paving), a few car / crowd details. A regression guard: tighten as those land.
@@ -363,6 +379,9 @@ jobs:
         timeout-minutes: 30
         env:
           MTL_DEBUG_LAYER: "1"
+          # goldens: every program / pipeline is waited for where it is first needed (src/mac_programs.rs); the
+          # shipped default is async (draws whose pipeline is still compiling are skipped for a frame)
+          FASTRENDER_COMPILE: blocking
         run: |
           set -o pipefail
           W=""; test -d ../3d-world-objects && W="--world $GITHUB_WORKSPACE/../3d-world-objects"

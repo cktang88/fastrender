@@ -13,6 +13,7 @@ pub mod three;
 pub mod xlat;
 pub mod ring; // v3 per-slot ring layout + bounds-checked writes (src/mac_three.rs)
 pub mod image; // __fr.readFile / __fr.decodeImage for real web games (JavaScriptCore host)
+pub mod pipeline_manifest; // async compile queue, stage dedupe, persisted pipeline manifest (src/mac_programs.rs)
 pub mod host; // FrameSource (host -> renderer boundary) + the Electron wire codec
 #[cfg(target_os = "macos")]
 pub mod jsc;

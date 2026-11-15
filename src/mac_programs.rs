@@ -1,30 +1,54 @@
 //! three.js's own programs on Metal (protocol v3, docs/PROTOCOL.md): the program registry (MSL from `xlat`, two
-//! `MTLLibrary`s per program), render pipeline states built lazily per (program, pipeline state, vertex streams),
+//! `MTLLibrary`s per program), render pipeline states per (program, pipeline state, vertex streams),
 //! depth-stencil states, and the resources three's GLSL samples that are not game textures (shadow maps, the DFG
 //! LUT, neutral textures of every type). `mac_three.rs` drives it per draw.
+//!
+//! Nothing is compiled on the render thread (src/pipeline_manifest.rs: the queue, stage dedupe, the persisted
+//! manifest; here: its Metal 3 backend [`Metal3`]). `add` queues a program's two libraries, `pipeline` queues a
+//! pipeline and hands out its slot at once; `pipeline_at` answers None until the slot is filled, so the encoder
+//! skips that draw this frame (counted). Two exceptions wait for the worker instead, because skipping would leave
+//! a wrong result behind: a pipeline that renders into a render target or a shadow map (content that may be drawn
+//! once: PMREM, a shadow map with `autoUpdate` off), and everything in blocking mode (the golden / bench /
+//! selftest harness: the frame sequence is then exactly the synchronous one).
 //!
 //! Binding convention (src/xlat.rs): default uniform block buffer(1), FrObject buffer(2), FrFrame buffer(3), both
 //! stages, FrPass (gl_FragCoord origin) fragment buffer(0); vertex attribute at location L reads vertex buffer 4 + L
 //! (a mat4 attribute's 4 columns share one buffer); texture slots carry per-stage texture / sampler indices (a fixed
 //! sampler state is a constexpr sampler: nothing to bind).
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
-use objc2::rc::Retained;
+use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::NSString;
+use objc2::Message;
+use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_metal::*;
 
 use crate::mac::{buffer_with, Buffer, Device, Texture, OUT_FORMAT};
+use crate::pipeline_manifest::{self as pm, Attr, Compiler, Event, PipelineBackend, PipelineJob, PipelineKey, ProgramInfo, Status};
+pub use crate::pipeline_manifest::Target;
 use crate::three::{self, ProgramMaterialMeta};
 use crate::xlat;
 
 pub type RenderPipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
 pub type DepthState = Retained<ProtocolObject<dyn MTLDepthStencilState>>;
 pub type Sampler = Retained<ProtocolObject<dyn MTLSamplerState>>;
-type Function = Retained<ProtocolObject<dyn MTLFunction>>;
+pub type Library = Retained<ProtocolObject<dyn MTLLibrary>>;
+type BinaryArchive = Retained<ProtocolObject<dyn MTLBinaryArchive>>;
+
+/// A Metal object shared with the compile workers. Devices, libraries, functions, pipeline states and binary
+/// archives are safe to use from any thread (Metal's own contract); objc2 cannot know that of a protocol object.
+#[derive(Clone)]
+pub struct Mt<T>(pub T);
+unsafe impl<T> Send for Mt<T> {}
+unsafe impl<T> Sync for Mt<T> {}
 
 /// First vertex buffer index for attributes (0..3 are the uniform blocks).
 pub const ATTR_BUFFER0: usize = 4;
@@ -49,8 +73,8 @@ pub struct Prog {
     pub key: String,
     pub layout: xlat::Layout,
     pub attrs: Vec<ProgAttr>,
-    vfn: Function,
-    ffn: Function,
+    /// identity across launches (`pipeline_manifest::ProgramInfo::hash`): the stages' MSL and entry points
+    hash: pm::Hash,
 }
 
 /// How each program attribute is fed for a draw, 4 bits per attribute (in `Prog::attrs` order):
@@ -58,19 +82,6 @@ pub struct Prog {
 /// (a mat4 attribute: per-instance columns, n = 4).
 pub type StreamSig = u64;
 pub const SIG_INSTANCE: u64 = 8;
-
-/// What a pipeline renders into.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Target {
-    /// the main pass: OUT_FORMAT colour + Depth32Float
-    Main,
-    /// a shadow map: Depth32Float only (three's depth programs; their colour output is discarded)
-    Depth,
-    /// a VSM blur pass: RG16Float colour, no depth
-    Rg16,
-    /// a render target (src/mac_targets.rs): its attachment formats as `three::target_key` packs them
-    Rt(u32),
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PipeKey {
@@ -95,12 +106,51 @@ pub struct Neutral {
     pub lit_cube: Option<Texture>,
 }
 
+/// A pipeline as the encoder sees it.
+enum Slot {
+    /// queued or compiling: draws that need it are skipped
+    Pending { label: String },
+    Ready(RenderPipeline),
+    Failed,
+}
+
+/// Launch and hitch counters of the compile pipeline (times in ms since [`mark_start`]).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct CompileStats {
+    pub blocking: bool,
+    pub workers: usize,
+    pub queue: pm::Stats,
+    /// draws the encoder skipped because their pipeline was not ready, and the frames that had any
+    pub skipped_draws: u64,
+    pub frames_with_skips: u64,
+    pub frames: u64,
+    /// times the render thread waited for a pipeline or a program (blocking mode, render targets, shadow maps)
+    pub waits: u64,
+    pub wait_ms: f64,
+    /// the end of the first frame
+    pub first_frame_ms: Option<f64>,
+    /// the end of the first frame that drew with a pipeline, skipped nothing and left nothing pending
+    pub first_complete_frame_ms: Option<f64>,
+    /// the end of the last frame that skipped a draw
+    pub last_incomplete_frame_ms: Option<f64>,
+    /// the last time the pending count fell to zero
+    pub all_ready_ms: Option<f64>,
+    /// frame-to-frame gaps over 50 ms (the first frame aside), and the longest
+    pub long_frames: u64,
+    pub longest_frame_ms: f64,
+}
+
 pub struct Programs {
     names: HashMap<String, u32>,
     pub progs: HashMap<u32, Prog>,
     reported: HashSet<String>,
-    pipes: Vec<Option<RenderPipeline>>,
+    compiler: Compiler<Metal3>,
+    blocking: bool,
+    slots: Vec<Slot>,
     pipe_index: HashMap<PipeKey, u32>,
+    /// slots waiting for a pipeline, names of the programs waiting for their libraries
+    waiting_pipes: HashMap<PipelineKey, Vec<u32>>,
+    waiting_progs: HashMap<pm::Hash, Vec<String>>,
     depths: Vec<DepthState>,
     depth_index: HashMap<(u32, bool), u32>,
     pub neutral: Neutral,
@@ -112,11 +162,75 @@ pub struct Programs {
     pub nearest_clamp: Sampler,
     /// constant-step defaults for attributes a geometry lacks: vec4 (0,0,0,1) at 0, identity mat4 at 16
     pub defaults: Buffer,
-    /// programs translated and compiled, Metal compile time of all of them (ms)
+    /// programs whose two libraries compiled; worker time of all library compiles (ms)
     pub compiled: usize,
     pub compile_ms: f64,
+    /// pipelines handed to the encoder; worker time of all pipeline builds (ms)
     pub pipelines_built: usize,
     pub pipeline_ms: f64,
+    skipped: Cell<u64>,
+    skipped_at_poll: u64,
+    stats: CompileStats,
+    last_poll: Option<Instant>,
+    was_pending: bool,
+    last_persist: Instant,
+    /// what the last persist said (the binary archive's line, or its error)
+    archive_note: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------------- process-wide state
+
+static START: OnceLock<Instant> = OnceLock::new();
+static BLOCKING_DEFAULT: AtomicBool = AtomicBool::new(false);
+/// the compiler [`prewarm`] started before the scene (and its `Programs`) existed: (device, workers, compiler)
+static EARLY: Mutex<Option<(usize, usize, Compiler<Metal3>)>> = Mutex::new(None);
+
+/// Starts the launch clock the compile stats are measured from (the first call counts; the renderer calls it when
+/// it loads the built-in shaders, the first thing it does).
+pub fn mark_start() -> Instant { *START.get_or_init(Instant::now) }
+
+fn since_start() -> f64 { mark_start().elapsed().as_secs_f64() * 1000.0 }
+
+/// Harnesses that capture frames (golden, bench, selftest) call this with true before they create a renderer:
+/// every program and pipeline is then waited for where it is first needed, so each frame is complete and the
+/// frame sequence is deterministic. `FASTRENDER_COMPILE=async|blocking` overrides it.
+pub fn set_blocking_default(blocking: bool) { BLOCKING_DEFAULT.store(blocking, Ordering::Relaxed) }
+
+fn blocking_mode() -> bool {
+    match std::env::var("FASTRENDER_COMPILE").as_deref() {
+        Ok("async") => false,
+        Ok("blocking") => true,
+        _ => BLOCKING_DEFAULT.load(Ordering::Relaxed),
+    }
+}
+
+unsafe extern "C" {
+    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+}
+
+/// Compile workers run at QOS_CLASS_USER_INITIATED: below the render thread, on performance cores, and the
+/// class travels with their requests into Metal's compiler service.
+fn worker_qos() {
+    const QOS_CLASS_USER_INITIATED: u32 = 0x19;
+    unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0) };
+}
+
+fn start_compiler(dev: &Device) -> (usize, Compiler<Metal3>) {
+    mark_start();
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let workers = std::env::var("FASTRENDER_COMPILE_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or((cores / 2).clamp(2, 4));
+    let dir = pm::default_dir();
+    (workers, Compiler::new(Metal3::new(dev, dir.as_deref()), dir, workers, worker_qos))
+}
+
+/// Start compiling last launch's pipelines now (the manifest and the stored MSL: no JS needed), before the game's
+/// bundle is even read. The `Programs` created next for the same device takes this compiler over.
+pub fn prewarm(dev: &Device) {
+    let mut early = EARLY.lock().unwrap_or_else(|e| e.into_inner());
+    if early.is_none() {
+        let (workers, c) = start_compiler(dev);
+        *early = Some((dev as *const Device as usize, workers, c));
+    }
 }
 
 fn tex_desc(fmt: MTLPixelFormat, ty: MTLTextureType, w: usize, h: usize, depth_or_layers: usize) -> Retained<MTLTextureDescriptor> {
@@ -206,12 +320,19 @@ impl Programs {
         });
         let nearest_clamp = sampler_with(dev, clamp);
         let defaults: [f32; 20] = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let early = EARLY.lock().unwrap_or_else(|e| e.into_inner()).take().filter(|e| e.0 == dev as *const Device as usize);
+        let (workers, compiler) = early.map(|e| (e.1, e.2)).unwrap_or_else(|| start_compiler(dev));
+        let blocking = blocking_mode();
         Ok(Programs {
             names: HashMap::new(),
             progs: HashMap::new(),
             reported: HashSet::new(),
-            pipes: Vec::new(),
+            compiler,
+            blocking,
+            slots: Vec::new(),
             pipe_index: HashMap::new(),
+            waiting_pipes: HashMap::new(),
+            waiting_progs: HashMap::new(),
             depths: Vec::new(),
             depth_index: HashMap::new(),
             neutral,
@@ -224,6 +345,13 @@ impl Programs {
             compile_ms: 0.0,
             pipelines_built: 0,
             pipeline_ms: 0.0,
+            skipped: Cell::new(0),
+            skipped_at_poll: 0,
+            stats: CompileStats { blocking, workers, ..Default::default() },
+            last_poll: None,
+            was_pending: false,
+            last_persist: Instant::now(),
+            archive_note: None,
         })
     }
 
@@ -278,85 +406,258 @@ impl Programs {
         }
     }
 
-    /// Compile a translated program's two MSL sources (`host.program` just translated it; `id` is the short id
-    /// material uploads use).
-    pub fn add(&mut self, dev: &Device, id: u32, key: String, p: xlat::Program) {
-        let t = std::time::Instant::now();
-        let lib = |src: &str, entry: &str| -> Result<Function, String> {
-            let opts = MTLCompileOptions::new();
-            let l = dev
-                .newLibraryWithSource_options_error(&NSString::from_str(src), Some(&opts))
-                .map_err(|e| format!("Metal compile of {entry}: {}", e.localizedDescription()))?;
-            l.newFunctionWithName(&NSString::from_str(entry)).ok_or_else(|| format!("missing {entry}"))
-        };
-        let name = key.split(',').next().unwrap_or("").to_string();
-        let r = lib(&p.vertex_msl, &p.vertex_entry).and_then(|v| Ok((v, lib(&p.fragment_msl, &p.fragment_entry)?)));
-        self.compile_ms += t.elapsed().as_secs_f64() * 1000.0;
-        match r {
-            Ok((vfn, ffn)) => {
-                let mut attrs = Vec::new();
-                for a in &p.layout.attributes {
-                    let (comps, cols) = match a.ty.as_str() {
-                        "float" => (1, 1),
-                        "vec2" => (2, 1),
-                        "vec3" => (3, 1),
-                        "vec4" => (4, 1),
-                        "mat4" => (4, 4),
-                        other => {
-                            self.report(format!("program {name}: attribute {} of type {other} is not supported", a.name));
-                            return;
+    /// Apply what the workers finished: programs compiled (or failed), pipeline slots filled.
+    fn drain(&mut self) {
+        for ev in self.compiler.poll() {
+            match ev {
+                Event::Program { hash, result } => {
+                    for name in self.waiting_progs.remove(&hash).unwrap_or_default() {
+                        match &result {
+                            Ok(()) => self.compiled += 1,
+                            Err(e) => self.report(format!("program {name}: {e}")),
                         }
-                    };
-                    let nid = self.name_id(&a.name);
-                    attrs.push(ProgAttr { name: nid, location: a.location, comps, cols });
-                }
-                for (stage, f) in [("vertex", false), ("fragment", true)] {
-                    let n = p.layout.textures.iter().filter(|t| (if f { t.fragment } else { t.vertex }).is_some_and(|b| b.sampler.is_some())).count();
-                    if n > MAX_SAMPLERS as usize {
-                        self.report(format!("program {name}: {n} samplers in the {stage} stage (Metal allows {MAX_SAMPLERS}): the rest are left unbound"));
+                    }
+                    if result.is_err() {
+                        // as when it never compiled: its materials draw nothing
+                        self.progs.retain(|_, p| p.hash != hash);
                     }
                 }
-                self.compiled += 1;
-                self.progs.insert(id, Prog { key, layout: p.layout, attrs, vfn, ffn });
+                Event::Pipeline { key, result } => {
+                    for i in self.waiting_pipes.remove(&key).unwrap_or_default() {
+                        let slot = match &result {
+                            Ok(p) => {
+                                self.pipelines_built += 1;
+                                Slot::Ready(p.0.clone())
+                            }
+                            Err(e) => {
+                                if let Slot::Pending { label } = &self.slots[i as usize] {
+                                    let msg = format!("pipeline for {label}: {e}");
+                                    self.report(msg);
+                                }
+                                Slot::Failed
+                            }
+                        };
+                        self.slots[i as usize] = slot;
+                    }
+                }
+                Event::Persisted(Ok(Some(line))) => self.archive_note = Some(line),
+                Event::Persisted(Ok(None)) => {}
+                Event::Persisted(Err(e)) => {
+                    // not a rendering problem: the next launch compiles instead of looking up
+                    if self.archive_note.as_deref() != Some(&e) {
+                        eprintln!("pipeline cache: {e}");
+                    }
+                    self.archive_note = Some(e);
+                }
             }
-            Err(e) => self.report(format!("program {name}: {e}")),
+        }
+        let q = self.compiler.stats();
+        (self.compile_ms, self.pipeline_ms) = (q.library_ms, q.pipeline_ms);
+    }
+
+    /// Once per frame, before anything else: take the workers' results, count the frame, and write the manifest
+    /// and the archive (on a worker) when the queue is idle and there is something new.
+    pub fn poll(&mut self) {
+        self.drain();
+        let now = Instant::now();
+        let q = self.compiler.stats();
+        let pending = q.pending_programs + q.pending_pipelines;
+        let skipped = self.skipped.get();
+        let st = &mut self.stats;
+        if let Some(last) = self.last_poll.replace(now) {
+            // the frame that just ended
+            let ms = now.duration_since(last).as_secs_f64() * 1000.0;
+            st.frames += 1;
+            if st.frames == 1 {
+                st.first_frame_ms = Some(since_start());
+            } else {
+                st.long_frames += (ms > 50.0) as u64;
+                st.longest_frame_ms = st.longest_frame_ms.max(ms);
+            }
+            if skipped != self.skipped_at_poll {
+                st.frames_with_skips += 1;
+                st.last_incomplete_frame_ms = Some(since_start());
+            } else if pending == 0 && st.first_complete_frame_ms.is_none() && self.pipelines_built > 0 {
+                st.first_complete_frame_ms = Some(since_start());
+            }
+        }
+        self.skipped_at_poll = skipped;
+        if pending == 0 && self.was_pending {
+            st.all_ready_ms = Some(since_start());
+        }
+        self.was_pending = pending > 0;
+        if pending == 0 && q.prewarm_queued == 0 && self.last_persist.elapsed().as_secs_f32() > 1.0 && self.unsaved() {
+            self.last_persist = now;
+            self.compiler.persist();
         }
     }
 
-    pub fn pipeline_at(&self, i: u32) -> Option<&RenderPipeline> { self.pipes.get(i as usize).and_then(|p| p.as_ref()) }
+    fn unsaved(&self) -> bool { self.compiler.dirty() || self.compiler.backend().unsaved() > 0 }
 
-    /// The pipeline for a material instance drawn with `sig` streams (built on first use, then cached; a failed
-    /// build is cached too, so it is attempted once).
-    pub fn pipeline(&mut self, dev: &Device, m: &ProgramMaterialMeta, sig: StreamSig, target: Target) -> Option<u32> {
+    /// Programs added whose libraries are still compiling.
+    pub fn pending_programs(&self) -> usize { self.compiler.stats().pending_programs }
+
+    /// Pipelines requested and not ready yet (their draws are skipped).
+    pub fn pending_pipelines(&self) -> usize { self.compiler.stats().pending_pipelines }
+
+    /// Wait until everything queued is compiled (this launch's programs and pipelines and the manifest's), fill
+    /// the slots and persist the manifest + archive. True when the frame encoded last skipped draws: a harness
+    /// that captures renders one more frame.
+    pub fn settle(&mut self) -> bool {
+        self.compiler.wait_idle();
+        self.drain();
+        if self.unsaved() {
+            self.last_persist = Instant::now();
+            self.compiler.persist();
+            self.compiler.wait_idle();
+            self.drain();
+        }
+        self.skipped.get() != self.skipped_at_poll
+    }
+
+    pub fn compile_stats(&self) -> CompileStats {
+        CompileStats { queue: self.compiler.stats(), skipped_draws: self.skipped.get(), ..self.stats }
+    }
+
+    /// One log line of [`CompileStats`] (CI greps `pending_programs`, `skipped draws`, `first frame`).
+    pub fn compile_line(&self) -> String {
+        let s = self.compile_stats();
+        let q = s.queue;
+        let ms = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("+{v:.0} ms"));
+        format!(
+            "compile: {} ({} workers, built-in shaders: {}), {} libraries in {:.0} ms of worker time ({} shared), {} pipelines in {:.0} ms ({} from the binary archive); manifest at launch {} programs / {} pipelines, prewarmed {} / {}; pending_programs {}, pending pipelines {}; skipped draws {} in {} of {} frames; render-thread waits {} ({:.0} ms); first frame {}, first complete frame {}, last incomplete frame {}, all pipelines ready {}; frames over 50 ms: {}, longest {:.0} ms; archive: {}",
+            if s.blocking { "blocking" } else { "async" },
+            s.workers,
+            builtin_kind(),
+            q.libraries,
+            q.library_ms,
+            q.libraries_shared,
+            q.pipelines,
+            q.pipeline_ms,
+            q.archive_hits,
+            q.manifest_programs,
+            q.manifest_pipelines,
+            q.prewarmed_programs,
+            q.prewarmed_pipelines,
+            q.pending_programs,
+            q.pending_pipelines,
+            s.skipped_draws,
+            s.frames_with_skips,
+            s.frames,
+            s.waits,
+            s.wait_ms,
+            ms(s.first_frame_ms),
+            ms(s.first_complete_frame_ms),
+            ms(s.last_incomplete_frame_ms),
+            ms(s.all_ready_ms),
+            s.long_frames,
+            s.longest_frame_ms,
+            self.archive_note.as_deref().unwrap_or(self.compiler.backend().archive_state()),
+        )
+    }
+
+    /// Register a translated program (`host.program` just translated it; `id` is the short id material uploads
+    /// use) and queue its two MSL sources for compilation. Blocking mode waits for them.
+    pub fn add(&mut self, _dev: &Device, id: u32, key: String, p: xlat::Program) {
+        let name = key.split(',').next().unwrap_or("").to_string();
+        let mut attrs = Vec::new();
+        for a in &p.layout.attributes {
+            let (comps, cols) = match a.ty.as_str() {
+                "float" => (1, 1),
+                "vec2" => (2, 1),
+                "vec3" => (3, 1),
+                "vec4" => (4, 1),
+                "mat4" => (4, 4),
+                other => {
+                    self.report(format!("program {name}: attribute {} of type {other} is not supported", a.name));
+                    return;
+                }
+            };
+            let nid = self.name_id(&a.name);
+            attrs.push(ProgAttr { name: nid, location: a.location, comps, cols });
+        }
+        for (stage, f) in [("vertex", false), ("fragment", true)] {
+            let n = p.layout.textures.iter().filter(|t| (if f { t.fragment } else { t.vertex }).is_some_and(|b| b.sampler.is_some())).count();
+            if n > MAX_SAMPLERS as usize {
+                self.report(format!("program {name}: {n} samplers in the {stage} stage (Metal allows {MAX_SAMPLERS}): the rest are left unbound"));
+            }
+        }
+        let info = ProgramInfo::new(
+            &name,
+            &p.vertex_msl,
+            &p.fragment_msl,
+            &p.vertex_entry,
+            &p.fragment_entry,
+            attrs.iter().map(|a| Attr { location: a.location, comps: a.comps, cols: a.cols }).collect(),
+        );
+        let hash = self.compiler.add_program(info, Arc::from(p.vertex_msl), Arc::from(p.fragment_msl));
+        self.waiting_progs.entry(hash).or_default().push(name);
+        self.progs.insert(id, Prog { key, layout: p.layout, attrs, hash });
+        if self.blocking {
+            let t = Instant::now();
+            self.compiler.wait_program(hash);
+            self.stats.waits += 1;
+            self.stats.wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+        }
+        self.drain();
+    }
+
+    /// The pipeline in slot `i`; None while it compiles (the draw is skipped this frame, and counted) or when it
+    /// failed.
+    pub fn pipeline_at(&self, i: u32) -> Option<&RenderPipeline> {
+        match self.slots.get(i as usize) {
+            Some(Slot::Ready(p)) => Some(p),
+            Some(Slot::Pending { .. }) => {
+                self.skipped.set(self.skipped.get() + 1);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// The pipeline slot for a material instance drawn with `sig` streams: queued for compilation on first use
+    /// (ready at once when the manifest prewarmed it), then cached; a failed build is cached too. None: it failed.
+    /// The main pass never waits; a render target or shadow map does (see the module doc), as does blocking mode.
+    pub fn pipeline(&mut self, _dev: &Device, m: &ProgramMaterialMeta, sig: StreamSig, target: Target) -> Option<u32> {
         let key = match target {
             Target::Main | Target::Rt(_) => PipeKey { prog: m.program, blend: three::blend_of(m), color_write: m.color_write, sig, target },
             // WebGLShadowMap: NoBlending; the colour attachment is not there (Depth) or always written (Rg16)
             _ => PipeKey { prog: m.program, blend: None, color_write: true, sig, target },
         };
         if let Some(&i) = self.pipe_index.get(&key) {
-            return self.pipes[i as usize].as_ref().map(|_| i);
+            return (!matches!(self.slots[i as usize], Slot::Failed)).then_some(i);
         }
-        let t = std::time::Instant::now();
-        let r = match self.progs.get(&m.program) {
-            Some(p) => build_pipeline(dev, p, &key),
-            None => Err(format!("program {} was never translated", m.program)),
-        };
-        self.pipeline_ms += t.elapsed().as_secs_f64() * 1000.0;
-        let i = self.pipes.len() as u32;
-        let ok = match r {
-            Ok(p) => {
-                self.pipes.push(Some(p));
-                self.pipelines_built += 1;
-                true
-            }
-            Err(e) => {
-                self.report(format!("pipeline for {} ({}): {e}", m.ty, m.name));
-                self.pipes.push(None);
-                false
-            }
-        };
+        let i = self.slots.len() as u32;
         self.pipe_index.insert(key, i);
-        ok.then_some(i)
+        let label = format!("{} ({})", m.ty, m.name);
+        let Some(hash) = self.progs.get(&m.program).map(|p| p.hash) else {
+            self.report(format!("pipeline for {label}: program {} was never translated", m.program));
+            self.slots.push(Slot::Failed);
+            return None;
+        };
+        let pk = PipelineKey { program: hash, blend: key.blend, color_write: key.color_write, sig, target };
+        match self.compiler.request(&pk) {
+            Status::Ready(p) => {
+                self.pipelines_built += 1;
+                self.slots.push(Slot::Ready(p.0));
+            }
+            Status::Failed(e) => {
+                self.report(format!("pipeline for {label}: {e}"));
+                self.slots.push(Slot::Failed);
+            }
+            Status::Pending => {
+                self.slots.push(Slot::Pending { label });
+                self.waiting_pipes.entry(pk).or_default().push(i);
+                if self.blocking || target != Target::Main {
+                    let t = Instant::now();
+                    self.compiler.wait_pipeline(&pk);
+                    self.stats.waits += 1;
+                    self.stats.wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+                    self.drain();
+                }
+            }
+        }
+        (!matches!(self.slots[i as usize], Slot::Failed)).then_some(i)
     }
 
     /// Depth state as WebGLState sets it: depthTest off = always pass; three's depth function constants.
@@ -426,10 +727,13 @@ fn float_format(n: u32) -> MTLVertexFormat {
     }
 }
 
-fn build_pipeline(dev: &Device, p: &Prog, key: &PipeKey) -> Result<RenderPipeline, String> {
+/// The Metal 3 pipeline descriptor of a job (vertex layout from the stream signature, attachments from the target).
+fn descriptor(job: &PipelineJob<'_, Mt<Library>>) -> Result<Retained<MTLRenderPipelineDescriptor>, String> {
+    let key = job.key;
+    let func = |lib: &Mt<Library>, entry: &str| lib.0.newFunctionWithName(&NSString::from_str(entry)).ok_or_else(|| format!("missing {entry}"));
     let vd = MTLVertexDescriptor::new();
     let (attrs, layouts) = (vd.attributes(), vd.layouts());
-    for (k, a) in p.attrs.iter().enumerate() {
+    for (k, a) in job.attrs.iter().enumerate() {
         let s = (key.sig >> (4 * k)) & 15;
         let b = ATTR_BUFFER0 + a.location as usize;
         if b > 30 {
@@ -458,17 +762,16 @@ fn build_pipeline(dev: &Device, p: &Prog, key: &PipeKey) -> Result<RenderPipelin
         }
     }
     let d = MTLRenderPipelineDescriptor::new();
-    d.setVertexFunction(Some(&p.vfn));
-    d.setFragmentFunction(Some(&p.ffn));
+    d.setVertexFunction(Some(&*func(job.vertex, job.vertex_entry)?));
+    d.setFragmentFunction(Some(&*func(job.fragment, job.fragment_entry)?));
     d.setVertexDescriptor(Some(&vd));
     if key.target == Target::Depth {
         d.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
-        return dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string());
+        return Ok(d);
     }
-    let a = unsafe { d.colorAttachments().objectAtIndexedSubscript(0) };
     if key.target == Target::Rg16 {
-        a.setPixelFormat(MTLPixelFormat::RG16Float);
-        return dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string());
+        unsafe { d.colorAttachments().objectAtIndexedSubscript(0) }.setPixelFormat(MTLPixelFormat::RG16Float);
+        return Ok(d);
     }
     // the main pass, or a render target's attachments (MRT: the same state on every colour attachment, as WebGL)
     let (colors, depth) = match key.target {
@@ -491,10 +794,211 @@ fn build_pipeline(dev: &Device, p: &Prog, key: &PipeKey) -> Result<RenderPipelin
             a.setAlphaBlendOperation(blend_op(ea));
         }
     }
-    let _ = a;
     d.setDepthAttachmentPixelFormat(depth);
     if depth == MTLPixelFormat::Depth32Float_Stencil8 {
         d.setStencilAttachmentPixelFormat(depth);
     }
-    dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string())
+    Ok(d)
 }
+
+// ------------------------------------------------------------------------------------------------ Metal 3 backend
+
+/// The persisted binary form of the pipelines, Metal 3: one `MTLBinaryArchive` file per GPU. Last launch's
+/// archive is only looked up (`binaryArchives` on the descriptor, `FailOnBinaryArchiveMiss` to tell a hit from a
+/// compile); what the lookups missed is added to a second archive object on `persist` and serialised over the
+/// file, so lookups on other workers never race an archive that is being written.
+struct Archive {
+    path: PathBuf,
+    /// last launch's archive, opened on first use by a worker (None: no file, or Metal refused it)
+    loaded: OnceLock<Option<Mt<Retained<NSArray<ProtocolObject<dyn MTLBinaryArchive>>>>>>,
+    missed: Mutex<Vec<Mt<Retained<MTLRenderPipelineDescriptor>>>>,
+    writer: Mutex<Option<Mt<BinaryArchive>>>,
+    unsaved: AtomicUsize,
+}
+
+/// [`PipelineBackend`] on Metal 3: `newLibraryWithSource`, `newRenderPipelineStateWithDescriptor`,
+/// `MTLBinaryArchive`. Called on the compile workers only.
+pub struct Metal3 {
+    dev: Mt<Retained<Device>>,
+    archive: Option<Archive>,
+}
+
+fn open_archive(dev: &Device, path: Option<&std::path::Path>) -> Result<BinaryArchive, String> {
+    let d = MTLBinaryArchiveDescriptor::new();
+    if let Some(p) = path {
+        d.setUrl(Some(&*NSURL::from_file_path(p).ok_or("archive path is not a file URL")?));
+    }
+    dev.newBinaryArchiveWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string())
+}
+
+impl Metal3 {
+    /// `dir`: the pipeline cache directory (None, or `FASTRENDER_ARCHIVE=0`: no archive).
+    pub fn new(dev: &Device, dir: Option<&std::path::Path>) -> Self {
+        let on = std::env::var("FASTRENDER_ARCHIVE").map_or(true, |v| v != "0" && v != "off");
+        let archive = dir.filter(|_| on).map(|dir| {
+            // per GPU: Metal rejects (or misses in) an archive built for another device or OS build by itself
+            let gpu: String = dev.name().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+            Archive { path: dir.join(format!("metal3-{gpu}.binarchive")), loaded: OnceLock::new(), missed: Mutex::new(Vec::new()), writer: Mutex::new(None), unsaved: AtomicUsize::new(0) }
+        });
+        Metal3 { dev: Mt(dev.retain()), archive }
+    }
+
+    /// pipelines compiled since the last persist (not in the archive file yet)
+    pub fn unsaved(&self) -> usize { self.archive.as_ref().map_or(0, |a| a.unsaved.load(Ordering::Relaxed)) }
+
+    fn archive_state(&self) -> &'static str {
+        match &self.archive {
+            None => "off",
+            Some(a) => match a.loaded.get() {
+                None => "not opened yet",
+                Some(None) => "none from an earlier launch",
+                Some(Some(_)) => "loaded, nothing new to write",
+            },
+        }
+    }
+}
+
+impl PipelineBackend for Metal3 {
+    type Library = Mt<Library>;
+    type Pipeline = Mt<RenderPipeline>;
+
+    fn library(&self, msl: &str) -> Result<Mt<Library>, String> {
+        autoreleasepool(|_| {
+            let opts = MTLCompileOptions::new();
+            self.dev.0.newLibraryWithSource_options_error(&NSString::from_str(msl), Some(&opts)).map(Mt).map_err(|e| e.localizedDescription().to_string())
+        })
+    }
+
+    fn pipeline(&self, job: &PipelineJob<'_, Mt<Library>>) -> Result<(Mt<RenderPipeline>, bool), String> {
+        autoreleasepool(|_| {
+            let dev = &self.dev.0;
+            let d = descriptor(job)?;
+            if let Some(a) = &self.archive {
+                let loaded = a.loaded.get_or_init(|| {
+                    if !a.path.exists() {
+                        return None;
+                    }
+                    match open_archive(dev, Some(&a.path)) {
+                        Ok(ar) => Some(Mt(NSArray::from_retained_slice(&[ar]))),
+                        Err(e) => {
+                            eprintln!("pipeline cache: {} not loaded ({e}): compiling instead", a.path.display());
+                            None
+                        }
+                    }
+                });
+                if let Some(list) = loaded {
+                    d.setBinaryArchives(Some(&list.0));
+                    if let Ok(p) = dev.newRenderPipelineStateWithDescriptor_options_reflection_error(&d, MTLPipelineOption::FailOnBinaryArchiveMiss, None) {
+                        return Ok((Mt(p), true));
+                    }
+                    // a miss (new pipeline, another OS build, another GPU): compile, and add it at the next persist
+                    d.setBinaryArchives(None);
+                }
+            }
+            let p = dev.newRenderPipelineStateWithDescriptor_error(&d).map_err(|e| e.localizedDescription().to_string())?;
+            if let Some(a) = &self.archive {
+                a.missed.lock().unwrap_or_else(|e| e.into_inner()).push(Mt(d));
+                a.unsaved.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok((Mt(p), false))
+        })
+    }
+
+    fn persist(&self) -> Result<Option<String>, String> {
+        let Some(a) = &self.archive else { return Ok(None) };
+        let missed = std::mem::take(&mut *a.missed.lock().unwrap_or_else(|e| e.into_inner()));
+        a.unsaved.fetch_sub(missed.len(), Ordering::Relaxed);
+        if missed.is_empty() {
+            return Ok(None);
+        }
+        autoreleasepool(|_| {
+            let t = Instant::now();
+            let dev = &self.dev.0;
+            let mut w = a.writer.lock().unwrap_or_else(|e| e.into_inner());
+            if w.is_none() {
+                // on top of last launch's file when Metal still accepts it, else from empty
+                let from_file = a.path.exists().then(|| open_archive(dev, Some(&a.path)).ok()).flatten();
+                *w = Some(Mt(match from_file {
+                    Some(ar) => ar,
+                    None => open_archive(dev, None).map_err(|e| format!("binary archive not created: {e}"))?,
+                }));
+            }
+            let ar = &w.as_ref().unwrap().0;
+            let (mut added, mut failed) = (0, None);
+            for d in &missed {
+                match ar.addRenderPipelineFunctionsWithDescriptor_error(&d.0) {
+                    Ok(()) => added += 1,
+                    Err(e) => failed = Some(e.localizedDescription().to_string()),
+                }
+            }
+            if added == 0 {
+                return Err(format!("binary archive: none of {} pipelines could be added: {}", missed.len(), failed.unwrap_or_default()));
+            }
+            if let Some(dir) = a.path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            let tmp = a.path.with_extension(format!("{}.tmp", std::process::id()));
+            let _ = std::fs::remove_file(&tmp);
+            let url = NSURL::from_file_path(&tmp).ok_or("archive path is not a file URL")?;
+            ar.serializeToURL_error(&url).map_err(|e| format!("binary archive not serialised: {}", e.localizedDescription()))?;
+            std::fs::rename(&tmp, &a.path).map_err(|e| format!("binary archive not moved into place: {e}"))?;
+            let bytes = std::fs::metadata(&a.path).map_or(0, |m| m.len());
+            Ok(Some(format!(
+                "{added} pipelines added{} in {:.0} ms, {} KB at {}",
+                failed.map_or(String::new(), |e| format!(" ({} refused: {e})", missed.len() - added)),
+                t.elapsed().as_secs_f64() * 1000.0,
+                bytes >> 10,
+                a.path.display()
+            )))
+        })
+    }
+}
+
+// ----------------------------------------------------------------------------------------------- built-in shaders
+
+/// shaders/fastrender.metal compiled by build.rs with Apple's offline compiler (`xcrun metal` + `metallib`), when
+/// the build machine has it.
+#[cfg(fr_metallib)]
+static BUILTIN_METALLIB: Option<&[u8]> = Some(include_bytes!(concat!(env!("OUT_DIR"), "/fastrender.metallib")));
+#[cfg(not(fr_metallib))]
+static BUILTIN_METALLIB: Option<&[u8]> = None;
+const BUILTIN_SRC: &str = include_str!("../shaders/fastrender.metal");
+
+/// (device, hash of the source, library): the built-in library is asked for more than once per launch
+static BUILTIN: Mutex<Option<(usize, pm::Hash, Mt<Library>)>> = Mutex::new(None);
+
+/// The built-in shader library for `src`: the precompiled metallib when `src` is the source it was built from
+/// (no compile at launch), else compiled from source (hot reload, an edited shader file, no Xcode at build time,
+/// or a metallib this OS refuses). One library per source per process.
+pub fn builtin_library(dev: &Device, src: &str) -> Result<Library, String> {
+    mark_start();
+    let h = pm::hash128(&[src.as_bytes()]);
+    let me = dev as *const Device as usize;
+    let mut cache = BUILTIN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((d, hash, lib)) = &*cache {
+        if (*d, *hash) == (me, h) {
+            return Ok(lib.0.clone());
+        }
+    }
+    let precompiled = BUILTIN_METALLIB.filter(|_| src == BUILTIN_SRC && std::env::var("FASTRENDER_METALLIB").map_or(true, |v| v != "0")).and_then(|bytes| {
+        let data = dispatch2::DispatchData::from_static_bytes(bytes);
+        match dev.newLibraryWithData_error(&data) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!("built-in metallib not loaded ({}): compiling shaders/fastrender.metal from source", e.localizedDescription());
+                None
+            }
+        }
+    });
+    let lib = match precompiled {
+        Some(l) => l,
+        None => dev
+            .newLibraryWithSource_options_error(&NSString::from_str(src), Some(&MTLCompileOptions::new()))
+            .map_err(|e| format!("shader compile: {}", e.localizedDescription()))?,
+    };
+    *cache = Some((me, h, Mt(lib.clone())));
+    Ok(lib)
+}
+
+/// How the built-in shaders were built into this binary (for logs).
+pub fn builtin_kind() -> &'static str { if BUILTIN_METALLIB.is_some() { "precompiled metallib" } else { "source" } }

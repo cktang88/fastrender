@@ -255,9 +255,8 @@ pub struct ThreeScene {
 }
 
 fn pipes(dev: &Device, src: &str) -> Result<Pipes, String> {
-    let lib = dev
-        .newLibraryWithSource_options_error(&NSString::from_str(src), Some(&MTLCompileOptions::new()))
-        .map_err(|e| format!("shader compile: {}", e.localizedDescription()))?;
+    // the precompiled metallib, or the library the renderer compiled from this source a moment ago
+    let lib = crate::mac_programs::builtin_library(dev, src)?;
     let func = |n: &str| lib.newFunctionWithName(&NSString::from_str(n)).ok_or_else(|| format!("missing {n}"));
     let make = |vs: &str, fs: Option<&str>, blend: bool| -> Result<RenderPipeline, String> {
         let d = MTLRenderPipelineDescriptor::new();
@@ -326,6 +325,8 @@ type Sampler = Retained<ProtocolObject<dyn MTLSamplerState>>;
 
 impl ThreeScene {
     pub fn new(dev: &Device, shader_src: &str, bundle_path: &str, params_json: &str) -> Result<Self, String> {
+        // last launch's pipelines start compiling now, on the workers, while the bundle loads
+        crate::mac_programs::prewarm(dev);
         let game = std::fs::read_to_string(bundle_path).map_err(|e| format!("bundle {bundle_path}: {e}"))?;
         // the shared command buffer is native memory here (JavaScriptCore can expose it without a copy)
         // glslang's one-time setup off the first host.program call's path
@@ -421,6 +422,8 @@ impl ThreeScene {
         let dt = (t - self.last_t).max(0.0);
         self.last_t = t;
         self.progs.ensure_lit_depth(dev, queue);
+        // what the compile workers finished since the last frame (programs, pipeline slots)
+        self.progs.poll();
         // the stream stays in the host's buffer until the next frame() (JS is not running): detach it from the borrow
         let words = self.host.frame(t as f64, dt as f64).map(|w| unsafe { std::slice::from_raw_parts(w.as_ptr(), w.len()) });
         // every pass of the frame, each with its own ring region (src/mac_targets.rs); the main screen pass ends up in
@@ -455,6 +458,13 @@ impl ThreeScene {
         (self.progs.compiled, self.progs.pipelines_built, self.progs.problems() + self.error.is_some() as usize, self.vis3.len())
     }
 
+    /// Programs whose libraries are still compiling, pipelines requested and not ready (their draws are skipped).
+    pub fn pending_programs(&self) -> (usize, usize) { (self.progs.pending_programs(), self.progs.pending_pipelines()) }
+
+    /// Wait for every queued compile and persist the pipeline manifest (a harness, before it captures or exits).
+    /// True when the last frame skipped draws: render one more before capturing.
+    pub fn settle(&mut self) -> bool { self.progs.settle() }
+
     /// Texture ids, Metal compile and pipeline counters of the v3 path, for logs.
     pub fn program_stats(&self) -> Option<String> {
         let p = &self.progs;
@@ -474,6 +484,7 @@ impl ThreeScene {
                 self.layout.need >> 10,
                 crate::ring::OVERFLOWS.load(std::sync::atomic::Ordering::Relaxed)
             ) + &self.pass_stats().map_or(String::new(), |p| format!("; {p}"))
+                + &format!("\nthree {}", p.compile_line())
         })
     }
 

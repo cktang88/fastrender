@@ -189,9 +189,8 @@ fn deferred_atts(write: [bool; 5], additive0: bool) -> Vec<Att> {
 
 impl Pipelines {
     fn new(dev: &Device, src: &str, caps: Caps) -> Result<Self, String> {
-        let lib = dev
-            .newLibraryWithSource_options_error(&NSString::from_str(src), Some(&MTLCompileOptions::new()))
-            .map_err(|e| format!("shader compile: {}", e.localizedDescription()))?;
+        // the metallib build.rs precompiled when `src` is the shipped source, else compiled here (hot reload)
+        let lib = crate::mac_programs::builtin_library(dev, src)?;
         let func = |name: &str| lib.newFunctionWithName(&NSString::from_str(name)).ok_or_else(|| format!("missing shader function {name}"));
         let render = |vs: &str, fs: Option<&str>, atts: &[Att], depth: MTLPixelFormat| -> Result<RenderPipeline, String> {
             let d = MTLRenderPipelineDescriptor::new();
@@ -1292,6 +1291,8 @@ pub fn motion_selftest() -> Result<(), String> {
 }
 
 pub fn selftest(cfg: Config) {
+    // complete frames: every program / pipeline is waited for where it is first needed (FASTRENDER_COMPILE overrides)
+    crate::mac_programs::set_blocking_default(true);
     if cfg.upscale == Upscale::Temporal {
         match motion_selftest() {
             Ok(()) => println!("motion-vector selftest: PASS"),
@@ -1329,6 +1330,9 @@ pub struct BenchResult {
 
 pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     let skip = |e: String| BenchResult { label: label.into(), frames: 0, fps: 0.0, gpu_avg: 0.0, gpu_p99: 0.0, js_ms: None, skipped: Some(e) };
+    // goldens and timings want complete, reproducible frames: programs and pipelines are waited for where they are
+    // first needed, as when they compiled synchronously (FASTRENDER_COMPILE=async measures the launch path instead)
+    crate::mac_programs::set_blocking_default(true);
     let mut r = match Renderer::new(cfg.clone(), FRAME_SLOTS) {
         Ok(r) => r,
         Err(e) => return skip(e),
@@ -1378,6 +1382,14 @@ pub fn bench(cfg: &Config, label: &str) -> BenchResult {
     }
     r.wait_idle();
     let wall = start.elapsed().as_secs_f64();
+    // settle: every queued compile done and the pipeline manifest + archive on disk before the shot / exit; async
+    // mode only: one more frame when the last one skipped draws whose pipelines were still compiling
+    if let Content::Three(s) = &mut r.content {
+        if s.settle() {
+            r.render(at(cfg.warmup + extra + i), || None);
+            r.wait_idle();
+        }
+    }
     for ms in r.take_gpu_times() {
         gpu.push(ms);
     }
