@@ -22,6 +22,11 @@ jobs:
         run: |
           ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000
           ./target/release/fastrender selftest --path forward --upscale metalfx --scale 0.5 --size 640x400 --props 20000
+          echo "--- H1: bigger size"; ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 1280x800 --props 20000
+          echo "--- H2: more props"; ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 60000
+          echo "--- H3: validation on"; MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ./target/release/fastrender selftest --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000
+          echo "--- H4: bench path, no validation"; ./target/release/fastrender bench --path forward --upscale bilinear --scale 1 --size 640x400 --props 20000 --frames 20 --warmup 2 --shot h4.png
+          python3 -c "import zlib,struct;d=open('h4.png','rb').read();print('h4.png bytes',len(d))"
       - name: validation-layer run + screenshots
         env:
           MTL_DEBUG_LAYER: "1"
