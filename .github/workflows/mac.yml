@@ -1,0 +1,14 @@
+name: mac
+on: [push, workflow_dispatch]
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sw_vers; sysctl -n machdep.cpu.brand_string
+      - run: cargo build --release
+      - run: ./target/release/fastrender
