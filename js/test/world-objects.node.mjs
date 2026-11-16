@@ -111,7 +111,9 @@ const wantDoor = args.includes('--door');
 const wantProfile = args.includes('--profile'), wantMatrixStats = args.includes('--matrix-stats');
 const program0 = fixName ? (k, vs, fs, id) => program0x(k, vs.replace(/^#define SHADER_NAME .*$/m, ''), fs.replace(/^#define SHADER_NAME .*$/m, ''), id) : program0x;
 const allPrograms = new Map(); // every program asked for (also the ones that fail): --dump-programs
-host.program = (...a) => { allPrograms.set(a[0], { vertex: a[1], fragment: a[2] }); const t = hrNow(); try { return program0(...a); } catch (e) { hstats.failed = (hstats.failed || 0) + 1; console.log('program failed:', String(e.message).slice(0, 300)); return null; } finally { hstats.programs++; hstats.programMs += hrNow() - t; } };
+// FR_PROGRAM_LOG=1: every program translated after the start, with the measured frame it came in and its defines
+let frameNo = -1;
+host.program = (...a) => { if (process.env.FR_PROGRAM_LOG && frameNo >= 0) console.log(`program in frame ${frameNo}: ${(/#define SHADER_NAME (.*)/.exec(a[1]) || [, '?'])[1]} | ${[...a[2].matchAll(/^#define (USE_\w+|NUM_\w+ \d+|\w+_LIGHT\w* \d+)/gm)].map((m) => m[1].replace(/^USE_/, '')).join(' ')}`.slice(0, 700)); allPrograms.set(a[0], { vertex: a[1], fragment: a[2] }); const t = hrNow(); try { return program0(...a); } catch (e) { hstats.failed = (hstats.failed || 0) + 1; console.log('program failed:', String(e.message).slice(0, 300)); return null; } finally { hstats.programs++; hstats.programMs += hrNow() - t; } };
 // pixels of a real 2D canvas (napi) for FastRenderer's texture upload
 host.imagePixels = (img) => {
   if (!napi || !img || typeof img.getContext !== 'function' || !img.width) return null;
@@ -251,6 +253,7 @@ const abGame = /^game:(\w+)\.(\w+)$/.exec(abProp);
 const abKey = abGame ? abGame[2] : abProp, abOff = abGame ? false : 0;
 const abTarget = () => (abGame ? globalThis[abGame[1]] || {} : renderer);
 for (let i = 0; i < frames; i++) {
+  frameNo = i;
   if (abProp) abTarget()[abKey] = Math.floor(i / abBlock) % 2 === 0 ? abOn : abOff;
   renderMs = 0; renderCalls = 0; renderCpu = 0;
   // (in jumps of a quarter second from where the walk started: the game's collisions push a walker back out of cars and walls)

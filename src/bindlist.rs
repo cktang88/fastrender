@@ -840,6 +840,20 @@ pub fn instance_split_allowed(reads_instance_id: bool, hint: bool, frustum_culle
 /// - `pass_draws == 1`: the pass is one draw (a full-screen pass: without it the screen is its clear colour).
 pub fn main_draw_waits(replaces: bool, samples_target: bool, pass_draws: usize) -> bool { replaces || samples_target || pass_draws == 1 }
 
+/// Replacement pipelines required in one frame from which the change counts as "the whole lit scene" (`main_wait_ms`).
+pub const MAIN_WAIT_MANY: usize = 8;
+/// What a frame waits at most when only a few material instances got another program (ms: about half a frame).
+pub const MAIN_WAIT_FEW_MS: u64 = 8;
+
+/// How long the main pass waits (ms) for `replaced` pipelines that take the place of ones on screen, given the
+/// limit `cap_ms` (`FASTRENDER_MAIN_WAIT_MS`; None: no limit, the harness's blocking mode):
+/// - a few (a material that got a map or a define while its block streamed in): `MAIN_WAIT_FEW_MS`. Its draws are
+///   skipped for the frames the compile takes, which a player does not see on one material; a held frame they do;
+/// - many (every lit program at once: fog, tone mapping, a light count that stepped): `cap_ms`, so a change the
+///   workers finish quickly never shows a frame without the lit scene, and one that takes seconds stops holding
+///   frames after `cap_ms` (the scene comes back as the pipelines arrive).
+pub fn main_wait_ms(replaced: usize, cap_ms: Option<u64>) -> Option<u64> { cap_ms.map(|c| if replaced >= MAIN_WAIT_MANY { c } else { c.min(MAIN_WAIT_FEW_MS) }) }
+
 /// The (streams, target) pairs a material instance was drawn with, carried over when the instance is uploaded again
 /// (another program, another pipeline state): `ready` are the old state's pipelines that were built, `before` what
 /// the old state itself had carried over (it may have been replaced before its own pipelines were ready). The new
@@ -879,6 +893,13 @@ mod tests {
         // a post-processing output pass: samples a render target / is the pass's only draw
         assert!(main_draw_waits(false, true, 3));
         assert!(main_draw_waits(false, false, 1));
+        // how long: one streamed material's new program holds a frame for half a frame at most, a whole scene's for
+        // the limit, the harness (no limit) for as long as it takes
+        assert_eq!(main_wait_ms(2, Some(250)), Some(8));
+        assert_eq!(main_wait_ms(60, Some(250)), Some(250));
+        assert_eq!(main_wait_ms(60, Some(4)), Some(4));
+        assert_eq!(main_wait_ms(2, Some(4)), Some(4));
+        assert_eq!(main_wait_ms(2, None), None);
         // what an upload carries over: the old state's built pipelines, and what it had carried itself (replaced
         // twice before the first replacement was ready), each pair once
         let (a, b, c) = ((0x33u64, 0u8), (0x83u64, 0u8), (0x33u64, 1u8));

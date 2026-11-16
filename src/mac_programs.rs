@@ -10,10 +10,11 @@
 //! a wrong result behind: a pipeline that renders into a render target or a shadow map (content that may be drawn
 //! once: PMREM, a shadow map with `autoUpdate` off); a main-pass pipeline the pass marked with `require` (it takes
 //! the place of one that was on screen, or the screen would be empty without it: `bindlist::main_draw_waits`;
-//! all of a pass's are waited for together, `wait_required`, while the workers build them side by side, and for
-//! at most `main_wait` per frame (100 ms, `FASTRENDER_MAIN_WAIT_MS`): a change that replaces every lit program
-//! takes seconds to compile, and a game that stands still for that long is worse than one whose lit surfaces come
-//! back as their pipelines arrive); and
+//! all of a pass's are waited for together, `wait_required`, while the workers build them side by side. A pipeline
+//! the screen would be empty without is waited out; replacements for at most `bindlist::main_wait_ms` per frame:
+//! 250 ms (`FASTRENDER_MAIN_WAIT_MS`) when many are replaced at once, half a frame for a few. A change that replaces
+//! every lit program takes seconds to compile, and a game that stands still for that long is worse than one whose
+//! lit surfaces come back as their pipelines arrive); and
 //! everything in blocking mode (the golden / bench / selftest harness: the frame sequence is then exactly the
 //! synchronous one).
 //!
@@ -199,8 +200,9 @@ pub struct Programs {
     pub pipeline_ms: f64,
     skipped: Cell<u64>,
     skipped_at_poll: u64,
-    /// pending slots the pass being prepared must not skip (`require`), until `wait_required`
-    required: Vec<u32>,
+    /// pending slots the pass being prepared must not skip (`require`), until `wait_required`; true: the screen
+    /// would show nothing without it (waited out), false: it replaces a pipeline that was on screen
+    required: Vec<(u32, bool)>,
     /// slots queued by prewarm notes (`prewarm`) that are still compiling: what `prewarm_pending` reports
     prewarm_slots: Vec<u32>,
     stats: CompileStats,
@@ -254,14 +256,14 @@ unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
 }
 
-/// How long the main pass may wait per frame for pipelines that replace ones on screen (`Programs::wait_required`):
-/// 100 ms unless `FASTRENDER_MAIN_WAIT_MS` says otherwise (0 = no limit, as before); no limit in blocking mode (the
-/// golden / bench harness: every frame complete).
+/// How long the main pass may wait per frame for pipelines that replace ones on screen (`Programs::wait_required`,
+/// `bindlist::main_wait_ms`): 250 ms unless `FASTRENDER_MAIN_WAIT_MS` says otherwise (0 = no limit, as before); no
+/// limit in blocking mode (the golden / bench harness: every frame complete).
 fn main_wait_cap(blocking: bool) -> Option<std::time::Duration> {
     if blocking {
         return None;
     }
-    let ms = std::env::var("FASTRENDER_MAIN_WAIT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(100);
+    let ms = std::env::var("FASTRENDER_MAIN_WAIT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(250);
     (ms > 0).then(|| std::time::Duration::from_millis(ms))
 }
 
@@ -732,9 +734,13 @@ impl Programs {
 
     /// The pass being prepared must not skip the draws of slot `i` (see the module doc): `wait_required` waits
     /// for it. Nothing to do for a slot that is ready or failed.
-    pub fn require(&mut self, i: u32) {
-        if self.pending(i) && !self.required.contains(&i) {
-            self.required.push(i);
+    /// `whole`: the pass shows nothing without it (a full-screen pass); otherwise it replaces one that was on screen.
+    pub fn require(&mut self, i: u32, whole: bool) {
+        if self.pending(i) {
+            match self.required.iter_mut().find(|r| r.0 == i) {
+                Some(r) => r.1 |= whole,
+                None => self.required.push((i, whole)),
+            }
         }
     }
 
@@ -745,15 +751,29 @@ impl Programs {
             return 0;
         }
         let req = std::mem::take(&mut self.required);
-        let keys: Vec<PipelineKey> = self.waiting_pipes.iter().filter(|(_, slots)| slots.iter().any(|s| req.contains(s))).map(|(k, _)| *k).collect();
+        // (key, waited out)
+        let keys: Vec<(PipelineKey, bool)> = self
+            .waiting_pipes
+            .iter()
+            .filter_map(|(k, slots)| {
+                let mine = req.iter().filter(|r| slots.contains(&r.0));
+                let (mut any, mut whole) = (false, false);
+                for r in mine {
+                    any = true;
+                    whole |= r.1;
+                }
+                any.then_some((*k, whole))
+            })
+            .collect();
         let t = Instant::now();
-        let deadline = self.main_wait.map(|d| t + d);
-        for k in &keys {
+        let replaced = keys.iter().filter(|k| !k.1).count();
+        let deadline = crate::bindlist::main_wait_ms(replaced, self.main_wait.map(|d| d.as_millis() as u64)).map(|ms| t + std::time::Duration::from_millis(ms));
+        for (k, whole) in &keys {
             match deadline {
                 // (past the deadline this only asks whether it is ready: what is still compiling is skipped this
                 // frame and drawn when it arrives)
-                Some(d) => self.stats.wait_cuts += !self.compiler.wait_pipeline_until(k, d) as u64,
-                None => self.compiler.wait_pipeline(k),
+                Some(d) if !whole => self.stats.wait_cuts += !self.compiler.wait_pipeline_until(k, d) as u64,
+                _ => self.compiler.wait_pipeline(k),
             }
         }
         self.waited(crate::hitch::WAIT_MAIN, keys.len(), t);

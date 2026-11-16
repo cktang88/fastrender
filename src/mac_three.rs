@@ -906,7 +906,7 @@ impl ThreeScene {
                 let at = tex.min(self.uni_tex.len());
                 let samples_target = self.uni_tex[at..(at + n).min(self.uni_tex.len())].iter().any(|&id| self.targets.texture(id).is_some());
                 if bindlist::main_draw_waits(false, samples_target, self.draws.len()) {
-                    self.progs.require(pipe);
+                    self.progs.require(pipe, true);
                 }
             }
             let discards = self.progs.progs.get(&prog_id).is_some_and(|p| p.discard);
@@ -1051,7 +1051,7 @@ impl ThreeScene {
         mat.pipes.push((sig, target, p));
         if p != u32::MAX && target == Target::Main && bindlist::main_draw_waits(mat.prev.contains(&(sig, target)), false, 0) {
             // it replaces a pipeline this instance was on screen with: not skipped while it compiles
-            progs.require(p);
+            progs.require(p, false);
         }
         (p != u32::MAX).then_some((p, plan as u16))
     }
