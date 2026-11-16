@@ -23,8 +23,9 @@ dark lights for 120 frames (`TRIM_HOLD`), a count it had never had.
   | 43777107362, 4f392f2 (trimLights as shipped) | 5.72 s until the game let go; longest frame 5621 ms, main-pass wait; 64 programs | 6 frames, 24.3 s, longest 9.5 s |
   | 43778439015, ef4a94b, `{"dynamicLights":0}`, `FASTRENDER_MAIN_WAIT_MS=0` | 4.28 s; longest frame 4523 ms, main-pass wait; 61 programs | 7 frames, 50.6 s, longest 22.3 s |
   | 43782002528, 7bdb49c, the same switches, empty pipeline cache | 4.34 s; 57 programs | 2 frames, 21.8 s, longest 19.5 s |
-  | 43782002528, 7bdb49c, **what ships** (dynamicLights) | 2.02 s; longest frame 1644 ms, the page's JS; 4 programs | **none** (`main 0 / 0 ms`) |
-  | 43782002528, 7bdb49c, `{"dynamicLights":0}` with the wait limit (250 ms) | 1.21 s; 57 programs | 1 frame, 133 ms |
+  | 43784048180, a532b91, the same switches, empty pipeline cache | 2.44 s; 58 programs | 2 frames, 12.1 s, longest 10.8 s |
+  | 43784048180, a532b91, **what ships** (dynamicLights) | 0.73 s; longest frame 597 ms, the page's JS; 4 programs | **none** (`main 0 / 0 ms`) |
+  | 43784048180, a532b91, `{"dynamicLights":0}` with the wait limit (250 ms) | 0.77 s; 58 programs | 1 frame, 105 ms |
 
   Stock WebGLRenderer on the same runner compiles in the frame as well: `enter sports` 27.6 s, `leave deli`
   12.2 s (ANGLE on the paravirtual GPU; it has no light-count step, these are first uses).
@@ -39,8 +40,9 @@ dark lights for 120 frames (`TRIM_HOLD`), a count it had never had.
    { block k } ...`. A light going on or off changes uniforms: no program, no pipeline, and the scene's epoch does
    not move (no material picks a program again). Switches: `dynamicLights: false` / `host.params.dynamicLights = 0`
    = `trimLights` as before; `trimLights: false` = neither. Ablation rows `trimlights`, `alllights`.
-   Node, real game: the six door legs translate 8 / 2 / 0 / 0 / 0 / 2 programs (materials seen for the first
-   time), as with the game's own padding.
+   Node, real game: the six door legs translate 8 / 2 / 0 / 0 / 0 / 0 programs (materials seen for the first
+   time), as with the game's own padding. The scene's epoch follows every field of WebGLLights' hash except the
+   two lengths that now follow the lamps, so a light that starts to cast a shadow still re-picks the programs.
 2. **The main pass no longer holds a frame for seconds** (`src/bindlist.rs` `main_draw_waits`, `main_wait_ms`;
    `src/mac_programs.rs` `wait_required`; `src/pipeline_manifest.rs` `hurry`, `wait_pipeline_until`):
    - a material seen for the first time is never waited for. It was, when it sampled a render target, and every
@@ -54,9 +56,14 @@ dark lights for 120 frames (`TRIM_HOLD`), a count it had never had.
    - a pipeline the render thread waits for goes to the front of the compile queue (a shadow map's two pipelines
      had waited 8.8 s behind the level's other programs);
    - the Electron golden run compiles blocking (`FASTRENDER_COMPILE=blocking`, as CI's step already set).
+   - the 3-way bench compiles blocking too (`game/bench-main.js`): a measured or captured frame has every draw.
    Price: on a cold pipeline cache the level fills in over the first seconds instead of the window standing still
-   (CI, 2 workers, 0.3-0.5 s per stage library: the whole 60-80 s session; an Air has 4 workers and compiled the
-   whole game cold in 6.8 s before). The next launch prewarms from the manifest.
+   (CI, 2 workers, 0.35-0.5 s per stage library: the whole 60-80 s session; an Air has 4 workers and compiled the
+   whole game cold in 6.8 s before). The next launch prewarms from the manifest. **The first launch after this
+   change is such a cold one**: the cache holds trimLights' variants, not these. The programs are also larger
+   (the blocks of all 27 lights are in them): Metal's compile of the game's 91 programs took 50.5 s of worker time
+   on CI against 39.1 s with neither switch in the same job; per stage library about 0.35 s against 0.15 s for
+   trimLights' variants in the play-smoke runs. Once per cache.
 3. **Stall log for play mode** (`src/hitch.rs`, `host/electron/native/src/fr_render.rs`, `game/boot.mjs`,
    `game/main.js`; docs/HOST.md "Stall log"). Every frame over 25 ms is one `[hitch]` line, on the console and in
    `host/electron/play-out/play-<time>-<variant>.log` (`last.log` = the latest): the frame interval, the render
@@ -72,13 +79,16 @@ dark lights for 120 frames (`TRIM_HOLD`), a count it had never had.
    the bundle lacks is named in the terminal. The refused first pointer-lock request is one line, not an
    "unhandled rejection".
 
-**Same picture, same cost** (lights-ab run 43782002632, 7bdb49c; paravirtual GPU, so ratios only):
+**Same picture, same cost** (lights-ab runs 43782002632 on 7bdb49c and 43784048167 on a532b91; paravirtual GPU,
+so ratios only):
 
-| | result |
-|---|---|
-| real game golden, CLI (gate < 10) / three-city (gate < 1.0) | 6.58 / 0.97, as before |
-| the golden frame: dynamicLights vs trimLights / vs neither | MAE 0, 0 % of pixels differ / MAE 0, 0 % |
-| main pass, 40 frames, twice interleaved: neither / trimLights / dynamicLights | 51.6, 52.6 / 19.1, 14.4 / 17.5, 15.4 ms |
+| | 7bdb49c | a532b91 |
+|---|---|---|
+| real game golden, CLI (gate < 10) / three-city (gate < 1.0) | 6.58 / 0.97 | 6.58 / 0.97 (as before) |
+| the golden frame: dynamicLights vs trimLights / vs neither | MAE 0, 0 % of pixels / MAE 0, 0 % | the same |
+| main pass, 40 frames, twice interleaved: neither | 51.6, 52.6 ms | 54.6, 52.2 ms |
+| ... trimLights | 19.1, 14.4 ms | 15.5, 16.9 ms |
+| ... dynamicLights | 17.5, 15.4 ms | 17.6, 14.8 ms |
 
 A first form of dynamicLights kept every light in three's light state and tested each block's colour (27 uniform
 tests per fragment): also MAE 0, but main 21.7, 20.9 ms against trimLights' 15.9, 16.8 and JS 37 against 24-28 ms
