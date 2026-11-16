@@ -157,7 +157,7 @@ for (const k of keys) {
     if (r.discard_sort) bits.push(`discarding draws last: ${r.discard_sort.discarding_materials} discarding materials`);
     if (r.instance_cull) bits.push(`instances in view: ${r.instance_cull.instances_drawn} of ${r.instance_cull.instances_tested} drawn, ${f(r.instance_cull.ms_per_frame, 3)} ms/frame of JS, ${f(r.instance_cull.uploaded_kb_per_frame, 1)} KB/frame uploaded`);
     if (r.webgl_programs) bits.push(`WebGL programs: ${r.webgl_programs.in_use} in use, ${r.webgl_programs.created_total} compiled since load, ${r.webgl_programs.compiled_in_window} in the measured window`);
-    if (r.trim_lights) bits.push(`trimLights ${r.trim_lights.on ? `on (${r.trim_lights.dropped_last_frame} lights dropped)` : 'off'}`);
+    if (r.trim_lights) bits.push(r.trim_lights.dynamic ? 'dynamicLights on (dark lights skipped in the fragment stage)' : `trimLights ${r.trim_lights.on ? `on (${r.trim_lights.dropped_last_frame} lights dropped)` : 'off'}`);
     if (r.switches && r.switches.FASTRENDER_V3_DEBUG) bits.push(`FASTRENDER_V3_DEBUG=${r.switches.FASTRENDER_V3_DEBUG}`);
     extra.push(`- ${r.variant}${r.aa ? ' aa' : ''}${r.label ? ` (${r.label})` : ''}: ${bits.join('; ')}`);
   }
@@ -263,7 +263,7 @@ for (const k of keys) {
     if (!r) continue;
     const bits = [];
     const t = r.trim_lights, dbg = (r.switches && r.switches.FASTRENDER_V3_DEBUG) || '';
-    if (t) bits.push(`trimLights ${t.on ? 'on' : 'off'}, ${t.dropped_last_frame} lights dropped in the last frame`);
+    if (t) bits.push(t.dynamic ? 'dynamicLights on (dark lights stay in the programs and are skipped in the fragment stage)' : `trimLights ${t.on ? 'on' : 'off'}, ${t.dropped_last_frame} lights dropped in the last frame`);
     bits.push(`FASTRENDER_V3_DEBUG=${dbg || '(unset)'}`);
     // "<counts>; FASTRENDER_V3_DEBUG=<what the render thread read from its environment>"
     const line = nativeCounts(r), nm = line && /^(.*); FASTRENDER_V3_DEBUG=(\d*)$/.exec(line);
@@ -271,7 +271,7 @@ for (const k of keys) {
     bits.push(nc ? `render thread${nm ? ` (read FASTRENDER_V3_DEBUG=${nm[2] || '(unset)'})` : ''}: ${nc}` : 'no `draws per pass` line in the log (an addon built before this row existed?)');
     if (nm && (nm[2] || '') !== String(dbg)) rec.checks.push(`${v}: the render thread read FASTRENDER_V3_DEBUG=${nm[2] || '(unset)'}, the run asked for ${dbg || '(unset)'}`);
     const wantTrim = v !== 'fastrender-bare', wantDbg = v !== 'fastrender';
-    if (t && t.on !== wantTrim) rec.checks.push(`${v}: trimLights is ${t.on ? 'on' : 'off'}`);
+    if (t && t.on !== wantTrim) rec.checks.push(`${v}: dark lights are ${t.on ? 'not evaluated (dynamicLights / trimLights on)' : 'evaluated (dynamicLights and trimLights off)'}`);
     if (!!(Number(dbg) & 2048) !== wantDbg || !!(Number(dbg) & 512) !== wantDbg) rec.checks.push(`${v}: FASTRENDER_V3_DEBUG=${dbg || '(unset)'}`);
     const tested = nc && /instances (\d+) of (\d+) drawn/.exec(nc);
     if (tested && wantDbg && Number(tested[2]) !== 0) rec.checks.push(`${v}: the render thread still tested ${tested[2]} instances against the frustum`);

@@ -48,12 +48,25 @@ jobs:
           # --doors 2: after the checks, in and out of the two nearest shops through the game's enter() / goBack()
           rc=0; bash host/electron/scripts/play-world.sh --fps --play-seconds 15 --doors 2 --out "$GITHUB_WORKSPACE/play-out" --log "$GITHUB_WORKSPACE/play-out/play-fastrender-stall.log" --timeout 900 > play-fastrender.log 2>&1 || rc=$?
           echo "play-world.sh exit $rc"; echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE)|^\[fastrender\]|pointer lock|mouse is not|MISSING|Assertion|signal|^== " play-fastrender.log | cut -c1-900; } > play-fastrender-summary.txt
+          { echo "exit $rc"; grep -E "^\[game\] (PASS|FAIL|FATAL|play|window|DONE|DOOR)|^\[fastrender\] (renderer|compile)|pointer lock|mouse is not|MISSING|Assertion|signal|^== " play-fastrender.log | cut -c1-900; } > play-fastrender-summary.txt
           bash .github/annotate.sh notice "play-smoke fastrender (exit $rc)" play-fastrender-summary.txt 40
           # the stall log: what each door leg cost, the summary, and the longest frames with their cause
-          { grep -E "^\[game\] DOOR|^\[summary\]" play-fastrender.log | cut -c1-600; echo "-- the 12 longest frames:"; grep -E "^\[hitch\]" play-fastrender.log | sed -E 's/^\[hitch\] [0-9:.]+ frame ([0-9.]+) ms/\1 &/' | sort -rn | head -12 | cut -d' ' -f2- | cut -c1-900; echo "-- scripts the page could not load, unhandled rejections:"; grep -cE "missing script|non-JavaScript MIME|unhandled rejection" play-fastrender.log; grep -E "missing script|non-JavaScript MIME|unhandled rejection" play-fastrender.log | head -5 | cut -c1-300; } > play-fastrender-stall.txt
+          { grep -E "^\[game\] DOOR|^\[summary\]" play-fastrender.log | cut -c1-600; echo "-- the 12 longest frames:"; grep -E "^\[hitch\]" play-fastrender.log | sed -E 's/^\[hitch\] [0-9:.]+ frame ([0-9.]+) ms/\1 &/' | sort -rn | head -12 | cut -d' ' -f2- | cut -c1-900; echo "-- scripts the page could not load, unhandled rejections:"; grep -cE "missing script|non-JavaScript MIME|unhandled rejection" play-fastrender.log || true; grep -E "missing script|non-JavaScript MIME|unhandled rejection" play-fastrender.log | head -5 | cut -c1-300 || true; } > play-fastrender-stall.txt
           bash .github/annotate.sh notice "play-smoke fastrender stall log: doors (PARAVIRTUAL GPU)" play-fastrender-stall.txt 60
           grep -v "ERR_FAILED\|ERR_BLOCKED\|Security Policy\|Fetch API cannot" play-fastrender.log | tail -80
+      # the same door legs as it was before dynamicLights: trimLights (the light counts step at a door, every lit
+      # program is replaced) with the main pass waiting for every replacement pipeline (FASTRENDER_MAIN_WAIT_MS=0),
+      # then with the wait cut at 100 ms a frame (the default now). The hitch the stall log was made for.
+      - name: play-smoke - fastrender, doors with dynamicLights off (the light-count step at a door; waits unbounded, then cut)
+        if: ${{ always() && steps.fr.outputs.rc == '0' }}
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          for w in 0 100; do
+            rc=0; FASTRENDER_MAIN_WAIT_MS=$w bash host/electron/scripts/play-world.sh --no-build --play-seconds 5 --doors 2 --params '{"dynamicLights":0}' --tag "play-fr-trimlights-$w" --out "$GITHUB_WORKSPACE/play-out" --log "$GITHUB_WORKSPACE/play-out/play-fastrender-trimlights-$w-stall.log" --timeout 900 > "play-fr-trimlights-$w.log" 2>&1 || rc=$?
+            { echo "exit $rc"; grep -E "^\[game\] DOOR|^\[summary\]|^\[fastrender\] compile" "play-fr-trimlights-$w.log" | cut -c1-900; echo "-- the 12 longest frames:"; grep -E "^\[hitch\]" "play-fr-trimlights-$w.log" | sed -E 's/^\[hitch\] [0-9:.]+ frame ([0-9.]+) ms/\1 &/' | sort -rn | head -12 | cut -d' ' -f2- | cut -c1-900; } > play-fr-trimlights-stall.txt || true
+            bash .github/annotate.sh notice "play-smoke fastrender stall log: doors with dynamicLights OFF, main-pass wait limit $w ms (0 = none: as before) (PARAVIRTUAL GPU)" play-fr-trimlights-stall.txt 60
+          done
       # which of play mode's differences from the golden run the failure depends on (the runner's paravirtual GPU
       # driver has its own assertions: a crash here need not be one on real hardware)
       - name: play-smoke - fastrender again, one change at a time (only when the run above failed)

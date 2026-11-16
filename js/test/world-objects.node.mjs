@@ -453,7 +453,7 @@ async function meshCensus(top) {
 }
 // --door: after the measured frames, enter the two nearest interiors of different shops through the game's own
 // enter() (what the E key does) and leave each again (goBack, the Q key). Per leg: programs translated, three's light
-// counts before and after, uploads, and the frames in which something happened. The programs a leg brings are its
+// counts before and after, uploads (byKind: geometry/texture/material/instances), and the frames in which something happened. The programs a leg brings are its
 // hitch on a host that compiles them; a leg on a street that was drawn before should bring none (docs/LOG.md).
 let door = null;
 if (wantDoor) {
@@ -470,17 +470,17 @@ if (wantDoor) {
   const leg = async (name, act, settle) => {
     const h0 = { programs: hstats.programs, ms: hstats.programMs, up: uploadsN(), bytes: hstats.uploadBytes, picks };
     const L = { leg: name, before: { lights: counts(), scene: sceneLights(), place: w.lighting.place }, frames: [] };
-    let prev = { ...h0 }, lastCounts = counts(), done = false, after = 0;
+    let prev = { ...h0, kinds: [1, 2, 3, 4].map((k) => hstats.uploads[k]) }, lastCounts = counts(), done = false, after = 0;
     Promise.resolve(act()).then(() => { done = true; }, (e) => { done = true; errors.push(String(e)); });
     for (let i = 0; i < 1500 && after < settle; i++) {
       renderMs = 0;
       const t = hrNow();
       globalThis.__worldStep(1 / 60);
       const c = counts();
-      const d = { i, ms: +(hrNow() - t).toFixed(1), programs: hstats.programs - prev.programs, picks: picks - prev.picks, uploads: uploadsN() - prev.up, uploadMB: +((hstats.uploadBytes - prev.bytes) / 1e6).toFixed(2), lights: c };
+      const d = { i, ms: +(hrNow() - t).toFixed(1), programs: hstats.programs - prev.programs, picks: picks - prev.picks, uploads: uploadsN() - prev.up, byKind: [1, 2, 3, 4].map((k) => hstats.uploads[k] - prev.kinds[k - 1]).join('/'), uploadMB: +((hstats.uploadBytes - prev.bytes) / 1e6).toFixed(2), lights: c };
       if (d.programs || d.uploadMB > 0.5 || c !== lastCounts) L.frames.push(d);
       lastCounts = c;
-      prev = { programs: hstats.programs, ms: hstats.programMs, up: uploadsN(), bytes: hstats.uploadBytes, picks };
+      prev = { programs: hstats.programs, ms: hstats.programMs, up: uploadsN(), bytes: hstats.uploadBytes, picks, kinds: [1, 2, 3, 4].map((k) => hstats.uploads[k]) };
       if (done) after++;
       await tick(); await sleep(2); // (the game's fades and its staged build run on real timers)
     }

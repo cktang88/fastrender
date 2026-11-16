@@ -757,6 +757,19 @@ impl<B: PipelineBackend> Compiler<B> {
         }
     }
 
+    /// As `wait_pipeline`, but gives up at `deadline`: false when the pipeline is still queued or being built then.
+    pub fn wait_pipeline_until(&self, key: &PipelineKey, deadline: std::time::Instant) -> bool {
+        let mut st = self.shared.lock();
+        while matches!(st.pipes.get(key), Some(Entry { work: Work::Queued | Work::Building, wanted: true })) {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            st = self.shared.done.wait_timeout(st, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        true
+    }
+
     /// Blocks until an added program's libraries are compiled or have failed.
     pub fn wait_program(&self, h: Hash) {
         let mut st = self.shared.lock();
@@ -840,7 +853,7 @@ mod tests {
         type Pipeline = String;
         fn library(&self, msl: &str) -> Result<Arc<str>, String> {
             self.libs.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(if msl.contains("slow") { 200 } else { 5 }));
             if msl.contains("bad") { Err("syntax".into()) } else { Ok(Arc::from(msl)) }
         }
         fn pipeline(&self, j: &PipelineJob<'_, Arc<str>>) -> Result<(String, bool), String> {
@@ -906,6 +919,23 @@ mod tests {
         let s = c.stats();
         assert_eq!((s.libraries, s.pipelines, s.pending_programs, s.pending_pipelines), (3, 1, 0, 0));
         assert_eq!(s.libraries_shared, 3, "b's vertex stage, a2's two stages");
+    }
+
+    #[test]
+    fn a_wait_with_a_deadline_gives_up_and_the_pipeline_still_arrives() {
+        let fake = Arc::new(Fake::default());
+        let c = Compiler::new(fake.clone(), None, 2, || {});
+        let p = info("vs", "slow fs");
+        c.add_program(p.clone(), "vs".into(), "slow fs".into());
+        let k = key(&p, 3, Target::Main);
+        assert!(matches!(c.request(&k), Status::Pending));
+        let t = std::time::Instant::now();
+        assert!(!c.wait_pipeline_until(&k, t + std::time::Duration::from_millis(20)), "still compiling at the deadline");
+        assert!(t.elapsed() < std::time::Duration::from_millis(150), "the wait ended at the deadline, not with the compile");
+        assert!(c.wait_pipeline_until(&k, t + std::time::Duration::from_secs(20)), "ready before a later deadline");
+        assert!(settle(&c).iter().any(|e| matches!(e, Event::Pipeline { key, result: Ok(_) } if *key == k)));
+        // a pipeline that is ready (or was never asked for) is not waited for at all
+        assert!(c.wait_pipeline_until(&k, std::time::Instant::now()));
     }
 
     #[test]

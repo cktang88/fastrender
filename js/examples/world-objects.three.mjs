@@ -16,7 +16,7 @@ const counts = (globalThis.__worldStats ||= { rtRenders: {}, frames: 0 });
 
 export class WebGLRenderer extends FastRenderer {
   constructor(params = {}) {
-    super({ programs: 'three', host: globalThis.__frHost || globalThis.__fr, canvas: params.canvas || makeCanvas(), trimLights: ablate.has('alllights') ? false : undefined });
+    super({ programs: 'three', host: globalThis.__frHost || globalThis.__fr, canvas: params.canvas || makeCanvas(), trimLights: ablate.has('alllights') ? false : undefined, dynamicLights: ablate.has('trimlights') ? false : undefined });
     this.isWebGLRenderer = true;
     this.coordinateSystem = 2000; // WebGLCoordinateSystem
     this.debug = { checkShaderErrors: false, onShaderError: null };
@@ -61,8 +61,11 @@ export class WebGLRenderer extends FastRenderer {
 }
 
 // GPU-cost diagnostics (FASTRENDER_ABLATE=a,b,... -> params.ablate). They CHANGE the picture; for attribution only.
-//   alllights     trimLights off: dark point / spot lights stay in three's light state, as under WebGLRenderer (the
-//                 frame before trimLights; every other row runs with them dropped)
+//   alllights     trimLights and dynamicLights off: dark point / spot lights stay in three's light state and every lit
+//                 fragment evaluates them, as under WebGLRenderer (the frame before trimLights)
+//   trimlights    dynamicLights off: dark lights leave the light state instead of being skipped in the fragment stage
+//                 (what shipped before dynamicLights: the same picture, light counts that step). `none` minus this
+//                 row is what the per-light uniform branches cost
 //   lights0       hide lights whose intensity is 0 (the same frame as `none` since trimLights; kept as a cross-check)
 //   nopoint       hide every PointLight / SpotLight (keeps directional, hemisphere, ambient)
 //   nolights      hide every light

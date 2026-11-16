@@ -15,14 +15,16 @@ cargo build --release -q || exit 1
 (cd js && npm ci --silent) >/dev/null 2>&1 || true
 node js/examples/world-objects.build.mjs "$game" js/dist/world-objects.js --target jsc --three three >/dev/null || exit 1
 out="bench-results/$(date +%F)-gpu-ablate-$(sysctl -n hw.model 2>/dev/null || echo mac)$( [ "$size" = 1280x800 ] || echo "-$size" )"; mkdir -p "$out"
-# alllights = the frame before trimLights (dark padding lights in every lit fragment); none = what ships now.
+# alllights = the frame before trimLights (dark padding lights in every lit fragment); none = what ships now
+# (dynamicLights: dark lights stay in the programs, the fragment stage skips them); trimlights = what shipped before
+# that (dark lights out of the light state): `none - trimlights` is what the per-light branches cost.
 # nofarlod = the frame before patches/...-0004 (blocks beyond 70 m and cars beyond 90 m drawn with their full meshes).
 # nostatic = the JS frame before patches/...-0005 (the blocks' parts in three's matrix walk again): same picture, same
 # GPU ms; compare the bench's JS ms per frame with `none`.
 # name@N: the row `name` with FASTRENDER_V3_DEBUG=N (src/mac_three.rs: 512 discarding opaque draws in state order
 # instead of last and nearest first, 1024 no discarding opaque draws, 2048 instanced draws whole (not only the runs of instances in view), 4 no instanced
 # draws, 4096 only the instanced draws the game vouches for (patches/...-0003) drawn whole, 64 no textures bound)
-rows="alllights none clusters clusters-basic nostatic nofarlod none@2048 none@4096 none@512 none@1024 none@4 none@64 lights0 nopoint nolights notransparent noenv nomaps lambert basic notransparent,noenv"
+rows="alllights trimlights none clusters clusters-basic nostatic nofarlod none@2048 none@4096 none@512 none@1024 none@4 none@64 lights0 nopoint nolights notransparent noenv nomaps lambert basic notransparent,noenv"
 for a in $rows; do
   echo "== $a"
   # clusters / clusters-NAME: the row `none` / NAME with cluster LOD on (docs/notes/clusters.md; off by default)

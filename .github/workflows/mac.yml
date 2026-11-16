@@ -353,16 +353,25 @@ jobs:
           rc4=0; env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 30 --warmup 60 > world-objects-cost.txt 2>&1 || rc4=$?
           grep -E "world-objects:|three frame cost|three programs:|fps" world-objects-cost.txt | cut -c1-1500 > world-objects-cost-summary.txt
           bash .github/annotate.sh notice "world-objects per-frame cost, frames 61-90 (exit $rc4)" world-objects-cost-summary.txt 20
+          # dynamicLights (what ships: dark lights stay in the programs, the fragment stage skips them) must draw the
+          # frame trimLights drew (dark lights out of the light state) and the frame with neither (every light
+          # evaluated): the golden's own frame again with each switch, MAE against the golden frame above
+          for a in trimlights alllights; do
+            FASTRENDER_ABLATE="$a" FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 11 --shot "golden-native-world-objects-$a.png" > "world-objects-$a.txt" 2>&1 || true
+            echo "dynamicLights (golden frame) vs $a: $(node js/golden/diff.mjs golden-native-world-objects.png "golden-native-world-objects-$a.png" "golden-diff-world-objects-$a.png" 2>&1 | tail -1); vs the browser: $(node js/golden/diff.mjs js/golden/world-objects-ref.png "golden-native-world-objects-$a.png" "golden-diff-world-objects-$a-ref.png" 2>&1 | tail -1)" >> world-objects-lights-exact.txt
+          done
+          bash .github/annotate.sh notice "world-objects: dynamicLights vs trimLights vs neither, same frame (MAE; 0 = the same picture)" world-objects-lights-exact.txt 10
           # GPU cost A/B (docs/notes/gpu-cost.md): the frame with the game's dark padding lights in every lit fragment
-          # (alllights = trimLights off, as WebGLRenderer draws it) vs what ships, and discarding draws in state order
+          # (alllights = neither switch, as WebGLRenderer draws it), with them out of the light state (trimlights: what
+          # shipped before dynamicLights) and behind a branch in the fragment stage (none: what ships), and discarding draws in state order
           # (@512) vs last, instanced draws whole (@2048) vs split into the runs in view; paravirtual GPU, so only the ratios mean anything. Twice each, interleaved.
           : > world-objects-gpu-ab.txt
-          for a in alllights none none@512 none@2048 none@4096 alllights none none@512 none@2048 none@4096; do
+          for a in alllights trimlights none none@512 none@2048 none@4096 alllights trimlights none none@512 none@2048 none@4096; do
             FASTRENDER_V3_DEBUG="$( [ "${a#*@}" != "$a" ] && echo "${a#*@}" || echo 0 )" FASTRENDER_ABLATE="${a%@*}" env -u MTL_DEBUG_LAYER FASTRENDER_ASSETS="$PWD/../3d-world-objects/public" ./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800 --frames 40 --warmup 80 --gpu-passes 1 > "wo-ab-$a.txt" 2>&1 || true
             { echo "== $a"; grep -E "gpu passes|three frame cost|draws per pass" "wo-ab-$a.txt" | cut -c1-400; } >> world-objects-gpu-ab.txt
           done
           grep -F "[census]" wo-ab-none.txt | cut -c1-260 | head -12 >> world-objects-gpu-ab.txt || true
-          bash .github/annotate.sh notice "world-objects GPU cost A/B (alllights = before trimLights, none = now, @512 = discard draws in state order, @2048 = instanced draws not split, @4096 = the game-hinted ones not split)" world-objects-gpu-ab.txt 40
+          bash .github/annotate.sh notice "world-objects GPU cost A/B (alllights = every dark light evaluated, trimlights = dark lights out of the light state, none = now: dynamicLights; @512 = discard draws in state order, @2048 = instanced draws not split, @4096 = the game-hinted ones not split)" world-objects-gpu-ab.txt 64
           # cluster LOD off (what ships) vs on (docs/notes/clusters.md), interleaved, twice each
           : > world-objects-clusters-ab.txt
           for a in 0 1 0 1; do

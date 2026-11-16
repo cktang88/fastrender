@@ -307,7 +307,8 @@ export async function bench({ renderer, frame, backend, extra = () => ({}) }) {
   if (native) {
     const ir = (renderer.info && renderer.info.render) || {};
     // FastRenderer's trimLights at work: lights it left out of three's light state in the last frame (0 when off)
-    r.trim_lights = { on: !!(renderer._tp && renderer._tp.trimLights), light_hold: !!(renderer._tp && renderer._tp.lightHold), dropped_last_frame: ir.lightsDropped | 0 };
+    // (`on`: the dark lights cost nothing, by either switch; `dynamic`: skipped in the fragment stage instead of dropped)
+    r.trim_lights = { on: !!(renderer._tp && (renderer._tp.trimLights || renderer._tp.dynamicLights)), dynamic: !!(renderer._tp && renderer._tp.dynamicLights), light_hold: !!(renderer._tp && renderer._tp.lightHold), dropped_last_frame: ir.lightsDropped | 0 };
     const rendered = s1.framesRendered - s0.framesRendered, gf = s1.gpuFrames - s0.gpuFrames;
     r.native = {
       rendered, skipped: s1.framesSkipped - s0.framesSkipped, rendered_fps: q2(rendered / F.seconds),

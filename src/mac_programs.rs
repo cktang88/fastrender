@@ -10,7 +10,10 @@
 //! a wrong result behind: a pipeline that renders into a render target or a shadow map (content that may be drawn
 //! once: PMREM, a shadow map with `autoUpdate` off); a main-pass pipeline the pass marked with `require` (it takes
 //! the place of one that was on screen, or the screen would be empty without it: `bindlist::main_draw_waits`;
-//! all of a pass's are waited for together, `wait_required`, while the workers build them side by side); and
+//! all of a pass's are waited for together, `wait_required`, while the workers build them side by side, and for
+//! at most `main_wait` per frame (100 ms, `FASTRENDER_MAIN_WAIT_MS`): a change that replaces every lit program
+//! takes seconds to compile, and a game that stands still for that long is worse than one whose lit surfaces come
+//! back as their pipelines arrive); and
 //! everything in blocking mode (the golden / bench / selftest harness: the frame sequence is then exactly the
 //! synchronous one).
 //!
@@ -148,6 +151,8 @@ pub struct CompileStats {
     /// render target's; a program waited for in blocking mode counts as main)
     pub waits_by: [u64; 3],
     pub wait_ms_by: [f64; 3],
+    /// main-pass pipelines `wait_required` gave up on at its deadline (their draws were skipped until they arrived)
+    pub wait_cuts: u64,
     /// manifest + archive writes finished (they run on a compile worker), their ms from request to result
     pub persists: u64,
     pub persist_ms: f64,
@@ -200,6 +205,8 @@ pub struct Programs {
     prewarm_slots: Vec<u32>,
     stats: CompileStats,
     last_poll: Option<Instant>,
+    /// the longest `wait_required` blocks per call (None: until everything required is built)
+    main_wait: Option<std::time::Duration>,
     last_persist: Instant,
     /// a persist is under way since then
     persist_from: Option<Instant>,
@@ -245,6 +252,17 @@ pub(crate) fn blocking_mode() -> bool {
 
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+}
+
+/// How long the main pass may wait per frame for pipelines that replace ones on screen (`Programs::wait_required`):
+/// 100 ms unless `FASTRENDER_MAIN_WAIT_MS` says otherwise (0 = no limit, as before); no limit in blocking mode (the
+/// golden / bench harness: every frame complete).
+fn main_wait_cap(blocking: bool) -> Option<std::time::Duration> {
+    if blocking {
+        return None;
+    }
+    let ms = std::env::var("FASTRENDER_MAIN_WAIT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(100);
+    (ms > 0).then(|| std::time::Duration::from_millis(ms))
 }
 
 /// Compile workers run at QOS_CLASS_USER_INITIATED: below the render thread, on performance cores, and the
@@ -396,6 +414,7 @@ impl Programs {
             prewarm_slots: Vec::new(),
             stats: CompileStats { blocking, workers, ..Default::default() },
             last_poll: None,
+            main_wait: main_wait_cap(blocking),
             last_persist: Instant::now(),
             persist_from: None,
             archive_note: None,
@@ -608,7 +627,7 @@ impl Programs {
         let q = s.queue;
         let ms = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("+{v:.0} ms"));
         format!(
-            "compile: {} ({} workers, built-in shaders: {}), {} libraries in {:.0} ms of worker time ({} shared), {} pipelines in {:.0} ms ({} from the binary archive); manifest at launch {} programs / {} pipelines, prewarmed {} / {}; pending_programs {}, pending pipelines {}; skipped draws {} in {} of {} frames; render-thread waits {} ({:.0} ms); first frame {}, first complete frame {}, last incomplete frame {}, all pipelines ready {}; frames over 50 ms: {}, longest {:.0} ms; archive: {}",
+            "compile: {} ({} workers, built-in shaders: {}), {} libraries in {:.0} ms of worker time ({} shared), {} pipelines in {:.0} ms ({} from the binary archive); manifest at launch {} programs / {} pipelines, prewarmed {} / {}; pending_programs {}, pending pipelines {}; skipped draws {} in {} of {} frames; render-thread waits {} ({:.0} ms; main {} / {:.0} ms, shadow {} / {:.0} ms, target {} / {:.0} ms; {} main-pass pipelines not waited out); archive writes {} ({:.0} ms on a worker); first frame {}, first complete frame {}, last incomplete frame {}, all pipelines ready {}; frames over 50 ms: {}, longest {:.0} ms; archive: {}",
             if s.blocking { "blocking" } else { "async" },
             s.workers,
             builtin_kind(),
@@ -629,6 +648,15 @@ impl Programs {
             s.frames,
             s.waits,
             s.wait_ms,
+            s.waits_by[0],
+            s.wait_ms_by[0],
+            s.waits_by[1],
+            s.wait_ms_by[1],
+            s.waits_by[2],
+            s.wait_ms_by[2],
+            s.wait_cuts,
+            s.persists,
+            s.persist_ms,
             ms(s.first_frame_ms),
             ms(s.first_complete_frame_ms),
             ms(s.last_incomplete_frame_ms),
@@ -719,8 +747,14 @@ impl Programs {
         let req = std::mem::take(&mut self.required);
         let keys: Vec<PipelineKey> = self.waiting_pipes.iter().filter(|(_, slots)| slots.iter().any(|s| req.contains(s))).map(|(k, _)| *k).collect();
         let t = Instant::now();
+        let deadline = self.main_wait.map(|d| t + d);
         for k in &keys {
-            self.compiler.wait_pipeline(k);
+            match deadline {
+                // (past the deadline this only asks whether it is ready: what is still compiling is skipped this
+                // frame and drawn when it arrives)
+                Some(d) => self.stats.wait_cuts += !self.compiler.wait_pipeline_until(k, d) as u64,
+                None => self.compiler.wait_pipeline(k),
+            }
         }
         self.waited(crate::hitch::WAIT_MAIN, keys.len(), t);
         self.drain();

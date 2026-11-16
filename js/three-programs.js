@@ -493,6 +493,25 @@ function trimClass(l) {
   if (l.isSpotLight === true) return l.castShadow ? 3 : 2;
   return -1;
 }
+/**
+ * `dynamicLights`: the fragment stage skips point and spot lights whose colour is exactly 0, by a branch on the
+ * light's own uniform, so the light COUNTS three compiles into the program can stay what the scene holds.
+ *
+ * three unrolls its light loops (`#pragma unroll_loop_start`): after WebGLProgram's unrollLoops every point / spot
+ * light is one block from `pointLight = pointLights[ k ];` to its `RE_Direct( directLight, ... );`. Each block is
+ * wrapped in `if ( pointLights[ k ].color != vec3( 0.0 ) ) { ... }`. The colour uniform is light.color x
+ * light.intensity (WebGLLights.setup), and everything the block adds to the fragment is a product with it, so a
+ * skipped block added exactly 0: the same reasoning as `_trimLights`, with the test made per frame by the GPU
+ * instead of per program by the light list. The branch depends on a uniform only: every fragment of a draw takes
+ * the same side, and a dark light costs a load and a compare instead of a BRDF evaluation and a shadow lookup.
+ *
+ * Text that does not match (a hook rewrote the chunk, another three version) is left as it is: correct, not faster.
+ */
+const DARK_SKIP = /^([ \t]*)((point|spot)Light = \3Lights\[ (\d+) \];[\s\S]*?\bRE_Direct\( directLight,[^;\n]*;)/gm;
+export function skipDarkLights(fragment) {
+  if (fragment.indexOf('RE_Direct( directLight') < 0) return fragment;
+  return fragment.replace(DARK_SKIP, (m, indent, body, kind, k) => `${indent}if ( ${kind}Lights[ ${k} ].color != vec3( 0.0 ) ) {\n${indent}${body}\n${indent}}`);
+}
 /** a light whose colour * intensity is exactly 0 (WebGLLights.setup multiplies them; nothing else of it reaches a pixel) */
 function isDark(l) {
   const c = l.color;
@@ -685,10 +704,18 @@ export class ThreePrograms {
     this._size = { x: 1, y: 1, set(x, y) { this.x = x; this.y = y; return this; } };
     this._casters = []; this._casterPool = []; this._nCasters = 0;
     /** per frame: uniform blocks refreshed, and how many of them changed (any word) since the previous frame */
-    this.stats = { blocks: 0, changed: 0, lightPrograms: 0, lightsDropped: 0, lightsHeld: 0 };
+    this.stats = { blocks: 0, changed: 0, lightPrograms: 0, lightsDropped: 0, lightsHeld: 0, darkSkipPrograms: 0 };
     this._transmissionRT = { texture: { isFastRenderTransmission: true }, width: 1, height: 1 };
-    // dark point / spot lights leave three's light state (see _trimLights); false: every visible light, as WebGLRenderer
-    this.trimLights = opts.trimLights !== false && opts.trimLights !== 0;
+    // What a dark point / spot light costs, and what a light going on or off costs:
+    //   dynamicLights (the default): every light stays in three's light state, so the counts in the programs are the
+    //     scene's own (a game that pads its list to a budget never changes them), and the fragment stage skips the
+    //     dark ones (skipDarkLights). A light switching on changes a uniform, not a program: nothing compiles.
+    //   trimLights (dynamicLights: false): dark lights leave the light state (_trimLights). The same pixels and GPU
+    //     cost, but the counts step when lights go on, and every lit program is another one each time.
+    //   neither (trimLights: false): as WebGLRenderer draws it; every lit fragment pays for every dark light.
+    const on = (v) => v !== false && v !== 0;
+    this.dynamicLights = opts.dynamicLights !== undefined && opts.dynamicLights !== null ? on(opts.dynamicLights) : on(opts.trimLights);
+    this.trimLights = !this.dynamicLights && on(opts.trimLights);
     // a change of the trimmed light counts waits until the programs for the new counts are compiled (_holdLights).
     // Only with a host that compiles in the background and can say when it is done: host.prewarmPending(token) ->
     // pipelines of that prewarm still compiling, -1 not seen yet, -2 not applicable (it compiles synchronously)
@@ -1137,7 +1164,9 @@ export class ThreePrograms {
     const id = this.newId();
     // a RawShaderMaterial without glslVersion is GLSL ES 1.00 (WebGL2 accepts it): lift it to 3.00 with the defines
     // three's own prefix uses for every other material (attribute/varying/texture2D/gl_FragColor), see liftGlsl1
-    const [hv, hf] = liftGlsl1(vs, fs);
+    const [hv, hf0] = liftGlsl1(vs, fs);
+    const hf = this.dynamicLights ? skipDarkLights(hf0) : hf0;
+    if (hf !== hf0) this.stats.darkSkipPrograms++;
     let layout = this.host && this.host.program ? this.host.program(key, hv, hf, id) : null;
     if (typeof layout === 'string') layout = JSON.parse(layout);
     prog = { id, key, vertex: vs, fragment: fs, layout, webglProgram: p, usedTimes: 1, name: parameters.shaderName || parameters.shaderType };

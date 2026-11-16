@@ -9,7 +9,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { ThreePrograms, normalizeGlsl, packUniforms, compileLayout, TEX, SHADOW_KIND, OBJECT_BLOCK, FRAME_BLOCK, NATIVE_UNIFORMS } from '../three-programs.js';
+import { ThreePrograms, skipDarkLights, normalizeGlsl, packUniforms, compileLayout, TEX, SHADOW_KIND, OBJECT_BLOCK, FRAME_BLOCK, NATIVE_UNIFORMS } from '../three-programs.js';
 import { FastRenderer, OP, KIND } from '../fastrender-three.js';
 import { makeGlslHost, buildLayout, glslTokens } from './glsl-host.mjs';
 import { makeCases, SIZE } from './three-programs.cases.mjs';
@@ -781,7 +781,8 @@ else {
     const frame = () => { r.render(scene, camera); return r._tp.lights.state; };
     return { r, scene, lamp, pads, padShadow, frame, fragment: () => r._used[0].program.fragment };
   };
-  const all = build({ trimLights: false }), trim = build({});
+  const all = build({ trimLights: false }), trim = build({ dynamicLights: false });
+  assert.deepEqual([all.r._tp.dynamicLights, all.r._tp.trimLights, trim.r._tp.dynamicLights, trim.r._tp.trimLights], [false, false, false, true]);
   let sa = all.frame(), st = trim.frame();
   assert.deepEqual([sa.point.length, sa.spot.length, all.r._tp.shadows.length], [10, 3, 2], 'trimLights: false keeps every light, as WebGLRenderer');
   assert.deepEqual([st.point.length, st.spot.length, trim.r._tp.shadows.length], [1, 0, 1], 'dark point / spot lights (and the dark shadow light) are not in the light state');
@@ -807,10 +808,74 @@ else {
   console.log(`[three r${REV}] trimLights: dark point / spot lights leave the light state (10 point + 3 spot -> 1 + 0, no dark shadow lookup); counts step up at once and are held 120 frames`);
 }
 
+// ------------------------------------------------------------------ 13a. dynamicLights (the default): dark lights stay, the fragment stage skips them
+{
+  const h = makeHost();
+  const sent = [];
+  const program0 = h.program;
+  h.program = (key, vs, fs, id) => { sent.push(fs); return program0(key, vs, fs, id); };
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20 });
+  assert.deepEqual([r._tp.dynamicLights, r._tp.trimLights, r._tp.lightHold], [true, false, false], 'the default');
+  { const hp = makeHost(); hp.params = { dynamicLights: 0 }; const x = new FastRenderer({ host: hp, programs: 'three' })._tp; assert.deepEqual([x.dynamicLights, x.trimLights], [false, true], 'host.params.dynamicLights = 0: trimLights'); }
+  { const hp = makeHost(); hp.params = { trimLights: 0 }; const x = new FastRenderer({ host: hp, programs: 'three' })._tp; assert.deepEqual([x.dynamicLights, x.trimLights], [false, false], 'host.params.trimLights = 0: neither (as WebGLRenderer)'); }
+  r.setSize(SIZE.width, SIZE.height);
+  r.shadowMap.enabled = true;
+  const scene = new THREE.Scene();
+  const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(4, 10, 2); sun.castShadow = true;
+  const lamp = new THREE.PointLight(0xffaa66, 3, 20); lamp.position.set(1, 2, 0);
+  const pads = [];
+  for (let i = 0; i < 8; i++) pads.push(new THREE.PointLight(0x000000, 0, 0.01));
+  for (let i = 0; i < 3; i++) pads.push(new THREE.SpotLight(0xffffff, 0, 0.01));
+  const padShadow = new THREE.PointLight(0x000000, 0, 0.01); padShadow.castShadow = true; padShadow.shadow.autoUpdate = false;
+  scene.add(sun, lamp, padShadow, ...pads);
+  const std = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial({ color: 0x336699 })); std.receiveShadow = true;
+  const lam = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshLambertMaterial({ color: 0x996633 })); lam.position.x = 2;
+  const basic = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial()); basic.position.x = -2;
+  scene.add(std, lam, basic);
+  const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 3, 8); camera.lookAt(0, 0, 0);
+  r.render(scene, camera);
+  const st = r._tp.lights.state;
+  assert.deepEqual([st.point.length, st.spot.length, r._tp.shadows.length, r.info.render.lightsDropped], [10, 3, 2, 0], 'every light stays in the light state: the counts are the scene\'s own');
+  assert.equal(sent.length, 3, 'three programs, each translated by the host (glslang accepted the wrapped loops)');
+  const lit = sent.filter((f) => f.includes('RE_Direct( directLight'));
+  assert.equal(lit.length, 2, 'the two lit materials');
+  for (const f of lit) {
+    for (let k = 0; k < 10; k++) assert.ok(f.includes(`if ( pointLights[ ${k} ].color != vec3( 0.0 ) ) {`), `point light ${k} is skipped when dark`);
+    for (let k = 0; k < 3; k++) assert.ok(f.includes(`if ( spotLights[ ${k} ].color != vec3( 0.0 ) ) {`), `spot light ${k} is skipped when dark`);
+    assert.equal(f.split(' ].color != vec3( 0.0 ) ) {').length - 1, 13, 'one branch per point / spot light, none for the directional light');
+    // each branch closes after its own RE_Direct, and the shadow lookup of a shadow-casting light is inside it
+    const blocks = f.split(/if \( (?:point|spot)Lights\[ \d+ \]\.color != vec3\( 0\.0 \) \) \{/).slice(1);
+    for (const b of blocks) assert.ok(/^\s*(point|spot)Light = [\s\S]*?RE_Direct\( directLight,[^;]*;\n\s*\}/.test(b), 'if { light ... RE_Direct } with nothing else inside');
+    assert.ok(/if \( pointLights\[ 0 \]\.color != vec3\( 0\.0 \) \) \{[\s\S]*?getPointShadow[\s\S]*?RE_Direct/.test(f) === /getPointShadow\( pointShadowMap\[ 0 \]/.test(f), 'a shadow lookup stays inside its light\'s branch');
+  }
+  assert.ok(!sent.find((f) => !f.includes('RE_Direct( directLight')).includes('.color != vec3( 0.0 )'), 'an unlit program is untouched');
+  assert.equal(r._tp.stats.darkSkipPrograms, 2);
+  // lights going on and off change uniforms, not programs: nothing is translated again
+  const n0 = sent.length, p0 = r._used.map((i) => i.program.id).join();
+  for (let i = 0; i < 6; i++) { pads[i].intensity = 2; pads[i].color.set(0xffffff); }
+  pads[9].intensity = 5; padShadow.intensity = 1; padShadow.color.set(0xffffff);
+  r.render(scene, camera);
+  lamp.intensity = 0;
+  for (let i = 0; i < 130; i++) r.render(scene, camera);
+  for (const p of pads) p.intensity = 0;
+  for (let i = 0; i < 130; i++) r.render(scene, camera);
+  assert.equal(sent.length, n0, 'no program translated when lights go on or off');
+  assert.equal(r._used.map((i) => i.program.id).join(), p0, 'every material instance keeps its program');
+  // the text is three's own apart from the branches, and a source without three's light loop is returned as it is
+  const plain = new FastRenderer({ host: makeHost(), programs: 'three', commandWords: 1 << 20, trimLights: false });
+  plain.setSize(SIZE.width, SIZE.height); plain.shadowMap.enabled = true;
+  plain.render(scene, camera);
+  const three = plain._used.find((i) => i.program.fragment.includes('RE_Direct( directLight')).program.fragment;
+  const wrapped = skipDarkLights(three);
+  assert.equal(wrapped.replace(/^[ \t]*if \( (?:point|spot)Lights\[ \d+ \]\.color != vec3\( 0\.0 \) \) \{\n/gm, '').replace(/(RE_Direct\( directLight,[^;\n]*;)\n[ \t]*\}/g, '$1'), three.replace(/(RE_Direct\( directLight,[^;\n]*;)\n[ \t]*\}/g, '$1'), 'removing the branches gives three\'s text back');
+  assert.equal(skipDarkLights('void main() { gl_FragColor = vec4( 1.0 ); }'), 'void main() { gl_FragColor = vec4( 1.0 ); }');
+  console.log(`[three r${REV}] dynamicLights: 10 point + 3 spot lights stay in the light state, each behind a branch on its own colour in ${lit.length} lit programs; lights on / off for 260 frames: 0 programs translated`);
+}
+
 // ------------------------------------------------------------------ 13b. a shadow keeps its SHADOWS id when trimLights moves its index
 {
   const h = makeHost();
-  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20 });
+  const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20, dynamicLights: false });
   r.setSize(SIZE.width, SIZE.height);
   r.shadowMap.enabled = true;
   const scene = new THREE.Scene();
@@ -844,7 +909,7 @@ else {
   const build = (answer, opts) => {
     const h = makeHost();
     if (answer) h.prewarmPending = (token) => (token === 0 ? answer(0) : answer(token));
-    const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20, ...opts });
+    const r = new FastRenderer({ host: h, programs: 'three', commandWords: 1 << 20, dynamicLights: false, ...opts });
     r.setSize(SIZE.width, SIZE.height);
     const scene = new THREE.Scene();
     const a = new THREE.PointLight(0xffaa66, 3, 20); a.position.set(1, 2, 0);
