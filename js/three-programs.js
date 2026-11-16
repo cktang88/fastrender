@@ -842,7 +842,7 @@ export class ThreePrograms {
    * `ss.dyn`: `_lightCounts` gives three's light state those lengths back.
    */
   _dropDark(lights, ss) {
-    const d = ss.dyn || (ss.dyn = { all: [0, 0], kept: [0, 0], key: [], shape: 0 });
+    const d = ss.dyn || (ss.dyn = { all: [0, 0], kept: [0, 0], version: -1, was: [-1, -1], sig: '', shape: 0 });
     let n = 0, np = 0, ns = 0, kp = 0, ks = 0;
     for (let i = 0; i < lights.length; i++) {
       const l = lights[i];
@@ -861,15 +861,23 @@ export class ThreePrograms {
    * `dynamicLights`, after WebGLLights.setup / setupView: three's light state gets the lengths the scene's list had,
    * so every program is picked (and its uniform arrays sized) for the scene's own counts, whatever is on. The
    * entries after the lights that are on are holes: packed as zeros, never reached by the fragment stage, which
-   * runs `frNum*Lights` blocks (skipDarkLights). `ss.dyn.shape` moves when a count a program depends on does
-   * (three's own `state.version` also moves with the number of lights that are on).
+   * runs `frNum*Lights` blocks (skipDarkLights). `ss.dyn.shape` takes the place of three's `state.version` in the
+   * scene's epoch: it moves when a count a program depends on does (every field of WebGLLights' hash but the two
+   * lengths replaced here, which follow the lights that are on: directional / rect-area / hemisphere lights, the
+   * shadow and spot-map counts, light probes), not when a lamp goes on.
    */
   _lightCounts(ss) {
     const d = ss.dyn, st = this.lights.state, lh = this._lightHolders;
     lh.frNumPointLights.value = d.kept[0]; lh.frNumSpotLights.value = d.kept[1];
     if (st.point.length !== d.all[0]) st.point.length = d.all[0];
     if (st.spot.length !== d.all[1]) st.spot.length = d.all[1];
-    if (changed(d.key, st.directional.length, d.all[0], d.all[1], st.rectArea.length, st.hemi.length, st.numDirectionalShadows, st.numPointShadows, st.numSpotShadows, st.numSpotMaps | 0, st.numLightProbes | 0)) d.shape++;
+    if (st.version !== d.version || d.was[0] !== d.all[0] || d.was[1] !== d.all[1]) {
+      d.version = st.version; d.was[0] = d.all[0]; d.was[1] = d.all[1];
+      let sig = `${d.all[0]},${d.all[1]},${st.numSpotLightShadowsWithMaps | 0}`;
+      const hash = st.hash;
+      for (const k in hash) if (k !== 'pointLength' && k !== 'spotLength') sig += `,${hash[k]}`;
+      if (sig !== d.sig) { d.sig = sig; d.shape++; }
+    }
   }
 
   /**

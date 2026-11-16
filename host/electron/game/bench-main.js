@@ -57,6 +57,9 @@ const V = VARIANTS[variantName];
 const variant = V ? V.base : '';
 // read once by the render thread of THIS process when it builds its scene (std::env::var in src/mac_three.rs)
 if (V && V.v3debug && !process.env.FASTRENDER_V3_DEBUG) process.env.FASTRENDER_V3_DEBUG = String(V.v3debug);
+// measured and screenshotted frames are complete: every program and pipeline is waited for where it is first needed,
+// as the CLI bench does (play mode compiles in the background and skips what is not ready: src/mac_programs.rs)
+if (!process.env.FASTRENDER_COMPILE) process.env.FASTRENDER_COMPILE = 'blocking';
 const scene = opt('scene', 'city');
 const [PW, PH] = opt('px', '1280x800').split('x').map(Number);
 const aa = opt('aa', '0') === '1';

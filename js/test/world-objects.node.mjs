@@ -461,7 +461,7 @@ async function meshCensus(top) {
 let door = null;
 if (wantDoor) {
   const w = W(), tp = renderer._tp, pl = w.player;
-  const counts = () => { const st = tp && tp.lights ? tp.lights.state : null; return st ? `${st.point.length}p ${st.spot.length}s ${st.directional.length}d, shadows ${st.numPointShadows | 0}p ${st.numSpotShadows | 0}s ${st.numDirectionalShadows | 0}d` : ''; };
+  const counts = () => { const st = tp && tp.lights ? tp.lights.state : null; return st ? `${st.point.length}p ${st.spot.length}s ${st.directional.length}d, shadows ${st.pointShadowMap.length}p ${st.spotShadowMap.length}s ${st.directionalShadowMap.length}d` : ''; };
   const sceneLights = () => { let lit = 0, dark = 0; w.scene.traverseVisible((o) => { if (o.isPointLight || o.isSpotLight) { if (o.intensity === 0 || (o.color.r === 0 && o.color.g === 0 && o.color.b === 0)) dark++; else lit++; } }); return `${lit} lit + ${dark} dark point/spot`; };
   const uploadsN = () => hstats.uploads[1] + hstats.uploads[2] + hstats.uploads[3] + hstats.uploads[4];
   const cands = [...w.level.portals()].filter((p) => p.target && p.target.kind === 'interior');

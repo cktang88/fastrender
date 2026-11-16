@@ -878,10 +878,26 @@ else {
   assert.equal(sent.length, n0, 'no program translated when lights go on or off');
   assert.equal(r._used.map((i) => i.program.id).join(), p0, 'every material instance keeps its program');
   assert.equal(r._tp._epoch, epoch0, 'and no material picked a program again (the scene\'s epoch did not move)');
+  // a count the programs do depend on moves the epoch although the scene's totals stay: a light starts to cast a shadow
+  lamp.intensity = 3;
+  r.render(scene, camera);
+  const n1 = sent.length, epoch1 = r._tp._epoch;
+  assert.equal(n1, n0, 'the lamp back on: still nothing translated');
+  lamp.castShadow = true;
+  r.render(scene, camera);
+  assert.deepEqual([st.point.length, st.pointShadowMap.length], [10, 2]);
+  assert.ok(r._tp._epoch !== epoch1 && sent.length > n1, 'another shadow caster: the epoch moves and the programs are picked for 2 point shadows');
+  assert.ok(sent.slice(n1).some((f) => f.includes('getPointShadow( pointShadowMap[ 1 ]')), 'the new lit program samples the second point shadow map');
+  lamp.castShadow = false;
+  r.render(scene, camera);
+  assert.equal(st.pointShadowMap.length, 1);
+  lamp.intensity = 0;
+  r.render(scene, camera);
+  const n2 = sent.length;
   // a light that enters or leaves the scene changes the scene's counts, as under WebGLRenderer
   scene.remove(pads[0]);
   r.render(scene, camera);
-  assert.deepEqual([st.point.length, sent.length - n0], [9, 3], 'one light fewer in the scene: every program is another one (three\'s cache key has the light counts for unlit materials too)');
+  assert.deepEqual([st.point.length, sent.length - n2], [9, 3], 'one light fewer in the scene: every program is another one (three\'s cache key has the light counts for unlit materials too)');
   scene.add(pads[0]);
   // the text is three's own apart from the chains, and a source without three's light loop is returned as it is
   const plain = new FastRenderer({ host: makeHost(), programs: 'three', commandWords: 1 << 20, trimLights: false });
