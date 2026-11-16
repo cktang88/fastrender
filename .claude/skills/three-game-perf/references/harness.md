@@ -60,6 +60,8 @@ canvas-painted textures count as `texture source without pixels`.
 | `--walk vx,vz` | the player moves (m/s) so blocks stream and LODs switch during the run |
 | `--ablate a,b` | the same switches as `FASTRENDER_ABLATE` (below) |
 | `--static-subtrees N`, `--light-hold` | run with those renderer options on |
+| `--door` | after the measured frames: in and out of the two nearest shops through the game's `enter()` / `goBack()`, twice for the first. Per leg: programs translated, uploads (and by kind per frame), three's light counts before / after. Programs on a leg = pipelines a compiling host has to build there; with `--ablate trimlights` the legs show the light-count step |
+| `FR_PROGRAM_LOG=1` (env) | every program translated after the start: measured frame, shader name, defines |
 | `--stock-opt` | what per-instance culling by compaction (`js/stock-three-opt.js`, the WebGL emulation of the native instance culling) costs in JS per frame on this game, with its cache and without, and the instances / triangles it leaves |
 | `--dump-programs dir` | every compiled program as `NAME.vert.glsl` / `NAME.frag.glsl` (input of `fastrender xlat-dump`) |
 | `--json out.json` | the report as JSON |
@@ -100,7 +102,8 @@ A row is `name` or `name@N`: `name` goes to `FASTRENDER_ABLATE` (applied in `js/
 | Row | `row - none` (or `none - row`) tells |
 |---|---|
 | `none` | what ships; `[census]` lines give lights, draws, `main()` size |
-| `alllights` | `trimLights` off: what dark padding lights cost |
+| `alllights` | `dynamicLights` and `trimLights` off: what dark padding lights cost |
+| `trimlights` | `dynamicLights` off (dark lights out of the light state instead of skipped in the fragment stage): `none - trimlights` is what the per-light branches cost |
 | `nofarlod` | the game's far LODs off (patch 0004) |
 | `nostatic` | the game's static freeze off (patch 0005): same GPU ms, compare JS ms |
 | `none@2048` | instanced draws whole: what per-instance culling saves |
@@ -189,7 +192,9 @@ renders a cheaper, different frame.
 
 | Switch | Effect |
 |---|---|
-| `FastRenderer({ trimLights: false })`, `host.params.trimLights = 0` | keep dark lights in the light state, as WebGLRenderer does |
+| `FastRenderer({ dynamicLights: false })`, `host.params.dynamicLights = 0` | dark lights leave the light state (`trimLights`) instead of being skipped in the fragment stage: light counts step again |
+| `FastRenderer({ trimLights: false })`, `host.params.trimLights = 0` | neither: every dark light is evaluated, as WebGLRenderer does |
+| `FASTRENDER_MAIN_WAIT_MS=n` | the longest the main pass holds a frame for pipelines that replace ones on screen when 8 or more are replaced at once (250; 0 = no limit, the behaviour before 2026-11-16). Fewer: half a frame |
 | `installStockOpt(renderer, { dark, discard, instances, cache })` (`js/stock-three-opt.js`) | the generic methods for a STOCK three renderer: dark lights out of each `render()`, discarding draws last, only the instances in view (bench variants `webgl-trim` / `-opt` / `-opt-inst`) |
 | `lightHold: false` / `host.params.lightHold = 0` | a light-count change goes through at once instead of waiting for its programs |
 | `staticSubtrees: true \| N` / `host.params.staticSubtrees`, `renderer.transformsChanged(obj)` | renderer skips settled subtrees in the matrix walk (opt-in, up to N-1 frames late; `true` = 4) |
@@ -267,6 +272,35 @@ JavaScriptCore for boot + rendering).
 ## Play the game interactively
 
 `host/electron/scripts/play-world.sh --fps` builds everything and opens the real game on fastrender with real time and
-input (`--webgl` for the same game copy on stock WebGLRenderer, `--renderer '{...}'` for renderer options, `--help`).
-The `` ` `` key toggles an fps / JS ms / GPU ms overlay. Use it to feel a fix and to reproduce hitches the deterministic
-bench cannot (light changes, streaming, entering buildings). Its CI smoke is `.github/workflows/play-smoke.yml`.
+input (`--webgl` for the same game copy on stock WebGLRenderer, `--renderer '{...}'` for renderer options,
+`--params '{...}'` for FastRenderer switches, `--help`). The `` ` `` key toggles an fps / JS ms / GPU ms overlay. Use
+it to feel a fix and to reproduce hitches the deterministic bench cannot (light changes, streaming, entering
+buildings). Its CI smoke is `.github/workflows/play-smoke.yml`.
+
+### Stall log (play mode)
+
+Every frame over 25 ms (`--hitch-ms N`) is one `[hitch]` line on the console and in
+`host/electron/play-out/play-<time>-<variant>.log` (`last.log` = the latest session); the summary (p50 / p95 / p99 /
+max of the frame interval, render-thread ms and GPU ms, long frames per cause) is printed at quit (cmd-Q or
+Ctrl-C). **Ask the user for `host/electron/play-out/last.log` when they report a stutter**; it names the cause per
+frame, so no second run is needed to attribute it.
+
+Reading a line: `frame N ms, <cause>` is the time since the frame before reached the GPU. Then the render thread's
+parts (pipelines waited for by reason, resources applied with MB and ms, programs added, what the compile workers
+finished, draws skipped, the archive being written), `waited for the page` (the game's JS or the page's pacing),
+GPU ms per pass group, draws / shadow passes / render-target passes, and the page's half: JS ms, programs
+translated, canvas readbacks, uploads, render-target renders and who asked, light counts when they changed, a GC
+guess, the game's own `console.info` events. Full table: docs/HOST.md "Stall log".
+
+| Cause | Usual source | Where to look next |
+|---|---|---|
+| `pipeline wait: main pass` | programs replaced on screen (light counts, fog, a define set after the first draw) | fix-catalogue entries 1 and 6; `FR_PROGRAM_LOG=1` |
+| `pipeline wait: shadow map / render target` | first use of a caster's depth program or of a target's pipeline | the manifest should prewarm it on the next launch: check the `compile:` line (`prewarmed`, `from the binary archive`) |
+| `uploads` | a block or level streaming in: MB applied on the render thread | upload kinds in `--door` / the page part; texture sizes, mip generation |
+| `page (JS / pacing)` | a long game frame (`JS` in the page part), a GC, or timers between frames (`long tasks`) | `--profile` in node; the game's staged builds |
+| `GPU`, `GPU behind (frame slot)`, `drawable` | the frame itself is heavy (`pass_ms` says which group: shadow re-renders, PMREM passes in `targets`) | `scripts/gpu-ablate.sh` rows |
+
+CI: `main.js --play-seconds N --doors K` walks, then goes in and out of the K nearest shops and prints one `DOOR`
+line per leg; play-smoke annotates them for the default and for `dynamicLights` off. The code: `src/hitch.rs`
+(records, causes, percentiles; unit-tested on Linux), `host/electron/native/src/fr_render.rs`, `game/boot.mjs`
+(page half), `game/main.js` (join, file, summary).

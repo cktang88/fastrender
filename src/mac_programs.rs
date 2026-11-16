@@ -766,6 +766,10 @@ impl Programs {
             })
             .collect();
         let t = Instant::now();
+        // (the ones waited out first: they hold the frame however long they take)
+        let mut order: Vec<PipelineKey> = keys.iter().filter(|k| k.1).map(|k| k.0).collect();
+        order.extend(keys.iter().filter(|k| !k.1).map(|k| k.0));
+        self.compiler.hurry(&order);
         let replaced = keys.iter().filter(|k| !k.1).count();
         let deadline = crate::bindlist::main_wait_ms(replaced, self.main_wait.map(|d| d.as_millis() as u64)).map(|ms| t + std::time::Duration::from_millis(ms));
         for (k, whole) in &keys {

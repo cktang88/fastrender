@@ -89,8 +89,21 @@ is what reaches the vertex stage. Its own estimate: a little lower than the 2.66
 
 Items 1-3 keep the picture; item 4 moves far geometry by about a pixel or less (CI's golden gates decide; see docs/LOG.md for the run).
 
-1. **`trimLights`** (`js/three-programs.js` `_trimLights`, default on; `FastRenderer({ trimLights: false })` or
-   `host.params.trimLights = 0` to opt out). Point and spot lights whose colour x intensity is exactly 0 leave the
+1. **Dark lights cost nothing: `dynamicLights` (the default since 2026-11-16), before that `trimLights`.**
+   `dynamicLights` (`js/three-programs.js` `skipDarkLights`): every light stays in three's light state, so the
+   light counts in the programs are the scene's own, and each unrolled point / spot light block of the fragment
+   stage sits behind `if ( pointLights[ k ].color != vec3( 0.0 ) )`. The colour uniform is colour x intensity and
+   every term of the block is a product with it, so a skipped block added exactly 0. The branch reads a uniform:
+   a dark light costs a load and a compare per fragment. **A light going on or off changes a uniform, not a
+   program**, so a game that pads its light list to a budget (this one) never recompiles at a door. Switches:
+   `FastRenderer({ dynamicLights: false })` / `host.params.dynamicLights = 0` -> `trimLights` as described next;
+   `trimLights: false` -> neither (as WebGLRenderer). Ablation rows `trimlights`, `alllights`.
+   Why it replaced `trimLights` as the default: trimming made the counts step at every door, every lit program of
+   what was on screen was replaced, and the main pass waited for the pipelines: frames of 5 to 10 s
+   (docs/LOG.md 2026-11-16). GPU cost against `trimLights`: CI ratio in docs/LOG.md; **not timed on an Air yet**
+   (`scripts/gpu-ablate.sh`: `none` vs `trimlights`).
+   **`trimLights`** (`js/three-programs.js` `_trimLights`, off unless `dynamicLights` is; `FastRenderer({ trimLights: false })` or
+   `host.params.trimLights = 0` for neither). Point and spot lights whose colour x intensity is exactly 0 leave the
    light list before three's `WebGLLights` sees it. Every term such a light adds is `x * 0`, the lit lights keep their
    order, a dark shadow-casting light takes its shadow lookup (and its shadow passes) with it. Directional and
    hemisphere lights are never touched (CSM cascades index them).
@@ -206,6 +219,7 @@ Read the `gpu passes ... main` number of each row against `none`:
 | row | what it tells |
 |---|---|
 | `alllights` | the frame before `trimLights` (should reproduce ~57 ms); `alllights - none` = what the dark lights cost |
+| `trimlights` | `dynamicLights` off, `trimLights` on: what shipped before 2026-11-16. `none - trimlights` = what the per-light branches of `dynamicLights` cost (expected: within noise) |
 | `none` | what ships now. `[census]` lines: lights in the light state, draws and `main()` size per program |
 | `nofarlod` | the game's far LODs off (patches/0004): `nofarlod - none` = what they save; the `draws per pass` and `[census]` lines give the triangles of both |
 | `none@2048` | instanced draws whole: `none@2048 - none` = what drawing only the instances in view saves |

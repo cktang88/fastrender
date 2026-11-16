@@ -749,8 +749,24 @@ impl<B: PipelineBackend> Compiler<B> {
 
     pub fn stats(&self) -> Stats { self.shared.lock().stats }
 
+    /// The render thread is about to wait for these pipelines: their jobs go to the front of the queue, in this
+    /// order (a worker builds a pipeline's stage libraries itself when they are not there yet). Without this a
+    /// waited pipeline stands behind everything requested before it: a full-screen pass queued after a level's
+    /// materials held its frames until all of them were compiled.
+    pub fn hurry(&self, keys: &[PipelineKey]) {
+        let mut st = self.shared.lock();
+        for key in keys.iter().rev() {
+            if let Some(i) = st.demand.iter().position(|j| matches!(j, Job::Pipeline(k) if k == key)) {
+                if let Some(j) = st.demand.remove(i) {
+                    st.demand.push_front(j);
+                }
+            }
+        }
+    }
+
     /// Blocks until the requested pipeline is built or has failed (its event is then waiting in `poll`).
     pub fn wait_pipeline(&self, key: &PipelineKey) {
+        self.hurry(std::slice::from_ref(key));
         let mut st = self.shared.lock();
         while matches!(st.pipes.get(key), Some(Entry { work: Work::Queued | Work::Building, wanted: true })) {
             st = self.shared.wait(st);
@@ -759,6 +775,7 @@ impl<B: PipelineBackend> Compiler<B> {
 
     /// As `wait_pipeline`, but gives up at `deadline`: false when the pipeline is still queued or being built then.
     pub fn wait_pipeline_until(&self, key: &PipelineKey, deadline: std::time::Instant) -> bool {
+        self.hurry(std::slice::from_ref(key));
         let mut st = self.shared.lock();
         while matches!(st.pipes.get(key), Some(Entry { work: Work::Queued | Work::Building, wanted: true })) {
             let now = std::time::Instant::now();
@@ -936,6 +953,27 @@ mod tests {
         assert!(settle(&c).iter().any(|e| matches!(e, Event::Pipeline { key, result: Ok(_) } if *key == k)));
         // a pipeline that is ready (or was never asked for) is not waited for at all
         assert!(c.wait_pipeline_until(&k, std::time::Instant::now()));
+    }
+
+    #[test]
+    fn a_waited_pipeline_goes_to_the_front_of_the_queue() {
+        let fake = Arc::new(Fake::default());
+        let c = Compiler::new(fake.clone(), None, 1, || {});
+        // one worker, three programs whose stages take 200 ms each, their pipelines requested in order
+        let ps: Vec<ProgramInfo> = (0..3).map(|i| info(&format!("slow vs {i}"), &format!("slow fs {i}"))).collect();
+        for (i, p) in ps.iter().enumerate() {
+            c.add_program(p.clone(), format!("slow vs {i}").into(), format!("slow fs {i}").into());
+        }
+        let keys: Vec<PipelineKey> = ps.iter().map(|p| key(p, 3, Target::Main)).collect();
+        for k in &keys {
+            assert!(matches!(c.request(k), Status::Pending));
+        }
+        // the render thread needs the last one
+        c.wait_pipeline(&keys[2]);
+        assert!(matches!(c.request(&keys[2]), Status::Ready(_)));
+        assert!(c.stats().pending_pipelines >= 1, "the ones requested before it are still to come: it did not wait behind them");
+        c.wait_idle();
+        assert_eq!(c.stats().pending_pipelines, 0);
     }
 
     #[test]

@@ -63,7 +63,8 @@ jobs:
         timeout-minutes: 30
         run: |
           for w in 0 250; do
-            rc=0; FASTRENDER_MAIN_WAIT_MS=$w bash host/electron/scripts/play-world.sh --no-build --play-seconds 5 --doors 2 --params '{"dynamicLights":0}' --tag "play-fr-trimlights-$w" --out "$GITHUB_WORKSPACE/play-out" --log "$GITHUB_WORKSPACE/play-out/play-fastrender-trimlights-$w-stall.log" --timeout 900 > "play-fr-trimlights-$w.log" 2>&1 || rc=$?
+            # (its own empty pipeline cache: every run compiles from nothing, as the first run above did)
+            rc=0; FASTRENDER_PIPELINE_CACHE="$RUNNER_TEMP/pipelines-trimlights-$w" FASTRENDER_MAIN_WAIT_MS=$w bash host/electron/scripts/play-world.sh --no-build --play-seconds 5 --doors 2 --params '{"dynamicLights":0}' --tag "play-fr-trimlights-$w" --out "$GITHUB_WORKSPACE/play-out" --log "$GITHUB_WORKSPACE/play-out/play-fastrender-trimlights-$w-stall.log" --timeout 900 > "play-fr-trimlights-$w.log" 2>&1 || rc=$?
             { echo "exit $rc"; grep -E "^\[game\] DOOR|^\[summary\]|^\[fastrender\] compile" "play-fr-trimlights-$w.log" | cut -c1-900; echo "-- the 12 longest frames:"; grep -E "^\[hitch\]" "play-fr-trimlights-$w.log" | sed -E 's/^\[hitch\] [0-9:.]+ frame ([0-9.]+) ms/\1 &/' | sort -rn | head -12 | cut -d' ' -f2- | cut -c1-900; } > play-fr-trimlights-stall.txt || true
             bash .github/annotate.sh notice "play-smoke fastrender stall log: doors with dynamicLights OFF, main-pass wait limit $w ms (0 = none: as before) (PARAVIRTUAL GPU)" play-fr-trimlights-stall.txt 60
           done

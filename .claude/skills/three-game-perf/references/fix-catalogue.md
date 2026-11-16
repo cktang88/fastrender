@@ -29,18 +29,36 @@ point/spot count far above what is visibly lit, `lines of main() per lit draw` i
 grep for `intensity = 0`, light pools, "budget". On hardware: row `alllights` vs `none`; `nolights` vs `none`
 bounds what the lit lights cost.
 
-**Fix.** `trimLights` (default on; `js/three-programs.js` `_trimLights`): point and spot lights whose colour x
-intensity is exactly 0 leave the light state before three's `WebGLLights` sees it. Exact. Kept counts step
-0 1 2 3 4 6 8 12 16 24... (exact for shadow lights) and shrink only after 120 frames, so variants stay few.
-`lightHold` (default on with `trimLights`) puts a count change off, up to 180 frames, while the new variants
-compile in the background. Directional and hemisphere lights are never trimmed (CSM cascades index them).
+**Fix.** `dynamicLights` (default on; `js/three-programs.js` `skipDarkLights`): the light list stays as the scene
+has it, so the counts in the programs are the game's own, and in the fragment stage each unrolled point / spot
+light block is wrapped in `if ( pointLights[ k ].color != vec3( 0.0 ) ) { ... }`. Exact: the colour uniform is
+colour x intensity and every term of the block is a product with it. A light going on or off changes a uniform, so
+**no program changes and nothing compiles**. Directional, hemisphere and rect-area lights are not wrapped.
 
-**Switch.** `FastRenderer({ trimLights: false })`, `host.params.trimLights = 0`; row `alllights`.
+**The first fix, and its lesson.** `trimLights` (now behind `dynamicLights: false`) removes the dark lights from
+the light state instead. Same pixels, same GPU cost, but it undid what the padding was for: the counts step when a
+light goes on, three picks another program for every lit material, and with async compile the main pass waits for
+the pipelines that replace ones on screen. In play that was a 5-10 s freeze at each door (entering a shop: 0 -> 3
+point lights for the shop's materials; leaving: the street drawn with 3 kept dark lights, 60 programs replaced).
+The deterministic bench never saw it: its camera stands on the street. **When a fix removes something a game does
+on purpose (padding, pooling, pre-allocation), find out what the game bought with it and keep that property**, and
+test the transitions the game has (doors, time of day), not only the steady frame.
 
-**Effect.** Air: main 42.88 -> 9.33 ms at 1280x800. node: `render()` JS 20.5 -> 13.3 ms.
+**Switch.** `FastRenderer({ dynamicLights: false })` / `host.params.dynamicLights = 0` -> `trimLights` (with
+`lightHold` where the host supports it: JavaScriptCore only); `trimLights: false` / `host.params.trimLights = 0` ->
+neither. Rows `trimlights` and `alllights`; play mode: `--params '{"dynamicLights":0}'`.
+
+**Effect.** Air, `trimLights`: main 42.88 -> 9.33 ms at 1280x800. node: programs translated over three door round
+trips 77 -> 11 with `dynamicLights` (the 11 are materials seen for the first time). CI and Air numbers for
+`dynamicLights` against `trimLights`: docs/LOG.md 2026-11-16 (`none` vs `trimlights` rows).
+
+**Detect a light-count hitch.** Node: `--door` (programs translated per leg; a leg back onto a street that was
+drawn before should bring about none). Play mode: `[hitch] ... pipeline wait: main pass` lines with `lights a -> b`
+in the page part (`references/harness.md` "Stall log").
 
 **For a new game.** Nothing to do if the dark lights are exactly 0. If the game dims lights to a tiny non-zero
-value, or parks them far away, patch the game to set intensity 0 (or `visible = false`) instead.
+value, or parks them far away, patch the game to set intensity 0 instead. A game that toggles `light.visible`
+changes three's counts under any renderer: patch it to keep the light and set intensity 0.
 
 ## 2. Instanced meshes drawn whole
 
@@ -126,16 +144,26 @@ alpha-tested facades would gain more. A depth pre-pass was not added for the sam
 **Detect.** Long first frame; a stall or missing lit geometry when lights switch on or a new area appears; CI
 annotation `compile launch` (cold vs warm). `FASTRENDER_COMPILE=async|blocking` reproduces both behaviours.
 
+**Detect in play.** The stall log (`references/harness.md`): every frame over 25 ms with its cause. `pipeline wait:
+main pass` = a material instance that was on screen got another program (a light count, fog, tone mapping, a
+define or a map set after the first draw); `shadow map` / `render target` = a pipeline for a pass whose content may
+be drawn once, waited for one at a time. `FR_PROGRAM_LOG=1` on the node harness names each program translated
+after the start, with its defines: diff two of one material to see which define moved.
+
 **Fix (in place).** Async compile off the render thread, a persisted pipeline manifest prewarmed at launch and
-Metal's binary archive (`src/pipeline_manifest.rs`, `src/mac_programs.rs`); `lightHold` for light-count steps; the
-main pass waits for a pipeline that replaces one already on screen. Switches: `FASTRENDER_PIPELINE_CACHE=off`,
-`FASTRENDER_ARCHIVE=0`.
+Metal's binary archive (`src/pipeline_manifest.rs`, `src/mac_programs.rs`); `dynamicLights` so light changes
+compile nothing (entry 1). A pipeline that replaces one on screen holds the frame for at most half a frame when
+fewer than 8 are replaced at once (a streamed material that got a define: its draws are skipped until the pipeline
+arrives) and for at most 250 ms when many are (`bindlist::main_wait_ms`, `FASTRENDER_MAIN_WAIT_MS`, 0 = no limit);
+a full-screen pass is waited out. Switches: `FASTRENDER_PIPELINE_CACHE=off`, `FASTRENDER_ARCHIVE=0`.
 
 **Effect.** CI: real game cold first frame 38.9-53.6 s vs 12.1 s warm; three-city 1,750 ms blocking vs 394 ms
 async cold, 278 ms warm. Air: next launch compile 6.8 s -> 360 ms once the archive saved correctly.
 
 **For a new game.** Count programs (`three programs:` line, `--dump-programs`). Many variants from light counts,
-fog or defines toggled at runtime are the usual source; reduce them in the game before adding machinery.
+fog or defines toggled at runtime are the usual source; reduce them in the game before adding machinery. A material
+that is drawn once and then gets a define (this game: the CSM define on a streamed block's materials, a frame after
+its first draw) costs one replaced program each time: set the define before the first draw.
 
 ## 7. Fill-bound at native resolution
 
@@ -194,7 +222,12 @@ that the native base-instance path does not pay: node, real game, about 1 ms per
   not; a retry loop filled a Mac's disk (133 GB). Fixed in `a05078d`. Any retry around Metal tooling must clean up
   and be bounded.
 - **A light-count step changes every lit program at once.** With async compile the lit scene disappears for
-  frames unless the old variant is held (`lightHold`) or the pipeline is waited for.
+  frames unless the old variant is held (`lightHold`) or the pipeline is waited for, and waiting is a freeze of
+  seconds in play. The fix is to make the count not step (`dynamicLights`), not better waiting.
+- **The steady frame hides transition costs.** Every bench here pinned one view; the door hitch needed a scripted
+  door (`--door`, play-smoke `--doors`). Add the game's transitions to the harness when a fix touches program
+  selection.
+- **cmd-Q and Ctrl-C do not emit Electron's `window-all-closed`.** Cleanup and summaries belong in `before-quit`.
 - **Index-keyed native state breaks when a list is filtered.** Shadow maps were keyed by `(kind, index)`; trimming
   moved the indices. Key native state by stable ids.
 - **`matrixWorldAutoUpdate = false` does not skip a subtree** in r187: it skips that object's multiply and still

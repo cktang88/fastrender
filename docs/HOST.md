@@ -254,6 +254,10 @@ Causes: `pipeline wait: main pass | shadow map | render target`, `uploads`, `ren
 page's half exists. The code: `src/hitch.rs` (records, causes, percentiles; unit-tested), the render loop in
 `host/electron/native/src/fr_render.rs`, the page's half in `game/boot.mjs`, the join and the file in `game/main.js`.
 
+Metal 4: an M2 Air on macOS 26 reports `backend metal3 (auto: Metal4 family true, MTL4CommandQueue true)`: the
+Metal 4 backend could run there. `auto` still picks Metal 3 (the encode path it would save is not where the frame
+is spent); `--renderer '{"backend":"metal4"}'` forces it, untested in play mode.
+
 Not covered: `contentsScale` is read once when the view is created, so a window dragged to a display with another
 scale factor keeps the old one until restart. The game's `G` key switches to its `high` / `ultra` tiers
 (EffectComposer, bloom, GTAO), which no golden or benchmark run has drawn on fastrender.

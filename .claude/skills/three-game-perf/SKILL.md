@@ -1,6 +1,6 @@
 ---
 name: three-game-perf
-description: Measures, attributes and fixes frame-time problems of three.js games and scenes running on fastrender (this repo's native Metal renderer for Apple Silicon) - per-pass GPU ms, feature ablations, JS profiling, then proven fixes (dark-light trimming, per-instance culling, far LODs, static-subtree freezing, discard ordering, async shader compile, MetalFX render scale), each checked against golden screenshots. Use whenever work in this repo touches performance - low fps, slow or long frames, frame time, lag, stutter, hitches, shader-compile stalls, profiling, benchmarking, optimizing, "why is it slow", GPU-bound or JS/CPU-bound frames, draw calls, triangle counts, overdraw, lights, shadows, updateMatrixWorld cost, WebGL vs WebGPU vs Metal comparisons, M1/M2/M3 MacBook Air targets - and when porting or bundling a three.js game to fastrender, reading bench-results/, adding an ablation row or bench flag, or asking the user for a hardware run, even if the word "performance" is never used.
+description: Measures, attributes and fixes frame-time problems of three.js games and scenes running on fastrender (this repo's native Metal renderer for Apple Silicon) - per-pass GPU ms, feature ablations, JS profiling, then proven fixes (dark lights skipped by a uniform branch, per-instance culling, far LODs, static-subtree freezing, discard ordering, async shader compile, MetalFX render scale), each checked against golden screenshots. Use whenever work in this repo touches performance - low fps, slow or long frames, frame time, lag, stutter, hitches, shader-compile stalls, profiling, benchmarking, optimizing, "why is it slow", GPU-bound or JS/CPU-bound frames, draw calls, triangle counts, overdraw, lights, shadows, updateMatrixWorld cost, WebGL vs WebGPU vs Metal comparisons, M1/M2/M3 MacBook Air targets - and when porting or bundling a three.js game to fastrender, reading bench-results/, adding an ablation row or bench flag, or asking the user for a hardware run, even if the word "performance" is never used.
 ---
 
 # Optimizing a three.js game on fastrender
@@ -41,6 +41,10 @@ game unchanged),
 - **Separate generic wins from native ones.** Game patches and tricks any three renderer can use (hiding dark
   lights, discard ordering via `setOpaqueSort`) must also be applied to the WebGL baseline (`webgl-opt` bench row),
   so the reported gap is only Metal + native-only tricks. The user asks exactly this.
+- **Steady frames and transitions are two measurements.** The benches pin one view; a fix that touches program
+  selection, light state or streaming also needs the game's transitions (`--door` in node, `--doors` in play-smoke,
+  the stall log on the user's Mac). `trimLights` was exact and 4x faster on the pinned view and froze the game for
+  seconds at every door.
 - **Unmeasured is labelled unmeasured.** Write "node estimate", "CI ratio" or "not run on hardware" next to such a
   number, in notes and in the reply to the user.
 
@@ -84,7 +88,8 @@ CPU (JS, native apply, prepare, encode), GPU, draws` and `draws per pass`. Then 
 | `basic` (unlit) row is still most of `main` | geometry-bound (vertex, tiling) | triangle census, instances, LODs |
 | `shadow` is several ms | shadow passes re-rendered | shadow `autoUpdate` / `needsUpdate`, caster count |
 | JS ms is a large share once GPU is fixed | JS-bound | `--profile`, `--matrix-stats` |
-| long first frames, or frames missing after a scene change | compile hitch | compile / light-hold entries in the catalogue |
+| long first frames, or frames missing after a scene change | compile hitch | compile / light entries in the catalogue |
+| smooth, then single frames of 50 ms to seconds in play (doors, streaming, time of day) | hitch: needs the cause per frame | play mode's stall log (`references/harness.md`); ask for `host/electron/play-out/last.log` |
 
 ### 3. Attribute
 

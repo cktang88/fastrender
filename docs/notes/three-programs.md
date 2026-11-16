@@ -321,6 +321,8 @@ Everything else (`WebGLProgram`, `WebGLLights.setup/setupView`, `WebGLMaterials`
   (SHADOW_KEEP); the native side renders no pass for it and keeps binding its last map (lit if it never rendered).
   Maps are kept under the shadow's own id (SHADOWS word 3, `light.shadow._frId`), not under three's (kind, index):
   trimLights drops dark lights, so the index of the lights after them moves (`three::shadow_map_slot`).
+  (`dynamicLights`, the default, leaves the light list alone: the indices are three's own, and the fragment stage
+  skips the dark lights by a branch on their colour uniform, `skipDarkLights`.)
 - **r170 shadow maps** (RGBA-packed, `DEPTH_TEXTURE_SHADOWS` false): rendered natively for directional and spot
   lights into an RGBA8 target cleared to white, every caster through `vs_three_depth` + `fs_three_pack_depth`
   (packing.glsl.js r170's packDepthToRGBA of the GL window z); three's depth programs are not used there (alphaTest

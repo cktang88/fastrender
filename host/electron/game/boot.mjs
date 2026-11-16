@@ -78,7 +78,9 @@ function startPlay() {
   const img = () => (fr ? host.imageStats : { calls: 0, ms: 0, bytes: 0 });
   const rtTotal = () => { const r = G.__worldStats && G.__worldStats.rtRenders; let n = 0; if (r) for (const k in r) n += r[k]; return n; };
   const rtWho = (before) => { const r = (G.__worldStats && G.__worldStats.rtRenders) || {}; const o = []; for (const k in r) if (r[k] !== (before[k] || 0)) o.push(`${r[k] - (before[k] || 0)} ${k}`); return o.join(', ').slice(0, 200); };
-  const lightsNow = () => { const r = G.__frPlayRenderer, st = r && r._tp && r._tp.lights ? r._tp.lights.state : null; return st ? `${st.point.length} point ${st.spot.length} spot ${st.directional.length} directional` : ''; };
+  // (the light state of the last pass written; a pass without any light, e.g. a PMREM blur, is not the scene's)
+  let lightsSeen = '';
+  const lightsNow = () => { const r = G.__frPlayRenderer, st = r && r._tp && r._tp.lights ? r._tp.lights.state : null; if (st && st.point.length + st.spot.length + st.directional.length + st.hemi.length > 0) lightsSeen = `${st.point.length} point ${st.spot.length} spot ${st.directional.length} directional`; return lightsSeen; };
   const heap = () => (performance.memory ? performance.memory.usedJSHeapSize : 0);
   const programsNow = () => { const r = G.__frPlayRenderer; return fr ? cnt.progs : r && r.info && r.info.programs ? r.info.programs.length : 0; };
   const events = [];

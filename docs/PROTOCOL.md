@@ -114,7 +114,7 @@ Re-sent when the program or any of these pipeline-state fields change (WebGLRend
 
 **Prewarm notes** (optional; only with a host that has `host.prewarmPending`): `host.upload(3, id, { prewarm, token })`.
 three compiles the light counts into every lit program, so when a count changes every lit material instance gets
-another program at once. With `lightHold` (default on where the host can answer) the JS side puts the change off:
+another program at once. With `lightHold` (on where the host can answer and `trimLights` is in use, i.e. `dynamicLights: false`; with the default `dynamicLights` light counts do not step) the JS side puts the change off:
 the light list keeps its counts while, a few per frame, it picks and translates the programs of the new counts
 (`host.program`, as when they are first drawn) and tells the native side which instance each will replace:
 `prewarm` = that program's id, on the instance's id. The native side queues the pipelines the instance is drawn
