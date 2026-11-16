@@ -1,0 +1,73 @@
+name: lights-ab
+# What a change to the light state costs and whether the picture moved, in about 20 minutes instead of mac.yml's
+# 90: the real game's golden frame with dynamicLights (what ships), with trimLights and with neither, and the GPU
+# ms of the three, interleaved twice (docs/notes/gpu-cost.md item 1). The same commands as mac.yml's "real game"
+# step; this workflow only exists so the answer does not wait in mac.yml's queue. Gates nothing.
+# !!! The runner's GPU is paravirtual: only the ratios between rows mean anything.
+on:
+  push:
+    branches: [claude/focused-keller-jtmxe0]
+    paths:
+      - js/three-programs.js
+      - .github/workflows/lights-ab.yml
+  workflow_dispatch:
+concurrency:
+  group: lights-ab-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  lights-ab:
+    runs-on: macos-26
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+      - name: build
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_26.6.app"
+          rustup toolchain install
+          cargo build --release
+          (cd js && npm ci --silent)
+          node js/build.mjs js/examples/three-city.entry.mjs js/dist/three-city.js
+      - name: three-city golden (three's own programs)
+        continue-on-error: true
+        run: |
+          ./target/release/fastrender bench --three js/dist/three-city.js --programs three --time 1 --scale 1 --upscale bilinear --size 1280x800 --frames 3 --warmup 2 --shot golden-three-t1.png > golden-three-bench.txt 2>&1 || true
+          echo "::notice title=lights-ab three-city golden (MAE vs ref-t1, gate < 1.0)::$(node js/golden/diff.mjs js/golden/ref-t1.png golden-three-t1.png golden-diff-three-t1.png 2>&1 | tail -1)"
+      - name: real game - golden frame under the three light modes, then GPU ms (PARAVIRTUAL GPU)
+        continue-on-error: true
+        run: |
+          WO_BASE=073aa9eae0ba86cecb16970162593281714214e3
+          git init -q ../3d-world-objects && git -C ../3d-world-objects fetch -q --depth 1 https://github.com/cktang88/3d-world-objects "$WO_BASE" && git -C ../3d-world-objects checkout -q FETCH_HEAD
+          for p in patches/3d-world-objects-000*.patch; do git -C ../3d-world-objects -c user.name=ci -c user.email=ci@localhost am -q "$PWD/$p"; done
+          node js/examples/world-objects.build.mjs ../3d-world-objects js/dist/world-objects.js --target jsc --three three
+          export FASTRENDER_ASSETS="$PWD/../3d-world-objects/public"
+          B="./target/release/fastrender bench --three js/dist/world-objects.js --scale 1 --upscale bilinear --size 1280x800"
+          : > lights-exact.txt
+          $B --frames 3 --warmup 11 --shot golden-none.png > wo-none.txt 2>&1 || true
+          echo "dynamicLights (what ships) vs the browser golden (gate < 10): $(node js/golden/diff.mjs js/golden/world-objects-ref.png golden-none.png diff-none-ref.png 2>&1 | tail -1)" >> lights-exact.txt
+          for a in trimlights alllights; do
+            FASTRENDER_ABLATE="$a" $B --frames 3 --warmup 11 --shot "golden-$a.png" > "wo-$a.txt" 2>&1 || true
+            echo "dynamicLights vs $a, same frame: $(node js/golden/diff.mjs golden-none.png "golden-$a.png" "diff-$a.png" 2>&1 | tail -1); $a vs the browser: $(node js/golden/diff.mjs js/golden/world-objects-ref.png "golden-$a.png" "diff-$a-ref.png" 2>&1 | tail -1)" >> lights-exact.txt
+          done
+          grep -E "three programs:|GPU error|rror" wo-none.txt | cut -c1-280 | head -4 >> lights-exact.txt || true
+          bash .github/annotate.sh notice "lights-ab: the golden frame with dynamicLights, trimLights, neither (MAE; 0 = the same picture)" lights-exact.txt 12
+          : > lights-ab.txt
+          for a in alllights trimlights none alllights trimlights none; do
+            FASTRENDER_ABLATE="$a" $B --frames 40 --warmup 80 --gpu-passes 1 > "ab-$a.txt" 2>&1 || true
+            { echo "== $a"; grep -E "gpu passes|three frame cost" "ab-$a.txt" | cut -c1-290; } >> lights-ab.txt
+          done
+          grep -F "[census]" ab-none.txt | cut -c1-280 | head -4 >> lights-ab.txt || true
+          bash .github/annotate.sh notice "lights-ab: GPU ms (alllights = every dark light evaluated, trimlights = out of the light state, none = dynamicLights: skipped by a branch)" lights-ab.txt 30
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lights-ab
+          path: |
+            golden-*.png
+            diff-*.png
+            wo-*.txt
+            ab-*.txt
+            lights-*.txt
