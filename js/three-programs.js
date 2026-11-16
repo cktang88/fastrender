@@ -473,7 +473,8 @@ const LIGHT_WIRING = [
   // r170 kept the shadow map arrays in the material uniforms; r187 sets them on the program
   ['directionalShadowMap', 'directionalShadowMap'], ['spotShadowMap', 'spotShadowMap'], ['pointShadowMap', 'pointShadowMap'], ['sunShadowMap', 'sunShadowMap'],
 ];
-const LIGHT_ROOTS = new Set(LIGHT_WIRING.map(([u]) => u));
+// (+ the counts `dynamicLights` adds to lit fragment stages: packed with the light state, as part of it)
+const LIGHT_ROOTS = new Set([...LIGHT_WIRING.map(([u]) => u), 'frNumPointLights', 'frNumSpotLights']);
 // uniforms that depend on the object being drawn (besides the FrObject matrices): their blocks are per object
 const OBJECT_SPECIFIC = ['bindMatrix', 'bindMatrixInverse', 'boneTexture', 'morphTargetBaseInfluence', 'morphTargetInfluences', 'morphTargetsTexture', 'morphTargetsTextureSize', 'morphTexture', 'batchingTexture', 'batchingIdTexture', 'batchingColorTexture', 'center'];
 
@@ -494,23 +495,60 @@ function trimClass(l) {
   return -1;
 }
 /**
- * `dynamicLights`: the fragment stage skips point and spot lights whose colour is exactly 0, by a branch on the
- * light's own uniform, so the light COUNTS three compiles into the program can stay what the scene holds.
+ * `dynamicLights`: the number of point / spot lights the fragment stage evaluates is a uniform, so the light COUNTS
+ * three compiles into the program can stay what the scene holds while the cost follows the lights that are on.
  *
  * three unrolls its light loops (`#pragma unroll_loop_start`): after WebGLProgram's unrollLoops every point / spot
- * light is one block from `pointLight = pointLights[ k ];` to its `RE_Direct( directLight, ... );`. Each block is
- * wrapped in `if ( pointLights[ k ].color != vec3( 0.0 ) ) { ... }`. The colour uniform is light.color x
- * light.intensity (WebGLLights.setup), and everything the block adds to the fragment is a product with it, so a
- * skipped block added exactly 0: the same reasoning as `_trimLights`, with the test made per frame by the GPU
- * instead of per program by the light list. The branch depends on a uniform only: every fragment of a draw takes
- * the same side, and a dark light costs a load and a compare instead of a BRDF evaluation and a shadow lookup.
+ * light is one block from `pointLight = pointLights[ k ];` to its `RE_Direct( directLight, ... );`. The blocks of
+ * a kind become a chain
  *
- * Text that does not match (a hook rewrote the chunk, another three version) is left as it is: correct, not faster.
+ *     if ( frNumPointLights > 0 ) {
+ *       if ( pointLights[ 0 ].color != vec3( 0.0 ) ) { <block 0> }
+ *       if ( frNumPointLights > 1 ) {
+ *         if ( pointLights[ 1 ].color != vec3( 0.0 ) ) { <block 1> }
+ *         ...
+ *     } }
+ *
+ * `frNum*Lights` (ThreePrograms._lightCounts) is how many lights of the kind are in three's light state this frame;
+ * the entries after them are zeros. With no lamp on, a fragment pays one compare per kind. The inner test is for
+ * the dark lights that stay in the light state (shadow casters: three puts them first). Both tests only ever skip
+ * a block whose light colour (light.color x light.intensity, WebGLLights.setup) is exactly 0, and everything a
+ * block adds to the fragment is a product with that colour: the picture is the one with every block run. Both
+ * read uniforms only, so every fragment of a draw takes the same side.
+ *
+ * Text that does not have this shape (a hook rewrote the chunk, another three version, no `void main() {`) is
+ * returned as it is: correct, not faster.
  */
-const DARK_SKIP = /^([ \t]*)((point|spot)Light = \3Lights\[ (\d+) \];[\s\S]*?\bRE_Direct\( directLight,[^;\n]*;)/gm;
+const LIGHT_BLOCK = /^([ \t]*)((point|spot)Light = \3Lights\[ (\d+) \];[\s\S]*?\bRE_Direct\( directLight,[^;\n]*;)/gm;
+export const LIGHT_COUNT_UNIFORMS = { point: 'frNumPointLights', spot: 'frNumSpotLights' };
 export function skipDarkLights(fragment) {
   if (fragment.indexOf('RE_Direct( directLight') < 0) return fragment;
-  return fragment.replace(DARK_SKIP, (m, indent, body, kind, k) => `${indent}if ( ${kind}Lights[ ${k} ].color != vec3( 0.0 ) ) {\n${indent}${body}\n${indent}}`);
+  const main = fragment.indexOf('\nvoid main() {');
+  if (main < 0) return fragment;
+  const blocks = [...fragment.matchAll(LIGHT_BLOCK)];
+  if (blocks.length === 0 || blocks[0].index < main) return fragment;
+  let body = '', at = main + 1, open = 0, prev = null;
+  const used = new Set();
+  for (const m of blocks) {
+    const [, indent, text, kind, k] = m;
+    // the chain of a kind: its blocks follow each other with nothing but white space between, numbered from 0
+    const follows = prev !== null && prev[3] === kind && Number(prev[4]) + 1 === Number(k) && fragment.slice(at, m.index).trim() === '';
+    if (!follows) {
+      if (Number(k) !== 0 || used.has(kind)) return fragment;
+      if (prev !== null) body += `\n${prev[1]}${'}'.repeat(open)}`; // the chain of the kind before ends after its last block
+      open = 0;
+    }
+    body += fragment.slice(at, m.index);
+    body += `${indent}if ( ${LIGHT_COUNT_UNIFORMS[kind]} > ${k} ) {\n${indent}if ( ${kind}Lights[ ${k} ].color != vec3( 0.0 ) ) {\n${indent}${text}\n${indent}}`;
+    open++; used.add(kind);
+    at = m.index + m[0].length; prev = m;
+  }
+  body += `\n${prev[1]}${'}'.repeat(open)}` + fragment.slice(at);
+  return fragment.slice(0, main + 1) + [...used].map((kind) => `uniform int ${LIGHT_COUNT_UNIFORMS[kind]};\n`).join('') + body;
+}
+/** lights `dynamicLights` leaves out of three's light list: dark point / spot lights that cast no shadow and project no map (their place in three's order, and the shadow / map counts, do not depend on them) */
+function isDarkFill(l) {
+  return (l.isPointLight === true || l.isSpotLight === true) && !l.castShadow && !l.map && isDark(l);
 }
 /** a light whose colour * intensity is exactly 0 (WebGLLights.setup multiplies them; nothing else of it reaches a pixel) */
 function isDark(l) {
@@ -699,6 +737,8 @@ export class ThreePrograms {
     // wires them into each material's uniforms): one { value } holder per uniform name
     this._lightHolders = {};
     for (const [u] of LIGHT_WIRING) this._lightHolders[u] = { value: null };
+    // dynamicLights: how many point / spot lights are in three's light state (the fragment stage runs that many)
+    this._lightHolders.frNumPointLights = { value: 0 }; this._lightHolders.frNumSpotLights = { value: 0 };
     // scene fog as of the last frame: refreshFogUniforms is skipped for a material whose fog values are current
     this._fogKey = []; this._fogStamp = 0;
     this._size = { x: 1, y: 1, set(x, y) { this.x = x; this.y = y; return this; } };
@@ -707,9 +747,10 @@ export class ThreePrograms {
     this.stats = { blocks: 0, changed: 0, lightPrograms: 0, lightsDropped: 0, lightsHeld: 0, darkSkipPrograms: 0 };
     this._transmissionRT = { texture: { isFastRenderTransmission: true }, width: 1, height: 1 };
     // What a dark point / spot light costs, and what a light going on or off costs:
-    //   dynamicLights (the default): every light stays in three's light state, so the counts in the programs are the
-    //     scene's own (a game that pads its list to a budget never changes them), and the fragment stage skips the
-    //     dark ones (skipDarkLights). A light switching on changes a uniform, not a program: nothing compiles.
+    //   dynamicLights (the default): the counts in the programs are the scene's own (a game that pads its list to a
+    //     budget never changes them), and the fragment stage runs only as many point / spot lights as are on, by a
+    //     uniform (skipDarkLights, _lightCounts). A light switching on changes uniforms, not a program: nothing
+    //     compiles.
     //   trimLights (dynamicLights: false): dark lights leave the light state (_trimLights). The same pixels and GPU
     //     cost, but the counts step when lights go on, and every lit program is another one each time.
     //   neither (trimLights: false): as WebGLRenderer draws it; every lit fragment pays for every dark light.
@@ -742,7 +783,7 @@ export class ThreePrograms {
     let ss = this._sceneStates.get(scene);
     if (ss === undefined) this._sceneStates.set(scene, (ss = { lights: new WebGLLights(this._extensions), key: [], epoch: 0, trim: null, live: [], alt: null }));
     this._ss = ss;
-    this.stats.lightsDropped = this.trimLights ? this._trimLights(lights, ss) : 0;
+    this.stats.lightsDropped = this.dynamicLights ? this._dropDark(lights, ss) : this.trimLights ? this._trimLights(lights, ss) : 0;
     const shadows = this.shadows, sm = r.shadowMap;
     const all = sm.enabled && (sm.autoUpdate !== false || sm.needsUpdate === true);
     let ns = 0;
@@ -762,6 +803,7 @@ export class ThreePrograms {
     this.lights = ss.lights;
     this.lights.setup(lights);          // sorts `lights` in place in three's order
     this.lights.setupView(lights, camera);
+    if (this.dynamicLights) this._lightCounts(ss);
     this._clippingEnabled = this.clipping.init(r.clippingPlanes || [], !!r.localClippingEnabled);
     const f = this.frame;
     // projectionMatrix / viewMatrix / cameraPosition are moved by normalizeGlsl into FrFrame, which the native side
@@ -783,7 +825,8 @@ export class ThreePrograms {
     // everything that can change a program for every material: bump the epoch when it changes
     const fog = scene.fog || null;
     // (per scene: each scene keeps its own epoch; materials keep their variants per epoch)
-    if (changed(ss.key, state.version, fog, fog !== null && fog.isFogExp2 === true, scene.environment || null, r.toneMapping, r.outputColorSpace,
+    // (dynamicLights: three's version also moves with the number of lights that are on, which no program depends on)
+    if (changed(ss.key, this.dynamicLights ? ss.dyn.shape : state.version, fog, fog !== null && fog.isFogExp2 === true, scene.environment || null, r.toneMapping, r.outputColorSpace,
       r.shadowMap.enabled, r.shadowMap.type, this.clipping.numPlanes, this.clipping.numIntersection)) { ss.epoch = ++this._epochs; ss.live.length = 0; }
     this._epoch = ss.epoch;
     // what refreshFogUniforms reads (fog values; the colour space follows the output colour space)
@@ -791,6 +834,42 @@ export class ThreePrograms {
     // a light-count change that is being put off: a few more of its programs (the frame's state is all set now)
     const hold = ss.trim !== null ? ss.trim.hold : null;
     if (hold !== null && !hold.done) this._prewarm(ss, hold, scene);
+  }
+
+  /**
+   * `dynamicLights`, before WebGLLights.setup: the dark point / spot lights that cast no shadow leave the list (in
+   * place; returns how many), so three sets up and packs only lights that are on. What the list held is kept in
+   * `ss.dyn`: `_lightCounts` gives three's light state those lengths back.
+   */
+  _dropDark(lights, ss) {
+    const d = ss.dyn || (ss.dyn = { all: [0, 0], kept: [0, 0], key: [], shape: 0 });
+    let n = 0, np = 0, ns = 0, kp = 0, ks = 0;
+    for (let i = 0; i < lights.length; i++) {
+      const l = lights[i];
+      if (l.isPointLight === true) np++; else if (l.isSpotLight === true) ns++;
+      if (isDarkFill(l)) continue;
+      if (l.isPointLight === true) kp++; else if (l.isSpotLight === true) ks++;
+      lights[n++] = l;
+    }
+    const dropped = lights.length - n;
+    lights.length = n;
+    d.all[0] = np; d.all[1] = ns; d.kept[0] = kp; d.kept[1] = ks;
+    return dropped;
+  }
+
+  /**
+   * `dynamicLights`, after WebGLLights.setup / setupView: three's light state gets the lengths the scene's list had,
+   * so every program is picked (and its uniform arrays sized) for the scene's own counts, whatever is on. The
+   * entries after the lights that are on are holes: packed as zeros, never reached by the fragment stage, which
+   * runs `frNum*Lights` blocks (skipDarkLights). `ss.dyn.shape` moves when a count a program depends on does
+   * (three's own `state.version` also moves with the number of lights that are on).
+   */
+  _lightCounts(ss) {
+    const d = ss.dyn, st = this.lights.state, lh = this._lightHolders;
+    lh.frNumPointLights.value = d.kept[0]; lh.frNumSpotLights.value = d.kept[1];
+    if (st.point.length !== d.all[0]) st.point.length = d.all[0];
+    if (st.spot.length !== d.all[1]) st.spot.length = d.all[1];
+    if (changed(d.key, st.directional.length, d.all[0], d.all[1], st.rectArea.length, st.hemi.length, st.numDirectionalShadows, st.numPointShadows, st.numSpotShadows, st.numSpotMaps | 0, st.numLightProbes | 0)) d.shape++;
   }
 
   /**
@@ -980,7 +1059,7 @@ export class ThreePrograms {
     for (let i = 0; i < s.shadows.length; i++) { this.shadows[i] = s.shadows[i]; s.shadows[i].shadow._frKeep = s.keep[i]; }
     for (let i = 0; i < LIGHT_WIRING.length; i++) this._lightHolders[LIGHT_WIRING[i][0]].value = s.holders[i];
     // the same scene's WebGLLights may have been set up for the hook's camera: view-space light state for ours again
-    if (this.lightList && this.camera) { this.lights.setup(this.lightList); this.lights.setupView(this.lightList, this.camera); }
+    if (this.lightList && this.camera) { this.lights.setup(this.lightList); this.lights.setupView(this.lightList, this.camera); if (this.dynamicLights && this._ss !== null && this._ss.dyn) this._lightCounts(this._ss); }
     s.scene = s.camera = s.lights = s.lightList = s.ss = null;
     this._savePool.push(s);
   }

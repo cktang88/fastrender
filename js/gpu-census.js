@@ -184,8 +184,9 @@ export function gpuCensus(renderer, opts = {}) {
         directional_shadows: state.numDirectionalShadows ?? state.directionalShadowMap.length, point_shadows: state.numPointShadows ?? state.pointShadowMap.length, spot_shadows: state.numSpotShadows ?? state.spotShadowMap.length } : null,
       zero_intensity: count((l) => l.zero), zero_intensity_point: count((l) => l.zero && l.type === 'PointLight'), zero_intensity_spot: count((l) => l.zero && l.type === 'SpotLight'),
       dropped_zero: tp.stats && tp.stats.lightsDropped | 0,
-      // dynamicLights: the dark ones are in the programs but behind a branch on their colour (three-programs.js skipDarkLights)
-      skipped_in_shader: tp.dynamicLights === true,
+      // dynamicLights: the programs keep the scene's point / spot counts; the fragment stage runs this many of them
+      // (three-programs.js skipDarkLights, _lightCounts); null with trimLights or neither
+      run_in_shader: tp.dynamicLights === true ? [tp._lightHolders.frNumPointLights.value, tp._lightHolders.frNumSpotLights.value] : null,
       list: lights,
     },
     shadows: { enabled: !!renderer.shadowMap.enabled, type: renderer.shadowMap.type, lights: shadows.length, passes_this_frame: shadowPasses, texels_this_frame: shadowTexels, list: shadows },
@@ -218,7 +219,7 @@ export function gpuCensusText(c) {
   if (!c) return 'gpu census: n/a';
   const s = c.lights.in_state || {};
   const out = [];
-  out.push(`lights: ${c.lights.total + c.lights.dropped_zero} visible, ${c.lights.total} in three's light state (dir ${s.directional}, point ${s.point}, spot ${s.spot}, hemi ${s.hemi}); zero intensity: ${c.lights.zero_intensity} (point ${c.lights.zero_intensity_point}, spot ${c.lights.zero_intensity_spot}); dropped from the light state: ${c.lights.dropped_zero}${c.lights.skipped_in_shader ? '; the zero-intensity point / spot lights are skipped by a branch in the fragment stage (dynamicLights), so they are in the line count below but not evaluated' : ''}`);
+  out.push(`lights: ${c.lights.total + c.lights.dropped_zero} visible, ${c.lights.total} in three's light state (dir ${s.directional}, point ${s.point}, spot ${s.spot}, hemi ${s.hemi}); zero intensity: ${c.lights.zero_intensity} (point ${c.lights.zero_intensity_point}, spot ${c.lights.zero_intensity_spot}); dropped from the light state: ${c.lights.dropped_zero}${c.lights.run_in_shader ? `; dynamicLights: the point / spot counts above are the slots in the programs, the fragment stage runs ${c.lights.run_in_shader[0]} point + ${c.lights.run_in_shader[1]} spot of them (the line count below is of all slots)` : ''}`);
   out.push(`shadows: ${c.shadows.lights} shadow lights (dir ${s.directional_shadows}, point ${s.point_shadows}, spot ${s.spot_shadows}), ${c.shadows.passes_this_frame} passes this frame, ${(c.shadows.texels_this_frame / 1e6).toFixed(1)} M texels: ${c.shadows.list.map((x) => `${x.type} ${x.map}${x.faces > 1 ? ' x6' : ''}${x.rendered_this_frame ? '' : ' (kept)'}`).join(', ')}`);
   const d = c.draws;
   out.push(`draws: ${d.draws} (${(d.triangles / 1e6).toFixed(2)} M tris); casters ${d.casters} (${(d.caster_triangles / 1e6).toFixed(2)} M tris per shadow pass before culling); transparent ${d.transparent}; opaque with discard ${d.discard_draws} (${(d.discard_triangles / 1e6).toFixed(2)} M tris); opaque without ${d.opaque_no_discard}`);

@@ -116,9 +116,10 @@ export class FastRenderer {
         // dark point / spot lights leave the light state (three-programs.js _trimLights; false / 0: keep them all, as
         // WebGLRenderer does). Also from the host (host.params.trimLights), for a game that runs unchanged
         trimLights: opts.trimLights ?? (this.host.params && this.host.params.trimLights),
-        // dark lights stay in the light state and the fragment stage skips them (three-programs.js skipDarkLights):
-        // light counts, and so programs, do not change when a light goes on. The default; false / 0 (also
-        // host.params.dynamicLights): `trimLights` as before (the counts step, every lit program is replaced)
+        // the programs keep the scene's light counts and the fragment stage runs as many point / spot lights as are
+        // on, by a uniform (three-programs.js skipDarkLights): programs do not change when a light goes on. The
+        // default; false / 0 (also host.params.dynamicLights): `trimLights` as before (the counts step, every lit
+        // program is replaced)
         dynamicLights: opts.dynamicLights ?? (this.host.params && this.host.params.dynamicLights),
         releaseInstance: (inst) => { if (this.host.release) this.host.release(KIND.MATERIAL, inst.id); },
         // a light-count change is put off until its programs are compiled (three-programs.js _holdLights), with a host

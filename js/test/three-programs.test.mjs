@@ -808,7 +808,7 @@ else {
   console.log(`[three r${REV}] trimLights: dark point / spot lights leave the light state (10 point + 3 spot -> 1 + 0, no dark shadow lookup); counts step up at once and are held 120 frames`);
 }
 
-// ------------------------------------------------------------------ 13a. dynamicLights (the default): dark lights stay, the fragment stage skips them
+// ------------------------------------------------------------------ 13a. dynamicLights (the default): the programs keep the scene's light counts, a uniform says how many are on
 {
   const h = makeHost();
   const sent = [];
@@ -833,43 +833,70 @@ else {
   const basic = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial()); basic.position.x = -2;
   scene.add(std, lam, basic);
   const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); camera.position.set(0, 3, 8); camera.lookAt(0, 0, 0);
+  const counts = () => [r._tp._lightHolders.frNumPointLights.value, r._tp._lightHolders.frNumSpotLights.value];
   r.render(scene, camera);
   const st = r._tp.lights.state;
-  assert.deepEqual([st.point.length, st.spot.length, r._tp.shadows.length, r.info.render.lightsDropped], [10, 3, 2, 0], 'every light stays in the light state: the counts are the scene\'s own');
-  assert.equal(sent.length, 3, 'three programs, each translated by the host (glslang accepted the wrapped loops)');
+  assert.deepEqual([st.point.length, st.spot.length, r._tp.shadows.length], [10, 3, 2], 'three\'s light state has the lengths of the scene\'s list: the programs are the ones WebGLRenderer would pick');
+  assert.equal(r.info.render.lightsDropped, 11, 'the dark lights without a shadow are not set up or packed');
+  assert.deepEqual(counts(), [2, 0], 'in the light state: the dark shadow light (three puts shadow casters first) and the lamp');
+  assert.ok(st.point[0] && st.point[1] && st.point[2] === undefined && st.spot[0] === undefined, 'the rest are holes (packed as zeros)');
+  assert.equal(sent.length, 3, 'three programs, each translated by the host (glslang accepted the chains)');
   const lit = sent.filter((f) => f.includes('RE_Direct( directLight'));
   assert.equal(lit.length, 2, 'the two lit materials');
   for (const f of lit) {
-    for (let k = 0; k < 10; k++) assert.ok(f.includes(`if ( pointLights[ ${k} ].color != vec3( 0.0 ) ) {`), `point light ${k} is skipped when dark`);
-    for (let k = 0; k < 3; k++) assert.ok(f.includes(`if ( spotLights[ ${k} ].color != vec3( 0.0 ) ) {`), `spot light ${k} is skipped when dark`);
-    assert.equal(f.split(' ].color != vec3( 0.0 ) ) {').length - 1, 13, 'one branch per point / spot light, none for the directional light');
-    // each branch closes after its own RE_Direct, and the shadow lookup of a shadow-casting light is inside it
+    assert.ok(/\nuniform int frNumPointLights;\nuniform int frNumSpotLights;\nvoid main\(\) \{/.test(f), 'the counts are declared before main()');
+    for (let k = 0; k < 10; k++) assert.ok(f.includes(`if ( frNumPointLights > ${k} ) {\n\t\tif ( pointLights[ ${k} ].color != vec3( 0.0 ) ) {`), `point light ${k}: run when at least ${k + 1} are on and it is not dark`);
+    for (let k = 0; k < 3; k++) assert.ok(f.includes(`if ( frNumSpotLights > ${k} ) {\n\t\tif ( spotLights[ ${k} ].color != vec3( 0.0 ) ) {`), `spot light ${k}`);
+    assert.equal(f.split(' ].color != vec3( 0.0 ) ) {').length - 1, 13, 'one test per point / spot light, none for the directional light');
+    // each inner test closes after its own RE_Direct; the chain of a kind closes after its last block
     const blocks = f.split(/if \( (?:point|spot)Lights\[ \d+ \]\.color != vec3\( 0\.0 \) \) \{/).slice(1);
     for (const b of blocks) assert.ok(/^\s*(point|spot)Light = [\s\S]*?RE_Direct\( directLight,[^;]*;\n\s*\}/.test(b), 'if { light ... RE_Direct } with nothing else inside');
-    assert.ok(/if \( pointLights\[ 0 \]\.color != vec3\( 0\.0 \) \) \{[\s\S]*?getPointShadow[\s\S]*?RE_Direct/.test(f) === /getPointShadow\( pointShadowMap\[ 0 \]/.test(f), 'a shadow lookup stays inside its light\'s branch');
+    assert.ok(/RE_Direct\( directLight,[^;\n]*;\n\t\t\}\n\t\t\}{10}\n/.test(f) && /RE_Direct\( directLight,[^;\n]*;\n\t\t\}\n\t\t\}{3}\n/.test(f), 'the point chain closes its 10 levels, the spot chain its 3');
+    assert.ok(/if \( pointLights\[ 0 \]\.color != vec3\( 0\.0 \) \) \{[\s\S]*?getPointShadow[\s\S]*?RE_Direct/.test(f) === /getPointShadow\( pointShadowMap\[ 0 \]/.test(f), 'a shadow lookup stays inside its light\'s test');
   }
-  assert.ok(!sent.find((f) => !f.includes('RE_Direct( directLight')).includes('.color != vec3( 0.0 )'), 'an unlit program is untouched');
+  assert.ok(!sent.find((f) => !f.includes('RE_Direct( directLight')).includes('frNumPointLights'), 'an unlit program is untouched');
   assert.equal(r._tp.stats.darkSkipPrograms, 2);
-  // lights going on and off change uniforms, not programs: nothing is translated again
-  const n0 = sent.length, p0 = r._used.map((i) => i.program.id).join();
+  // the count reaches the uniform block: the program's layout has it, and the packed word is the count
+  const inst = r._used.find((i) => i.program.packer.uses.has('frNumPointLights'));
+  assert.ok(inst, 'the reflected layout has frNumPointLights');
+  const word = (name) => { const m = inst.program.layout.members.find((x) => x.name === name); return inst.program.lightBlock[m.offset >> 2]; };
+  assert.deepEqual([word('frNumPointLights'), word('frNumSpotLights')], [2, 0]);
+  // lights going on and off change uniforms, not programs: nothing is translated, no program is picked again
+  const n0 = sent.length, p0 = r._used.map((i) => i.program.id).join(), epoch0 = r._tp._epoch;
   for (let i = 0; i < 6; i++) { pads[i].intensity = 2; pads[i].color.set(0xffffff); }
   pads[9].intensity = 5; padShadow.intensity = 1; padShadow.color.set(0xffffff);
   r.render(scene, camera);
+  assert.deepEqual(counts(), [8, 1], '6 more lamps and the shadow light on, one spot');
+  assert.deepEqual([word('frNumPointLights'), word('frNumSpotLights')], [8, 1]);
+  assert.deepEqual([st.point.length, st.spot.length], [10, 3]);
   lamp.intensity = 0;
   for (let i = 0; i < 130; i++) r.render(scene, camera);
+  assert.deepEqual(counts(), [7, 1]);
   for (const p of pads) p.intensity = 0;
   for (let i = 0; i < 130; i++) r.render(scene, camera);
+  assert.deepEqual(counts(), [1, 0], 'only the shadow light left');
   assert.equal(sent.length, n0, 'no program translated when lights go on or off');
   assert.equal(r._used.map((i) => i.program.id).join(), p0, 'every material instance keeps its program');
-  // the text is three's own apart from the branches, and a source without three's light loop is returned as it is
+  assert.equal(r._tp._epoch, epoch0, 'and no material picked a program again (the scene\'s epoch did not move)');
+  // a light that enters or leaves the scene changes the scene's counts, as under WebGLRenderer
+  scene.remove(pads[0]);
+  r.render(scene, camera);
+  assert.deepEqual([st.point.length, sent.length - n0], [9, 3], 'one light fewer in the scene: every program is another one (three\'s cache key has the light counts for unlit materials too)');
+  scene.add(pads[0]);
+  // the text is three's own apart from the chains, and a source without three's light loop is returned as it is
   const plain = new FastRenderer({ host: makeHost(), programs: 'three', commandWords: 1 << 20, trimLights: false });
   plain.setSize(SIZE.width, SIZE.height); plain.shadowMap.enabled = true;
   plain.render(scene, camera);
   const three = plain._used.find((i) => i.program.fragment.includes('RE_Direct( directLight')).program.fragment;
   const wrapped = skipDarkLights(three);
-  assert.equal(wrapped.replace(/^[ \t]*if \( (?:point|spot)Lights\[ \d+ \]\.color != vec3\( 0\.0 \) \) \{\n/gm, '').replace(/(RE_Direct\( directLight,[^;\n]*;)\n[ \t]*\}/g, '$1'), three.replace(/(RE_Direct\( directLight,[^;\n]*;)\n[ \t]*\}/g, '$1'), 'removing the branches gives three\'s text back');
+  const strip = (f) => f.replace(/^uniform int frNum\w+;\n/gm, '').replace(/^[ \t]*if \( frNum(?:Point|Spot)Lights > \d+ \) \{\n/gm, '').replace(/^[ \t]*if \( (?:point|spot)Lights\[ \d+ \]\.color != vec3\( 0\.0 \) \) \{\n/gm, '').replace(/(RE_Direct\( directLight,[^;\n]*;)\n[ \t]*\}(\n[ \t]*\}+(?=\n))?/g, '$1');
+  assert.notEqual(wrapped, three);
+  assert.equal(strip(wrapped), strip(three), 'removing the chains gives three\'s text back');
   assert.equal(skipDarkLights('void main() { gl_FragColor = vec4( 1.0 ); }'), 'void main() { gl_FragColor = vec4( 1.0 ); }');
-  console.log(`[three r${REV}] dynamicLights: 10 point + 3 spot lights stay in the light state, each behind a branch on its own colour in ${lit.length} lit programs; lights on / off for 260 frames: 0 programs translated`);
+  // a shape that is not three's unrolled loop (a block missing: numbering does not start at 0) is left alone
+  const odd = three.replace(/^[ \t]*pointLight = pointLights\[ 0 \];/m, 'pointLight = pointLights[0];');
+  assert.equal(skipDarkLights(odd), odd);
+  console.log(`[three r${REV}] dynamicLights: programs for the scene's 10 point + 3 spot lights, ${lit.length} lit fragment stages run frNum*Lights of them (2 / 0, then 8 / 1, 7 / 1, 1 / 0); lights on / off for 260 frames: 0 programs translated, 0 picked again`);
 }
 
 // ------------------------------------------------------------------ 13b. a shadow keeps its SHADOWS id when trimLights moves its index
