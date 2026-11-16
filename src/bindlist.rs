@@ -835,10 +835,17 @@ pub fn instance_split_allowed(reads_instance_id: bool, hint: bool, frustum_culle
 /// - `replaces`: the material instance was on screen with these streams and got another program or pipeline state
 ///   (three compiles the light counts into every lit program: a light count that steps replaces them all at once, and
 ///   the lit scene would be gone for the frames the new ones take);
-/// - `samples_target`: the draw samples a render target (a post-processing output pass, a mirror: what the frame's
-///   offscreen passes rendered would not reach the screen);
+/// - `samples_target` in a pass of at most `COMPOSITE_PASS_DRAWS` draws: a post-processing output pass (what the
+///   frame's offscreen passes rendered would not reach the screen). In a pass of many draws a draw that samples a
+///   render target is an ordinary material: every lit material of a scene with an environment samples the PMREM
+///   target, and waiting for each as it streamed in held frames for seconds (docs/LOG.md 2026-11-16);
 /// - `pass_draws == 1`: the pass is one draw (a full-screen pass: without it the screen is its clear colour).
-pub fn main_draw_waits(replaces: bool, samples_target: bool, pass_draws: usize) -> bool { replaces || samples_target || pass_draws == 1 }
+pub fn main_draw_waits(replaces: bool, samples_target: bool, pass_draws: usize) -> bool {
+    replaces || pass_draws == 1 || (samples_target && pass_draws <= COMPOSITE_PASS_DRAWS)
+}
+
+/// The most draws a pass has for a draw that samples a render target to count as a compositing step (`main_draw_waits`).
+pub const COMPOSITE_PASS_DRAWS: usize = 4;
 
 /// Replacement pipelines required in one frame from which the change counts as "the whole lit scene" (`main_wait_ms`).
 pub const MAIN_WAIT_MANY: usize = 8;
@@ -893,6 +900,8 @@ mod tests {
         // a post-processing output pass: samples a render target / is the pass's only draw
         assert!(main_draw_waits(false, true, 3));
         assert!(main_draw_waits(false, false, 1));
+        // an env-mapped material streaming into a scene samples the PMREM target: first appearance, skipped
+        assert!(!main_draw_waits(false, true, 1500));
         // how long: one streamed material's new program holds a frame for half a frame at most, a whole scene's for
         // the limit, the harness (no limit) for as long as it takes
         assert_eq!(main_wait_ms(2, Some(250)), Some(8));

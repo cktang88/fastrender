@@ -155,7 +155,11 @@ Metal's binary archive (`src/pipeline_manifest.rs`, `src/mac_programs.rs`); `dyn
 compile nothing (entry 1). A pipeline that replaces one on screen holds the frame for at most half a frame when
 fewer than 8 are replaced at once (a streamed material that got a define: its draws are skipped until the pipeline
 arrives) and for at most 250 ms when many are (`bindlist::main_wait_ms`, `FASTRENDER_MAIN_WAIT_MS`, 0 = no limit);
-a full-screen pass is waited out. Switches: `FASTRENDER_PIPELINE_CACHE=off`, `FASTRENDER_ARCHIVE=0`.
+a full-screen pass (one draw, or a compositing pass of up to 4 draws that samples a render target) is waited out;
+a material seen for the first time is never waited for, env-mapped or not (it used to be: it samples the PMREM
+render target); a pipeline the render thread waits for goes to the front of the compile queue
+(`Compiler::hurry`). Capturing harnesses run blocking (`FASTRENDER_COMPILE=blocking`: the CLI bench, the Electron
+golden run). Switches: `FASTRENDER_PIPELINE_CACHE=off`, `FASTRENDER_ARCHIVE=0`.
 
 **Effect.** CI: real game cold first frame 38.9-53.6 s vs 12.1 s warm; three-city 1,750 ms blocking vs 394 ms
 async cold, 278 ms warm. Air: next launch compile 6.8 s -> 360 ms once the archive saved correctly.

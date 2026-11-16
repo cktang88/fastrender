@@ -69,6 +69,10 @@ if (play) {
 const costFrames = opt('cost-frames', '');
 const timeoutS = Number(opt('timeout', '900'));
 const params = JSON.parse(opt('params', '{}'));
+// The golden run captures frames: every program and pipeline is waited for where it is first needed, as the CLI's
+// golden / bench harness does (src/mac_programs.rs set_blocking_default), so the captured frame is complete however
+// long the compiles take. Play mode compiles in the background and skips what is not ready.
+if (!play && !process.env.FASTRENDER_COMPILE) process.env.FASTRENDER_COMPILE = 'blocking';
 const hitchMs = Number(opt('hitch-ms', '25')) || 25;
 const doors = play ? Number(opt('doors', '0')) : 0;
 

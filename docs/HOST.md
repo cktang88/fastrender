@@ -177,6 +177,7 @@ What `--play` changes against the golden run:
 | Clock, `Math.random`, `requestAnimationFrame` | virtual, seeded, stepped (`world-objects.drive.mjs`) | real (`game/dist/play-<variant>.js` has no driver) |
 | Window | frameless, fixed 1280x800, always on top | traffic lights over the game (`titleBarStyle: 'hidden'`; the top 24 points drag it), resizable, full screen (`ctrl-cmd-F`, `fn-F11`); default size = the screen's work area |
 | Permissions | all denied | pointer lock and fullscreen granted; the window takes the focus |
+| Shader / pipeline compile | waited for where first needed (`FASTRENDER_COMPILE=blocking` unless set): the captured frame is complete | in the background; a draw whose pipeline is not ready is skipped (docs/notes/gpu-cost.md) |
 | Renderer options | `{"scale":1,"upscale":"bilinear"}` | the same plus `"vsync":1` and `"gpu-passes":1` (GPU ms per pass group for the stall log); `--renderer '{...}'` is merged over them |
 | URL parameters | `?mode=world&quality=low&weather=clear&tod=noon&seamless=0` | `?mode=world&quality=low&seamless=0&nodyn` (the game's own time of day and weather); `--search` replaces them |
 | Capture, timeout, exit | golden PNG, JSON, exits | none; runs until the window closes |
