@@ -29,11 +29,14 @@ point/spot count far above what is visibly lit, `lines of main() per lit draw` i
 grep for `intensity = 0`, light pools, "budget". On hardware: row `alllights` vs `none`; `nolights` vs `none`
 bounds what the lit lights cost.
 
-**Fix.** `dynamicLights` (default on; `js/three-programs.js` `skipDarkLights`): the light list stays as the scene
-has it, so the counts in the programs are the game's own, and in the fragment stage each unrolled point / spot
-light block is wrapped in `if ( pointLights[ k ].color != vec3( 0.0 ) ) { ... }`. Exact: the colour uniform is
-colour x intensity and every term of the block is a product with it. A light going on or off changes a uniform, so
-**no program changes and nothing compiles**. Directional, hemisphere and rect-area lights are not wrapped.
+**Fix.** `dynamicLights` (default on; `js/three-programs.js` `skipDarkLights`, `_dropDark`, `_lightCounts`): the
+programs are compiled for the light counts of the scene's own list (what the game's padding keeps constant), and a
+uniform per kind (`frNumPointLights`, `frNumSpotLights`) says how many are on. Dark point / spot lights without a
+shadow or a map leave the list before three sets up its light state, the state's arrays get the list's lengths
+back (holes, packed as zeros), and the unrolled light blocks of the fragment stage become a chain
+`if ( frNumPointLights > k ) { if ( colour != 0 ) { block k } ...`. Exact: only blocks whose light colour is 0
+are skipped. A light going on or off changes uniforms, so **no program changes, no material picks a program
+again, nothing compiles**. Directional, hemisphere and rect-area lights are not touched.
 
 **The first fix, and its lesson.** `trimLights` (now behind `dynamicLights: false`) removes the dark lights from
 the light state instead. Same pixels, same GPU cost, but it undid what the padding was for: the counts step when a
@@ -49,8 +52,13 @@ test the transitions the game has (doors, time of day), not only the steady fram
 neither. Rows `trimlights` and `alllights`; play mode: `--params '{"dynamicLights":0}'`.
 
 **Effect.** Air, `trimLights`: main 42.88 -> 9.33 ms at 1280x800. node: programs translated over three door round
-trips 77 -> 11 with `dynamicLights` (the 11 are materials seen for the first time). CI and Air numbers for
-`dynamicLights` against `trimLights`: docs/LOG.md 2026-11-16 (`none` vs `trimlights` rows).
+trips 81 -> 12 with `dynamicLights` (the 12 are materials seen for the first time). CI (paravirtual GPU): the
+`leave` leg's main-pass wait 4.5-19.5 s -> none; main pass 16.8 (`trimLights`) vs 16.4 ms (`dynamicLights`), MAE 0
+between them. Air numbers for `dynamicLights`: not measured yet (docs/LOG.md 2026-11-16; rows `none` vs
+`trimlights`).
+A per-light colour test without the count (27 uniform branches per fragment) was tried first: same picture, but
++30 % main on CI and +10 ms JS in JavaScriptCore, because every light was still set up and packed. A uniform
+branch is not free when there are dozens per fragment; make the common case (no lamp on) one compare.
 
 **Detect a light-count hitch.** Node: `--door` (programs translated per leg; a leg back onto a street that was
 drawn before should bring about none). Play mode: `[hitch] ... pipeline wait: main pass` lines with `lights a -> b`

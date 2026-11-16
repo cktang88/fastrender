@@ -90,18 +90,24 @@ is what reaches the vertex stage. Its own estimate: a little lower than the 2.66
 Items 1-3 keep the picture; item 4 moves far geometry by about a pixel or less (CI's golden gates decide; see docs/LOG.md for the run).
 
 1. **Dark lights cost nothing: `dynamicLights` (the default since 2026-11-16), before that `trimLights`.**
-   `dynamicLights` (`js/three-programs.js` `skipDarkLights`): every light stays in three's light state, so the
-   light counts in the programs are the scene's own, and each unrolled point / spot light block of the fragment
-   stage sits behind `if ( pointLights[ k ].color != vec3( 0.0 ) )`. The colour uniform is colour x intensity and
-   every term of the block is a product with it, so a skipped block added exactly 0. The branch reads a uniform:
-   a dark light costs a load and a compare per fragment. **A light going on or off changes a uniform, not a
-   program**, so a game that pads its light list to a budget (this one) never recompiles at a door. Switches:
-   `FastRenderer({ dynamicLights: false })` / `host.params.dynamicLights = 0` -> `trimLights` as described next;
-   `trimLights: false` -> neither (as WebGLRenderer). Ablation rows `trimlights`, `alllights`.
+   `dynamicLights` (`js/three-programs.js` `skipDarkLights`, `_dropDark`, `_lightCounts`): the programs are
+   compiled for the light counts of the scene's own list, and a uniform per kind (`frNumPointLights`,
+   `frNumSpotLights`) says how many of them are on. Dark point / spot lights that cast no shadow and project no map
+   leave the list before `WebGLLights.setup` (so three neither sets them up nor packs them), three's light state is
+   then given the list's lengths back (the entries after the lit ones are holes, packed as zeros), and in the
+   fragment stage the unrolled blocks of a kind become a chain `if ( frNumPointLights > k ) { if ( pointLights[ k
+   ].color != vec3( 0.0 ) ) { block k } ...`. Only blocks whose light colour is exactly 0 are ever skipped, and
+   every term of a block is a product with that colour: the same picture. With no lamp on, a fragment pays one
+   compare per kind. **A light going on or off changes uniforms, not a program** (nor the scene's epoch: no
+   material picks a program again), so a game that pads its light list to a budget (this one) never recompiles at
+   a door. Switches: `FastRenderer({ dynamicLights: false })` / `host.params.dynamicLights = 0` -> `trimLights` as
+   described next; `trimLights: false` -> neither (as WebGLRenderer). Ablation rows `trimlights`, `alllights`.
    Why it replaced `trimLights` as the default: trimming made the counts step at every door, every lit program of
-   what was on screen was replaced, and the main pass waited for the pipelines: frames of 5 to 10 s
-   (docs/LOG.md 2026-11-16). GPU cost against `trimLights`: CI ratio in docs/LOG.md; **not timed on an Air yet**
-   (`scripts/gpu-ablate.sh`: `none` vs `trimlights`).
+   what was on screen was replaced, and the main pass waited for the pipelines: frames of 5 to 22 s on CI, 7-10 s
+   reported on an M2 Air (docs/LOG.md 2026-11-16). GPU cost against `trimLights`: CI ratio in docs/LOG.md; **not
+   timed on an Air yet** (`scripts/gpu-ablate.sh`: `none` vs `trimlights`).
+   A first form kept every light in three's light state and tested each block's colour (27 tests per fragment):
+   the same picture, but main 21 ms against `trimLights`' 16 on CI and 10 ms more JS in JavaScriptCore.
    **`trimLights`** (`js/three-programs.js` `_trimLights`, off unless `dynamicLights` is; `FastRenderer({ trimLights: false })` or
    `host.params.trimLights = 0` for neither). Point and spot lights whose colour x intensity is exactly 0 leave the
    light list before three's `WebGLLights` sees it. Every term such a light adds is `x * 0`, the lit lights keep their
@@ -219,7 +225,7 @@ Read the `gpu passes ... main` number of each row against `none`:
 | row | what it tells |
 |---|---|
 | `alllights` | the frame before `trimLights` (should reproduce ~57 ms); `alllights - none` = what the dark lights cost |
-| `trimlights` | `dynamicLights` off, `trimLights` on: what shipped before 2026-11-16. `none - trimlights` = what the per-light branches of `dynamicLights` cost (expected: within noise) |
+| `trimlights` | `dynamicLights` off, `trimLights` on: what shipped before 2026-11-16. `none - trimlights` = what the count uniform and its branches cost (CI: within noise, docs/LOG.md) |
 | `none` | what ships now. `[census]` lines: lights in the light state, draws and `main()` size per program |
 | `nofarlod` | the game's far LODs off (patches/0004): `nofarlod - none` = what they save; the `draws per pass` and `[census]` lines give the triangles of both |
 | `none@2048` | instanced draws whole: `none@2048 - none` = what drawing only the instances in view saves |

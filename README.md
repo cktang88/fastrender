@@ -63,8 +63,8 @@ renderer-side:
 - **Dark lights not evaluated (`trimLights`, since 2026-11-16 `dynamicLights`)**: the game pads its light list with
   27 intensity-0 point/spot lights; three evaluates every one for every lit pixel. Exact (same picture). Main pass
   41 -> 7.7 ms at 1280x800, 114 -> 9.9 ms at 2560x1600 (measured with `trimLights`, which drops them from three's
-  light state). `dynamicLights` keeps them in the programs behind a uniform branch instead, so a light going on
-  compiles nothing (no hitch at doors); its GPU ms on the Air are not measured yet. *Generic*: any three renderer
+  light state). `dynamicLights` keeps the programs' light counts at the scene's own and runs only the lights that are on (a count
+  uniform), so a light going on compiles nothing (no hitch at doors); its GPU ms on the Air are not measured yet. *Generic*: any three renderer
   can get the first form by hiding those lights.
 - **Per-instance culling of instanced draws** (runs of instances in view, base instance): ~2 ms. Needs the native
   side (three's WebGL2 path has no base-instance draw).

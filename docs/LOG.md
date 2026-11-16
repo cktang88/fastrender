@@ -2,6 +2,108 @@
 
 Short entries, newest first: what was tested, how, what came out.
 
+## 2026-11-16: the door hitch (7-10 s on an Air): trimLights stepped the light counts, the main pass waited for every replaced pipeline. dynamicLights (count uniform), bounded waits, and a stall log for play mode
+
+Report from an M2 Air in play mode (`play-world.sh --fps`, 2940x1846): "whenever I go into a new building there's a
+giant 7-10 s+ lag", and "giant drops and stutters every once in a while, but usually buttery smooth 60 fps".
+
+**Root cause, with evidence.** The game pads its light list with dark lights (`LIGHT_BUDGET`, src/lighting.ts) so
+that three's light counts never change between the street and the interiors. `trimLights` removed the padding. At
+a door the counts then stepped (0 -> 3 point lights in a shop), three picked another program for every lit
+material, and in Electron (no `lightHold`: that needs a host that can report compile progress) the main pass waited
+for each pipeline that replaced one on screen. Leaving was the expensive leg: the street was drawn with 3 kept
+dark lights for 120 frames (`TRIM_HOLD`), a count it had never had.
+
+- Node, real game, `--door` (in and out of two shops, the first twice): programs translated per leg
+  `trimlights`: 16 / 60 / 0 / 0 / 0 / 5; with neither switch (the game's own padding): 8 / 2 / 0 / 0 / 0 / 0.
+- macOS CI, play-smoke with `--doors 2` (paravirtual GPU, 2 compile workers, so every ms is larger than an Air's):
+
+  | run, commit | leg `leave sports` | `pipeline wait: main pass`, whole session |
+  |---|---|---|
+  | 43777107362, 4f392f2 (trimLights as shipped) | 5.72 s until the game let go; longest frame 5621 ms, main-pass wait; 64 programs | 6 frames, 24.3 s, longest 9.5 s |
+  | 43778439015, ef4a94b, `{"dynamicLights":0}`, `FASTRENDER_MAIN_WAIT_MS=0` | 4.28 s; longest frame 4523 ms, main-pass wait; 61 programs | 7 frames, 50.6 s, longest 22.3 s |
+  | 43782002528, 7bdb49c, the same switches, empty pipeline cache | 4.34 s; 57 programs | 2 frames, 21.8 s, longest 19.5 s |
+  | 43782002528, 7bdb49c, **what ships** (dynamicLights) | 2.02 s; longest frame 1644 ms, the page's JS; 4 programs | **none** (`main 0 / 0 ms`) |
+  | 43782002528, 7bdb49c, `{"dynamicLights":0}` with the wait limit (250 ms) | 1.21 s; 57 programs | 1 frame, 133 ms |
+
+  Stock WebGLRenderer on the same runner compiles in the frame as well: `enter sports` 27.6 s, `leave deli`
+  12.2 s (ANGLE on the paravirtual GPU; it has no light-count step, these are first uses).
+
+**What changed.**
+
+1. **`dynamicLights`, the default** (`js/three-programs.js` `skipDarkLights`, `_dropDark`, `_lightCounts`). The
+   programs keep the light counts of the scene's own list; a uniform per kind (`frNumPointLights`,
+   `frNumSpotLights`) says how many are on. Dark point / spot lights without a shadow or a map leave the list
+   before `WebGLLights.setup`, three's light state gets the list's lengths back (holes, packed as zeros), and the
+   unrolled light blocks of the fragment stage become a chain `if ( frNumPointLights > k ) { if ( colour != 0 )
+   { block k } ...`. A light going on or off changes uniforms: no program, no pipeline, and the scene's epoch does
+   not move (no material picks a program again). Switches: `dynamicLights: false` / `host.params.dynamicLights = 0`
+   = `trimLights` as before; `trimLights: false` = neither. Ablation rows `trimlights`, `alllights`.
+   Node, real game: the six door legs translate 8 / 2 / 0 / 0 / 0 / 2 programs (materials seen for the first
+   time), as with the game's own padding.
+2. **The main pass no longer holds a frame for seconds** (`src/bindlist.rs` `main_draw_waits`, `main_wait_ms`;
+   `src/mac_programs.rs` `wait_required`; `src/pipeline_manifest.rs` `hurry`, `wait_pipeline_until`):
+   - a material seen for the first time is never waited for. It was, when it sampled a render target, and every
+     lit material of a scene with an environment samples the PMREM target: the stall log showed `main 2 (1367
+     ms), 2 programs added` three times in 15 s of walking, and 28.6 s of main-pass waits in a session with
+     dynamicLights on (run 43778439015). Now only a pass of one draw, or of at most 4 draws that sample a target
+     (a compositing pass), is waited out;
+   - pipelines that replace ones on screen hold the frame for 8 ms when fewer than 8 are replaced at once (a
+     streamed block's material that got its CSM define a frame after its first draw), for 250 ms when more are
+     (`FASTRENDER_MAIN_WAIT_MS`; 0 = no limit); what is still compiling is skipped until it arrives;
+   - a pipeline the render thread waits for goes to the front of the compile queue (a shadow map's two pipelines
+     had waited 8.8 s behind the level's other programs);
+   - the Electron golden run compiles blocking (`FASTRENDER_COMPILE=blocking`, as CI's step already set).
+   Price: on a cold pipeline cache the level fills in over the first seconds instead of the window standing still
+   (CI, 2 workers, 0.3-0.5 s per stage library: the whole 60-80 s session; an Air has 4 workers and compiled the
+   whole game cold in 6.8 s before). The next launch prewarms from the manifest.
+3. **Stall log for play mode** (`src/hitch.rs`, `host/electron/native/src/fr_render.rs`, `game/boot.mjs`,
+   `game/main.js`; docs/HOST.md "Stall log"). Every frame over 25 ms is one `[hitch]` line, on the console and in
+   `host/electron/play-out/play-<time>-<variant>.log` (`last.log` = the latest): the frame interval, the render
+   thread's parts (pipelines waited for by reason, resources applied, compiles finished, draws skipped, archive
+   writes), the wait for the page, GPU ms per pass group, shadow and render-target passes, and the page's half (JS
+   ms, programs translated, canvas readbacks, uploads, render-target renders, light counts, a GC guess, the game's
+   events), with the largest part named. Summary at quit: p50 / p95 / p99 / max and the long frames per cause.
+   cmd-Q and Ctrl-C now end through `before-quit` (neither emits `window-all-closed`: the render thread was never
+   stopped and nothing was printed).
+4. **Play mode's other errors.** The four `Failed to load module script ... MIME type "text/plain"` were the
+   game's USDA parser pool (`new Worker(new URL('./usda/worker.ts', import.meta.url))`, 404): the game's three
+   module workers are now bundled and served as JavaScript (`scripts/bundle-game.mjs`, `game/main.js`); a script
+   the bundle lacks is named in the terminal. The refused first pointer-lock request is one line, not an
+   "unhandled rejection".
+
+**Same picture, same cost** (lights-ab run 43782002632, 7bdb49c; paravirtual GPU, so ratios only):
+
+| | result |
+|---|---|
+| real game golden, CLI (gate < 10) / three-city (gate < 1.0) | 6.58 / 0.97, as before |
+| the golden frame: dynamicLights vs trimLights / vs neither | MAE 0, 0 % of pixels differ / MAE 0, 0 % |
+| main pass, 40 frames, twice interleaved: neither / trimLights / dynamicLights | 51.6, 52.6 / 19.1, 14.4 / 17.5, 15.4 ms |
+
+A first form of dynamicLights kept every light in three's light state and tested each block's colour (27 uniform
+tests per fragment): also MAE 0, but main 21.7, 20.9 ms against trimLights' 15.9, 16.8 and JS 37 against 24-28 ms
+in JavaScriptCore (run 43779547972). The count uniform removed both.
+
+**Stutter suspects, as far as checked here.** Shadow-map re-renders, PMREM passes and uploads are in every
+`[hitch]` line (shadow passes, render-target passes and who asked, MB applied), so the Air's log will say which
+it is; on CI the frames with a cause other than the GPU and the page were waits (above) and resource applies at
+load. The binary archive is written on a compile worker, never on the render thread; a line says when one ran
+during a long frame. Not checked on hardware: everything in ms.
+
+**Verified.** `cargo test` (103; new: hitch records and causes, wait deadline, queue priority, wait policy), both
+crates type-check for `aarch64-apple-darwin`, `npm test` in js/ (r187 + r170; new section 13a), the addon's and
+the Electron host's tests, `--matrix-check 20 --walk 3,0` 0 differing; the `--webgl` play variant under xvfb here
+(stall log, workers, pointer lock, SIGINT summary). macOS: play-smoke and lights-ab above; mac.yml's goldens for
+this commit: see the next entry or the run's annotations.
+
+**Not measured.** The Air: door hitch after the fix, GPU ms of dynamicLights against trimLights, what
+`"gpu-passes": 1` (on in play, for the log) costs. One command:
+
+```bash
+git pull && host/electron/scripts/play-world.sh --fps     # walk through a few doors, quit with cmd-Q,
+                                                          # then send host/electron/play-out/last.log
+```
+
 ## 2026-11-15: attribution ladder: every generic method on the WebGL side (webgl-opt), fastrender's own off (fastrender-bare); not run on Metal yet
 
 Question from the Air result (fastrender 110 fps vs WebGL 7.6): generic methods or the native renderer? Answered by
